@@ -1,35 +1,36 @@
 const std = @import("std");
+
 const wayland = @import("wayland");
-const wl = wayland.client.wl;
 const river = wayland.client.river;
 
 const types = @import("types.zig");
 const Output = types.Output;
-const Workspace = types.Workspace;
-const Strip = types.Strip;
 const WindowManager = types.WindowManager;
 
-pub fn create(wm: *WindowManager, river_output: *river.OutputV1) !*Output {
-    const output = try wm.allocator.create(Output);
+pub fn create(
+    wm: *WindowManager,
+    river_out: *river.OutputV1,
+) !*Output {
+    const output = try wm.gpa.create(Output);
+
     output.* = .{
-        .wm = wm,
-        .river_output = river_output,
-        .workspaces = undefined,
+        .obj = river_out,
+        .link = undefined,
     };
 
-    for (&output.workspaces) |*ws| {
-        ws.* = .{
-            .output = output,
-            .strip = Strip.init(),
-        };
+    for (&output.workspaces, 0..) |*ws, i| {
+        ws.init(output, @intCast(i));
     }
 
-    wm.outputs.append(&output.link);
+    wm.outputs.append(output);
+
     return output;
 }
 
-pub fn switchWorkspace(output: *Output, index: usize) void {
-    if (index >= types.Config.workspace_count) return;
+pub fn switchWorkspace(output: *Output, index: u32) void {
+    if (index >= types.Config.workspace_count) {
+        return;
+    }
+
     output.active_workspace = index;
-    // Hide/Show Logik wird bei der Sichtbarkeits-Verdrahtung ergänzt
 }

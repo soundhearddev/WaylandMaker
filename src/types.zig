@@ -111,7 +111,7 @@ pub const Workspace = struct {
 
 pub const Output = struct {
     obj: *river.OutputV1,
-    river_layer_shell_output: ?*river.LayerShellOutputV1 = null,
+    river_layer_shell_output: ?*anyopaque = null,
     removed: bool = false,
     link: wl.list.Link,
 
@@ -267,7 +267,7 @@ pub const WindowManager = struct {
 
     obj: *river.WindowManagerV1,
     xkb_bindings: *river.XkbBindingsV1,
-    river_layer_shell: ?*river.LayerShellV1 = null,
+    river_layer_shell: ?*anyopaque = null,
 
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),

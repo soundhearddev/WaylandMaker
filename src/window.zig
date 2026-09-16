@@ -1,79 +1,118 @@
 const std = @import("std");
+
 const wayland = @import("wayland");
-const wl = wayland.client.wl;
 const river = wayland.client.river;
 
 const types = @import("types.zig");
+const layout = @import("layout.zig");
+
 const WindowManager = types.WindowManager;
 const Window = types.Window;
 const Column = types.Column;
 const Strip = types.Strip;
-const layout = @import("layout.zig");
 
-pub fn create(wm: *WindowManager, river_win: *river.WindowV1) !*Window {
-    const window = try wm.allocator.create(Window);
-    window.* = .{
-        .river_window = river_win,
+pub fn create(
+    wm: *WindowManager,
+    river_win: *river.WindowV1,
+    river_node: *river.NodeV1,
+) !*Window {
+    std.log.info("[WINDOW] Creating new window object", .{});
+
+    const win = try wm.gpa.create(Window);
+
+    win.* = .{
+        .obj = river_win,
+        .node = river_node,
+        .link = undefined,
+        .width = types.Config.default_column_width,
+        .height = 0,
     };
 
-    river_win.setListener(*Window, windowListener, window);
-    return window;
+    wm.windows.append(win);
+    river_win.setListener(*Window, windowListener, win);
+
+    return win;
 }
 
-pub fn manage(window: *Window, wm: *WindowManager) void {
-    window.is_managed = true;
-    window.river_window.useSsd();
+pub fn manage(win: *Window, wm: *WindowManager) void {
+    std.log.info("[WINDOW] manage() called", .{});
 
-    // Zuweisung zum Strip (vorerst erster Output)
-    if (wm.outputs.first()) |output_node| {
-        const output: *types.Output = @fieldParentPtr("link", output_node);
-        const workspace = output.getActiveWorkspace();
-        addWindowToStrip(&workspace.strip, window, wm.allocator);
+    win.new = false;
+    win.obj.useSsd();
+
+    if (wm.outputs.first()) |out| {
+        const workspace = out.activeWorkspace();
+
+        assignToStrip(&workspace.strip, win, wm.gpa);
+
+        const rect = out.usableRect();
+        layout.recomputeGeometry(&workspace.strip, rect);
+
+        std.log.info(
+            "[WINDOW] Assigned to strip. X: {}, Y: {}, W: {}, H: {}",
+            .{
+                win.x,
+                win.y,
+                win.width,
+                win.height,
+            },
+        );
+
+        win.obj.setPosition(win.x, win.y);
+        win.obj.proposeDimensions(win.width, win.height);
+    } else {
+        std.log.err("[WINDOW] No output available!", .{});
     }
 }
 
-pub fn addWindowToStrip(strip: *Strip, window: *Window, allocator: std.mem.Allocator) void {
-    const col = allocator.create(Column) catch return;
-    col.* = Column.init(strip);
+pub fn assignToStrip(
+    strip: *Strip,
+    win: *Window,
+    gpa: std.mem.Allocator,
+) void {
+    std.log.info(
+        "[STRIP] Adding window to a new column in the strip",
+        .{},
+    );
 
-    strip.columns.append(&col.link);
-    col.windows.append(&window.column_link);
-    window.column = col;
+    const col = gpa.create(Column) catch return;
+
+    col.* = .{
+        .strip = strip,
+        .link = undefined,
+        .windows = undefined,
+    };
+
+    col.windows.init();
+
+    strip.columns.append(col);
+    col.windows.append(win);
+    win.column = col;
 
     strip.active_column = col;
-    col.active_window = window;
 }
 
-pub fn removeWindow(strip: *Strip, window: *Window, allocator: std.mem.Allocator) void {
-    const column = window.column orelse return;
-    window.column_link.remove();
-    window.column = null;
-
-    if (column.isEmpty()) {
-        if (strip.active_column == column) {
-            strip.active_column = if (column.link.next != &strip.columns.link)
-                @fieldParentPtr("link", column.link.next.?)
-            else if (column.link.prev != &strip.columns.link)
-                @fieldParentPtr("link", column.link.prev.?)
-            else
-                null;
-        }
-        column.link.remove();
-        allocator.destroy(column);
-    }
-}
-
-fn windowListener(river_win: *river.WindowV1, event: river.WindowV1.Event, window: *Window) void {
+fn windowListener(
+    river_win: *river.WindowV1,
+    event: river.WindowV1.Event,
+    win: *Window,
+) void {
     _ = river_win;
-    _ = window;
+    _ = win;
 
     switch (event) {
         .manage => {
-            // Wird vom WindowManager Event-Handler aufgerufen
+            std.log.info(
+                "[EVENT] river_window_v1 -> manage",
+                .{},
+            );
         },
-        .destroy => {
-            // Cleanup
+
+        else => {
+            std.log.debug(
+                "[EVENT] Received river_window_v1 event",
+                .{},
+            );
         },
-        else => {},
     }
 }
