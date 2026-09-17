@@ -146,7 +146,6 @@ fn handleRenderStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
     while (out_it) |out| {
         const next_out = types.nextOutput(out);
 
-        // Skip unready outputs
         if (!out.isReady()) {
             out_it = next_out;
             continue;
@@ -155,7 +154,6 @@ fn handleRenderStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
         const ws = out.activeWorkspace();
         const rect = out.usableRect();
 
-        // Recalculate layout geometry
         layout.recomputeGeometry(&ws.strip, rect);
 
         var col_it = ws.strip.columns.first();

@@ -26,6 +26,11 @@ pub fn create(
         .link = undefined,
         .width = types.Config.default_column_width,
         .height = 0,
+        .x = 0,
+        .y = 0,
+        .new = true,
+        .ready = false,
+        .column = null,
     };
 
     wm.windows.append(win);
@@ -39,6 +44,14 @@ pub fn manage(win: *Window, wm: *WindowManager) void {
 
     win.new = false;
     win.obj.useSsd();
+
+    if (win.node == null) {
+        win.node = win.obj.getNode() catch |err| {
+            std.log.err("[WINDOW] Failed to get river node: {}", .{err});
+            return;
+        };
+        std.log.info("[WINDOW] Successfully obtained river node for window", .{});
+    }
 
     var target_width: i32 = types.Config.default_column_width;
     var target_height: i32 = 800;
@@ -55,6 +68,7 @@ pub fn manage(win: *Window, wm: *WindowManager) void {
 
         if (win.node) |node| {
             node.setPosition(win.x, win.y);
+            std.log.info("[WINDOW] Set node position to ({d}, {d})", .{ win.x, win.y });
         }
     } else {
         std.log.warn("[WINDOW] No bound output available. Using fallback layout dimensions ({d}x{d}).", .{ target_width, target_height });
@@ -118,7 +132,7 @@ fn windowListener(
             std.log.info("[WINDOW] Received dimensions: {d}x{d}", .{ dim.width, dim.height });
         },
         else => {
-            std.log.debug("[EVENT] Received river_window_v1 event for window {x}", .{@intFromPtr(win)});
+            std.log.debug("[EVENT] Received river_window_v1 event", .{});
         },
     }
 }
