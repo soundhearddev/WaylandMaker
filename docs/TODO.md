@@ -1,27 +1,32 @@
-# TODO.md / PLAN.md
+## TODO SOON!
 
-## Projektübersicht
-Entwicklung eines Wayland-Compositors in Zig auf Basis des **River-Protokolls** (via `river-window-management-v1`, `river_output_v1`, `river_seat_v1`), der Elemente eines klassischen Window Managers (ähnlich Window Maker) mit einem scrollbaren Tiling-Ansatz (inspiriert von `niri`) verbindet.
+- [ ] Fix keybind, Mod+4 input and declare default keybinds.
 
-## Phasen des Projekts
 
-### Phase 1: Minimaler Grundgerüst-Compositor (Erreicht)
-- [x] Build-Skript (`build.zig`) für Zig mit Wayland- und River-Client-Abhängigkeiten einrichten.
-- [x] Wayland-Display, Event-Loop und Registry-Binding für River-Komponenten initialisieren.
-- [x] Verbindung zum `river_window_manager_v1`-Protokoll herstellen.
-- [x] XDG-Shell / River-Window-Event-Listener für die Fensterverwaltung integrieren.
+## TODO
 
-### Phase 2: Eingabe und Ausgabegeräte (Outputs & Inputs)
-- [x] Ausgabe-Management (`river_output_v1`) zur Erkennung von Bildschirm-Koordinaten und Dimensionen einbinden.
-- [x] Eingabegeräte (`river_seat_v1` / `river_xkb_bindings_v1`) für Tastatur- und Maus-Interaktionen einbinden.
-- [ ] Fokus- und Event-Weiterleitung für aktive Fenster vervollständigen (`river_seat.focusWindow`).
+- [x] Set up the Zig build script (`build.zig`) with Wayland and River client dependencies.
 
-### Phase 3: Fenster-Layout und Scrollbares Tiling (Core Features)
-- [x] Datenstrukturen für Fenster, Columns, Strips und Workspaces aufbauen (`types.zig`).
-- [ ] Layout-Engine für scrollbares Tiling (Strip → Column → Window im niri-Stil) verfeinern.
-- [ ] Maus-Interaktionen (Verschieben, Resize) und Workspace-Sichtbarkeit implementieren.
+- [x] Initialize the Wayland display, event loop, and registry bindings for River components.
 
-### Phase 4: Dekorationen und Polish
-- [ ] Fenstertitel und Titelleisten (angelehnt an das klassische Window Maker Look & Feel) integrieren.
-- [ ] Konfiguration (ZON- oder strukturiertes Format) für Shortcuts und Layout-Parameter hinzufügen.
-- [ ] Stabilitätstests, Speicherbereinigung (GPA) und Performance-Optimierungen in Zig.
+- [x] Establish a connection to the `river_window_manager_v1` protocol.
+
+- [x] Integrate XDG-Shell / River window event listeners for window management.
+
+- [x] Integrate output management (`river_output_v1`) to detect screen coordinates and dimensions.
+
+- [x] Integrate input devices (`river_seat_v1` / `river_xkb_bindings_v1`) for keyboard and mouse interactions.
+
+- [ ] Complete focus handling and event forwarding for active windows (`river_seat.focusWindow`).
+
+- [x] Implement data structures for windows, columns, strips, and workspaces (`types.zig`).
+
+- [ ] Refine the layout engine for scrollable tiling (Strip → Column → Window, niri-style).
+
+- [ ] Implement mouse interactions (move, resize) and workspace visibility.
+
+- [ ] Integrate window titles and title bars inspired by the classic Window Maker look and feel.
+
+- [ ] Add configuration (ZON or another structured format) for keybindings and layout parameters.
+
+- [ ] Perform stability testing, memory management (GPA), and performance optimizations in Zig.
