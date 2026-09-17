@@ -1,21 +1,13 @@
 # WaylandMaker
 
-Wayland-Compositor in Zig, kombiniert River-Protokoll mit scrollbarem Tiling + Window-Maker-Elementen.
+Wayland compositor written in Zig, combining the River protocol with the goal to port windowmaker from x11 to wayland with some *small* adjustments.
 
 ## Features
 
-
+- SOON
 
 ## Build
 
 ```bash
 zig build
 ```
-
-Abhängigkeiten (via `build.zig.zon`): wayland, river-client
-
-
-
----
-
-*Inspired by Window Maker (X11), niri (Wayland), Rill (Wayland/Zig).*
