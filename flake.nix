@@ -8,6 +8,7 @@
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
+
       forAllSystems = f:
         nixpkgs.lib.genAttrs systems (system:
           f {
@@ -23,17 +24,14 @@
             zig
             llvmPackages.clang
 
+            pkg-config
             wayland
+            wayland-scanner
+            wayland-protocols
             libxkbcommon
 
             river
-            pkg-config
           ];
-
-          shellHook = ''
-            echo "wmaker-wl development shell"
-            echo "Zig: $(zig version)"
-          '';
         };
       });
     };
