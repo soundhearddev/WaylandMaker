@@ -114,7 +114,7 @@ fn riverWmListener(
     switch (event) {
         .window => |ev| {
             std.log.info("[RIVER] -> New window event received", .{});
-            _ = window_mod.create(wm, ev.id, ev.node) catch |err| {
+            _ = window_mod.create(wm, ev.id, null) catch |err| {
                 std.log.err("[WINDOW] Failed to create window: {}", .{err});
             };
         },

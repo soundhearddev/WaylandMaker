@@ -33,7 +33,7 @@ pub fn create(wm: *WindowManager, river_seat: *river.SeatV1) !*Seat {
     return seat;
 }
 
-fn setupBindings(wm: *WindowManager, seat: *Seat) void {
+pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     const xkb_mgr = wm.xkb_bindings orelse return;
 
     const BindingConfig = struct {
@@ -97,6 +97,11 @@ pub fn focus(seat: *Seat, win: ?*Window) void {
     if (win) |w| {
         seat.obj.focusWindow(w.obj);
     }
+}
+
+pub fn nextSeat(s: *Seat) ?*Seat {
+    const n = s.link.next orelse return null;
+    return @fieldParentPtr("link", n);
 }
 
 fn seatListener(river_seat: *river.SeatV1, event: river.SeatV1.Event, seat: *Seat) void {
