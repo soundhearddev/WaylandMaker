@@ -90,6 +90,10 @@ fn registryListener(
                 std.log.info("[REGISTRY] Binding river_seat_v1 (Name: {d})", .{global.name});
                 const river_seat = registry.bind(global.name, river.SeatV1, 1) catch return;
                 _ = seat.create(ctx.wm, river_seat) catch return;
+            } else if (std.mem.eql(u8, interface_name, std.mem.span(river.XkbBindingsV1.interface.name))) {
+                std.log.info("[REGISTRY] Binding river_xkb_bindings_v1", .{});
+                const xkb_bindings = registry.bind(global.name, river.XkbBindingsV1, 1) catch return;
+                ctx.wm.xkb_bindings = xkb_bindings;
             }
         },
         else => {},

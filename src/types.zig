@@ -13,19 +13,11 @@ const wl = wayland.client.wl;
 // ============================================================================
 
 pub const Config = struct {
-    /// Default width of a newly created column, in logical pixels.
     pub const default_column_width: i32 = 700;
-    /// Gap between columns, stacked windows, and output edges.
     pub const gap: i32 = 8;
-
-    // TMP
-    pub const mod: river.SeatV1.Modifiers = .{ .alt = true };
-
-    /// Number of numbered workspaces per output.
+    pub const mod: river.SeatV1.Modifiers = .{ .mod4 = true };
     pub const workspace_count: u32 = 4;
-    /// Terminal command to launch on mod+Return.
     pub const terminal_cmd = [_][]const u8{"foot"};
-
     pub const scroll_step: i32 = 200;
 };
 

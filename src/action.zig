@@ -15,7 +15,7 @@ pub fn handleAction(wm: *WindowManager, action: Action) void {
             std.process.exit(0);
         },
 
-        .focus_left => {
+        .focus_prev_column => {
             if (wm.outputs.first()) |out| {
                 const ws = out.activeWorkspace();
                 if (ws.strip.active_column) |col| {
@@ -29,7 +29,7 @@ pub fn handleAction(wm: *WindowManager, action: Action) void {
             }
         },
 
-        .focus_right => {
+        .focus_next_column => {
             if (wm.outputs.first()) |out| {
                 const ws = out.activeWorkspace();
                 if (ws.strip.active_column) |col| {
