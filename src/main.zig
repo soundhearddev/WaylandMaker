@@ -94,6 +94,12 @@ fn registryListener(
                 std.log.info("[REGISTRY] Binding river_xkb_bindings_v1", .{});
                 const xkb_bindings = registry.bind(global.name, river.XkbBindingsV1, 1) catch return;
                 ctx.wm.xkb_bindings = xkb_bindings;
+
+                // Setup bindings for any seats already created
+                var seat_it = ctx.wm.seats.first();
+                while (seat_it) |s| : (seat_it = seat.nextSeat(s)) {
+                    seat.setupBindings(ctx.wm, s);
+                }
             }
         },
         else => {},
@@ -108,7 +114,7 @@ fn riverWmListener(
     switch (event) {
         .window => |ev| {
             std.log.info("[RIVER] -> New window event received", .{});
-            _ = window_mod.create(wm, ev.id, null) catch |err| {
+            _ = window_mod.create(wm, ev.id, ev.node) catch |err| {
                 std.log.err("[WINDOW] Failed to create window: {}", .{err});
             };
         },
