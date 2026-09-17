@@ -17,12 +17,16 @@ pub const Config = struct {
     pub const default_column_width: i32 = 700;
     /// Gap between columns, stacked windows, and output edges.
     pub const gap: i32 = 8;
-    /// Primary modifier used for bindings ("Super"/"Mod4").
-    pub const mod: river.SeatV1.Modifiers = .{ .logo = true };
+
+    // TMP
+    pub const mod: river.SeatV1.Modifiers = .{ .alt = true };
+
     /// Number of numbered workspaces per output.
     pub const workspace_count: u32 = 4;
     /// Terminal command to launch on mod+Return.
     pub const terminal_cmd = [_][]const u8{"foot"};
+
+    pub const scroll_step: i32 = 200;
 };
 
 // ============================================================================

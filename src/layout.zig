@@ -42,13 +42,13 @@ pub fn scrollToColumn(strip: *Strip, target: *Column, output_width: i32) void {
     const col_left = target.strip_x;
     const col_right = col_left + target.width;
 
-    if (col_left < strip.scroll_x + Config.gap) {
-        strip.scroll_x = col_left - Config.gap;
-    } else if (col_right > strip.scroll_x + output_width - Config.gap) {
-        strip.scroll_x = col_right - output_width + Config.gap;
-    }
+    const margin = Config.gap * 2;
 
-    if (strip.scroll_x < 0) strip.scroll_x = 0;
+    if (col_left < strip.scroll_x + margin) {
+        strip.scroll_x = @max(0, col_left - margin);
+    } else if (col_right > strip.scroll_x + output_width - margin) {
+        strip.scroll_x = col_right - output_width + margin;
+    }
 }
 
 /// Snap back to 0 if total content width fits in output, eliminating dead space.

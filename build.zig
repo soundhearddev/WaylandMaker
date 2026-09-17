@@ -47,14 +47,17 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
 
-    // FIX FÜR GCC 16 / .sframe RELOCATION ERROR (R_X86_64_PC64):
-    // Zwingt Zig zur Verwendung des LLVM-Backends beim Verlinken mit der System-glibc/crt1.o
     exe.use_llvm = true;
 
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the window manager");
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\river -c "zig-out/bin/wmaker-wl"
+    });
+
+    run_cmd.step.dependOn(b.getInstallStep());
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
 }

@@ -75,21 +75,30 @@ pub fn assignToStrip(
     win: *Window,
     gpa: std.mem.Allocator,
 ) void {
-    std.log.info("[STRIP] Adding window to a new column in the strip", .{});
+    std.log.info("[STRIP] Inserting new column for window", .{});
 
     const col = gpa.create(Column) catch return;
-
     col.* = .{
         .strip = strip,
         .link = undefined,
         .windows = undefined,
     };
-
     col.windows.init();
-
-    strip.columns.append(col);
     col.windows.append(win);
     win.column = col;
+
+    if (strip.active_column) |active| {
+        if (active.link.next) |next_link| {
+            col.link.next = next_link;
+            col.link.prev = &active.link;
+            active.link.next = &col.link;
+            next_link.prev = &col.link;
+        } else {
+            strip.columns.append(col);
+        }
+    } else {
+        strip.columns.append(col);
+    }
 
     strip.active_column = col;
 }

@@ -8,6 +8,7 @@ const layout = @import("layout.zig");
 const window_mod = @import("window.zig");
 const output = @import("output.zig");
 const seat = @import("seat.zig");
+const action = @import("action.zig");
 
 const WindowManager = types.WindowManager;
 

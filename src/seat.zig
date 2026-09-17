@@ -23,7 +23,16 @@ pub fn create(wm: *WindowManager, river_seat: *river.SeatV1) !*Seat {
     wm.seats.append(seat);
     river_seat.setListener(*Seat, seatListener, seat);
 
+    setupBindings(wm, seat);
+
     return seat;
+}
+
+fn setupBindings(wm: *WindowManager, seat: *Seat) void {
+    if (wm.xkb_bindings) |xkb_mgr| {
+        _ = xkb_mgr;
+        _ = seat;
+    }
 }
 
 pub fn focus(seat: *Seat, win: ?*Window) void {

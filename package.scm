@@ -1,0 +1,11 @@
+(specifications->manifest
+  '(
+    "river"
+    "zig"
+    "wayland"
+    "wayland-protocols"
+    "libxkbcommon"
+    "pkg-config"
+    "libevdev"
+    "pixman"
+   ))
