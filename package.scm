@@ -6,7 +6,6 @@
     "river"
     "zig"
     "wayland"
-    "wayland:bin"       
     "wayland-protocols"
     "libxkbcommon"
     "pkg-config"
