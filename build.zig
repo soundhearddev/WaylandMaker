@@ -2,12 +2,6 @@
 //
 // Build script for our scrollable-tiling / Window Maker style river window
 // manager client.
-//
-// This mirrors tinyrwm's build.zig almost exactly (protocol scanning,
-// xkbcommon dependency, event-codes header), since it is the reference
-// implementation of a river-window-management-v1 client. We just renamed
-// the executable and kept the module wiring the same, so this should
-// build with the same `zig build` invocation tinyrwm uses.
 
 const std = @import("std");
 
@@ -18,8 +12,8 @@ pub fn build(b: *std.Build) void {
     const scanner = @import("wayland").Scanner.create(b, .{});
     scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
-    scanner.generate("river_window_manager_v1", 4);
-    scanner.generate("river_xkb_bindings_v1", 3);
+    scanner.generate("river_window_manager_v1", 6);
+    scanner.generate("river_xkb_bindings_v1", 1);
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 
     const xkbcommon = b.dependency("xkbcommon", .{}).module("xkbcommon");
@@ -35,27 +29,28 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "wayland", .module = wayland },
+            .{ .name = "xkbcommon", .module = xkbcommon },
+            .{ .name = "event-codes", .module = input_event_codes.createModule() },
+        },
+    });
+    exe_module.linkSystemLibrary("wayland-client", .{});
+    exe_module.linkSystemLibrary("xkbcommon", .{});
+
     const exe = b.addExecutable(.{
         .name = "wmaker-wl",
-        .use_llvm = true,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "wayland", .module = wayland },
-                .{ .name = "xkbcommon", .module = xkbcommon },
-                .{ .name = "event-codes", .module = input_event_codes.createModule() },
-            },
-        }),
+        .root_module = exe_module,
     });
 
+    // FIX FÜR GCC 16 / .sframe RELOCATION ERROR (R_X86_64_PC64):
+    // Zwingt Zig zur Verwendung des LLVM-Backends beim Verlinken mit der System-glibc/crt1.o
     exe.use_llvm = true;
-    exe.use_lld = true;
 
-    exe.entry = .disabled;
-
-    exe.root_module.linkSystemLibrary("wayland-client", .{});
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the window manager");

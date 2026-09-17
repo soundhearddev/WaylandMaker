@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: 0BSD
 //
 // Central data model: Output -> Workspace -> Strip -> Column -> Window,
-// plus Seat and the global WindowManager root.
-//
-// This mirrors rill's src/types.zig in spirit (one file, all shared
-// structs, no Wayland calls except the object pointers themselves) but
-// keeps our Window-Maker-flavored Strip/Column model instead of rill's
-// flat per-workspace window list. Layout math lives in layout.zig, not
-// here; this file only defines the shapes.
+// plus Seat, bindings, and the global WindowManager root.
 
 const std = @import("std");
 const wayland = @import("wayland");
@@ -19,18 +13,16 @@ const wl = wayland.client.wl;
 // ============================================================================
 
 pub const Config = struct {
-    /// Default width of a new column, in logical pixels. Real Window Maker /
-    /// niri configs make this adjustable per-column later; fixed for now.
+    /// Default width of a newly created column, in logical pixels.
     pub const default_column_width: i32 = 700;
-    /// Gap between columns, between stacked windows, and between the strip
-    /// and the output edges.
+    /// Gap between columns, stacked windows, and output edges.
     pub const gap: i32 = 8;
-    /// Modifier used for all bindings below. Mod4 == the "Windows/Super" key,
-    /// which is what Window Maker traditionally called "Mod1" in its own
-    /// numbering but corresponds to Super on modern layouts.
-    pub const mod: river.SeatV1.Modifiers = .{ .mod4 = true };
-    /// Number of Window-Maker-style numbered workspaces per output.
+    /// Primary modifier used for bindings ("Super"/"Mod4").
+    pub const mod: river.SeatV1.Modifiers = .{ .logo = true };
+    /// Number of numbered workspaces per output.
     pub const workspace_count: u32 = 4;
+    /// Terminal command to launch on mod+Return.
+    pub const terminal_cmd = [_][]const u8{"foot"};
 };
 
 // ============================================================================
@@ -41,17 +33,17 @@ pub const Column = struct {
     strip: *Strip,
     link: wl.list.Link,
 
-    /// Logical width of this column.
     width: i32 = Config.default_column_width,
-    /// Left edge of this column within the strip's own coordinate space
-    /// (i.e. before the strip's scroll offset is applied). Recomputed
-    /// whenever columns are added/removed/resized (layout.recomputeGeometry).
     strip_x: i32 = 0,
 
     windows: wl.list.Head(Window, .column_link),
 
     pub fn isEmpty(column: *Column) bool {
         return column.windows.empty();
+    }
+
+    pub fn focusedWindow(column: *Column) ?*Window {
+        return column.windows.last();
     }
 };
 
@@ -63,11 +55,10 @@ pub const Strip = struct {
     workspace: *Workspace,
 
     columns: wl.list.Head(Column, .link),
-    /// Currently focused column, if any window exists.
+    /// Currently focused column, if any.
     active_column: ?*Column = null,
 
-    /// Horizontal scroll offset, in logical pixels. 0 = first column's left
-    /// edge is flush with the output's left edge.
+    /// Horizontal scroll offset in logical pixels.
     scroll_x: i32 = 0,
 
     pub fn init(strip: *Strip, workspace: *Workspace) void {
@@ -78,13 +69,38 @@ pub const Strip = struct {
         strip.columns.init();
     }
 
-    /// The window that should carry keyboard focus for this strip: the
-    /// topmost (most recently focused) window in the active column.
-    pub fn focusedWindow(strip: *Strip) ?*Window {
+    /// The window that should carry keyboard focus for this strip.
+    pub fn focusedWindow(strip: *const Strip) ?*Window {
         const column = strip.active_column orelse return null;
-        return column.windows.last();
+        return column.focusedWindow();
+    }
+
+    pub fn columnCount(strip: *const Strip) u32 {
+        var count: u32 = 0;
+        var it = strip.columns.first();
+        while (it) |col| : (it = nextColumn(col)) count += 1;
+        return count;
     }
 };
+
+pub fn nextColumn(column: *Column) ?*Column {
+    const n = column.link.next orelse return null;
+    if (n == &column.strip.columns.link) return null;
+    return @fieldParentPtr("link", n);
+}
+
+pub fn prevColumn(column: *Column) ?*Column {
+    const p = column.link.prev orelse return null;
+    if (p == &column.strip.columns.link) return null;
+    return @fieldParentPtr("link", p);
+}
+
+pub fn nextWindowInColumn(win: *Window) ?*Window {
+    const column = win.column orelse return null;
+    const n = win.column_link.next orelse return null;
+    if (n == &column.windows.link) return null;
+    return @fieldParentPtr("column_link", n);
+}
 
 // ============================================================================
 // Workspace: Window-Maker-style numbered workspace, one Strip each
@@ -111,7 +127,6 @@ pub const Workspace = struct {
 
 pub const Output = struct {
     obj: *river.OutputV1,
-    river_layer_shell_output: ?*anyopaque = null,
     removed: bool = false,
     link: wl.list.Link,
 
@@ -119,9 +134,6 @@ pub const Output = struct {
     y: i32 = 0,
     width: i32 = 0,
     height: i32 = 0,
-    /// Usable area after layer-shell surfaces (bars, docks) reserve space.
-    /// Falls back to the full output rect until the compositor reports one.
-    non_exclusive: ?Rectangle = null,
 
     workspaces: [Config.workspace_count]Workspace = undefined,
     active_workspace: u32 = 0,
@@ -131,12 +143,16 @@ pub const Output = struct {
     }
 
     pub fn usableRect(output: *Output) Rectangle {
-        return output.non_exclusive orelse .{
-            .x = output.x,
-            .y = output.y,
-            .width = output.width,
-            .height = output.height,
-        };
+        return .{ .x = output.x, .y = output.y, .width = output.width, .height = output.height };
+    }
+
+    pub fn isReady(output: *const Output) bool {
+        return output.width > 0 and output.height > 0;
+    }
+
+    pub fn switchWorkspace(output: *Output, index: u32) void {
+        if (index >= Config.workspace_count) return;
+        output.active_workspace = index;
     }
 };
 
@@ -151,38 +167,27 @@ pub const Rectangle = struct {
 // Window
 // ============================================================================
 
-pub const PointerRequest = union(enum) {
-    move: struct { seat: *Seat },
-    resize: struct { seat: *Seat, edges: river.WindowV1.Edges },
-    none,
-};
-
 pub const Window = struct {
     obj: *river.WindowV1,
-    node: *river.NodeV1,
+    node: ?*river.NodeV1 = null,
     link: wl.list.Link,
 
     new: bool = true,
     closed: bool = false,
+    ready: bool = false,
 
-    /// Which column (if any) this window currently lives in. Null for
-    /// windows not yet assigned (shouldn't persist past manage()).
     column: ?*Column = null,
     column_link: wl.list.Link = undefined,
 
     x: i32 = 0,
     y: i32 = 0,
-    width: i32,
-    height: i32,
+    width: i32 = Config.default_column_width,
+    height: i32 = 0,
 
-    /// Window-Maker-style per-window attributes. Cheap to add, high
-    /// "feels like Window Maker" payoff. See docs/WMAKER_COMPAT.md.
     is_omnipresent: bool = false,
 
     app_id: ?[:0]const u8 = null,
     title: ?[:0]const u8 = null,
-
-    pointer_request: PointerRequest = .none,
 };
 
 // ============================================================================
@@ -233,7 +238,6 @@ pub const SeatOp = union(enum) {
         start_y: i32,
         start_width: i32,
         start_height: i32,
-        edges: river.WindowV1.Edges = .{},
     },
 };
 
@@ -258,18 +262,30 @@ pub const Seat = struct {
 };
 
 // ============================================================================
-// Window manager root
+// Window Manager Root
 // ============================================================================
 
 pub const WindowManager = struct {
     gpa: std.mem.Allocator,
-    io: std.Io,
 
-    obj: *river.WindowManagerV1,
-    xkb_bindings: *river.XkbBindingsV1,
-    river_layer_shell: ?*anyopaque = null,
+    obj: ?*river.WindowManagerV1 = null,
+    xkb_bindings: ?*river.XkbBindingsV1 = null,
 
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),
     seats: wl.list.Head(Seat, .link),
+
+    pending_windows: std.ArrayList(*Window) = .empty,
+    needs_layout: bool = true,
 };
+
+pub fn nextWindow(win: *Window, wm: *WindowManager) ?*Window {
+    const n = win.link.next orelse return null;
+    if (n == &wm.windows.link) return null; // Prevents infinite loops
+    return @fieldParentPtr("link", n);
+}
+
+pub fn nextOutput(out: *Output) ?*Output {
+    const n = out.link.next orelse return null;
+    return @fieldParentPtr("link", n);
+}

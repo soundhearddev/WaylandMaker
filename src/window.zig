@@ -1,10 +1,10 @@
 const std = @import("std");
-
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
 const types = @import("types.zig");
 const layout = @import("layout.zig");
+const seat = @import("seat.zig");
 
 const WindowManager = types.WindowManager;
 const Window = types.Window;
@@ -14,7 +14,7 @@ const Strip = types.Strip;
 pub fn create(
     wm: *WindowManager,
     river_win: *river.WindowV1,
-    river_node: *river.NodeV1,
+    river_node: ?*river.NodeV1,
 ) !*Window {
     std.log.info("[WINDOW] Creating new window object", .{});
 
@@ -35,33 +35,38 @@ pub fn create(
 }
 
 pub fn manage(win: *Window, wm: *WindowManager) void {
-    std.log.info("[WINDOW] manage() called", .{});
+    std.log.info("[WINDOW] Managing window...", .{});
 
     win.new = false;
     win.obj.useSsd();
 
+    var target_width: i32 = types.Config.default_column_width;
+    var target_height: i32 = 800;
+
     if (wm.outputs.first()) |out| {
         const workspace = out.activeWorkspace();
-
         assignToStrip(&workspace.strip, win, wm.gpa);
 
         const rect = out.usableRect();
         layout.recomputeGeometry(&workspace.strip, rect);
 
-        std.log.info(
-            "[WINDOW] Assigned to strip. X: {}, Y: {}, W: {}, H: {}",
-            .{
-                win.x,
-                win.y,
-                win.width,
-                win.height,
-            },
-        );
+        if (rect.height > 0) target_height = rect.height;
+        if (win.width > 0) target_width = win.width;
 
-        win.obj.setPosition(win.x, win.y);
-        win.obj.proposeDimensions(win.width, win.height);
+        if (win.node) |node| {
+            node.setPosition(win.x, win.y);
+        }
     } else {
-        std.log.err("[WINDOW] No output available!", .{});
+        std.log.warn("[WINDOW] No bound output available. Using fallback layout dimensions ({d}x{d}).", .{ target_width, target_height });
+    }
+
+    win.height = target_height;
+    win.width = target_width;
+
+    win.obj.proposeDimensions(win.width, win.height);
+
+    if (wm.seats.first()) |s| {
+        seat.focus(s, win);
     }
 }
 
@@ -70,10 +75,7 @@ pub fn assignToStrip(
     win: *Window,
     gpa: std.mem.Allocator,
 ) void {
-    std.log.info(
-        "[STRIP] Adding window to a new column in the strip",
-        .{},
-    );
+    std.log.info("[STRIP] Adding window to a new column in the strip", .{});
 
     const col = gpa.create(Column) catch return;
 
@@ -98,21 +100,16 @@ fn windowListener(
     win: *Window,
 ) void {
     _ = river_win;
-    _ = win;
 
     switch (event) {
-        .manage => {
-            std.log.info(
-                "[EVENT] river_window_v1 -> manage",
-                .{},
-            );
+        .dimensions => |dim| {
+            win.width = dim.width;
+            win.height = dim.height;
+            win.ready = true;
+            std.log.info("[WINDOW] Received dimensions: {d}x{d}", .{ dim.width, dim.height });
         },
-
         else => {
-            std.log.debug(
-                "[EVENT] Received river_window_v1 event",
-                .{},
-            );
+            std.log.debug("[EVENT] Received river_window_v1 event for window {x}", .{@intFromPtr(win)});
         },
     }
 }
