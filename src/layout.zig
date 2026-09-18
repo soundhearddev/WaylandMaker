@@ -1,194 +1,125 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: 0BSD
 //
-// Layout engine: computes window dimensions and positions, then applies them
-// to the river compositor. Handles cleanup of closed windows and performs
-// the actual tiling calculations.
+// Pure geometry for the scrollable strip. No Wayland calls happen here:
+// callers (main.zig) turn the x/y/width/height this leaves on every Window
+// into propose_dimensions / node.set_position requests.
+//
+// Coordinates:
+//   strip_x  - position inside the endless strip (0 = left edge of first col)
+//   win.x/y  - final position on the *output* (already minus scroll_x, plus
+//              the output's own origin)
 
 const std = @import("std");
-const wayland = @import("wayland");
-const river = wayland.client.river;
 
 const types = @import("types.zig");
-
-const WindowManager = types.WindowManager;
+const Strip = types.Strip;
+const Column = types.Column;
 const Window = types.Window;
+const Rectangle = types.Rectangle;
 const Config = types.Config;
 
-// ============================================================================
-// Layout computation: called by windowManagerListener when manage_start fires
-// ============================================================================
-
-/// Called when river_window_manager_v1 sends .manage_start event.
-/// This is the hook point where we:
-/// 1. Remove any windows that have closed since the last manage_start
-/// 2. Compute layout for all remaining windows
-/// 3. Tell the compositor about dimensions and tiling state
-/// 4. Finish the manage operation
-///
-/// Does not modify the windows list, only window.width/height and their
-/// obj.proposeDimensions()/setTiled() properties.
-pub fn manage(manager: *WindowManager) void {
-    // First pass: clean up any closed windows to get accurate count
-    removeClosedWindows(manager);
-
-    const window_count = manager.windowCount();
-
-    std.log.info("[LAYOUT] manage_start: {d} windows to layout", .{window_count});
-
-    if (window_count == 0) {
-        // No windows to manage. Still need to call manageFinish() to close
-        // the manage_start transaction.
-        manager.obj.manageFinish();
-        return;
-    }
-
-    // Compute layout: evenly divide output width by window count.
-    // Each window gets output_height as its full height.
-    const window_width = @divTrunc(
-        Config.output_width,
-        @as(i32, @intCast(window_count)),
-    );
-    const window_height = Config.output_height;
-
-    std.log.info(
-        "[LAYOUT] proposing dimensions: {d}x{d} per window",
-        .{ window_width, window_height },
-    );
-
-    // Walk the window list and tell each window its proposed size.
-    // Also mark them as tiled (not floating).
-    var current = manager.windows.first;
-    while (current) |window| {
-        // Save the computed dimensions so we can use them in render()
-        window.width = window_width;
-        window.height = window_height;
-
-        // Tell river what size this window should be
-        window.obj.proposeDimensions(window_width, window_height);
-
-        // Mark this window as tiled (all edges), so river knows it's part
-        // of the tiling layout and not floating/fullscreen/etc.
-        window.obj.setTiled(.{
-            .top = true,
-            .bottom = true,
-            .left = true,
-            .right = true,
-        });
-
-        current = window.next;
-    }
-
-    // Signal to river that we're done proposing changes for this manage_start
-    manager.obj.manageFinish();
+/// Width of a newly created column for an output `usable_width` wide.
+pub fn defaultColumnWidth(usable_width: i32) i32 {
+    const avail: f64 = @floatFromInt(@max(0, usable_width - Config.gap * 2));
+    const w: i32 = @intFromFloat(avail * Config.default_column_width_fraction);
+    return @max(Config.min_column_width, w);
 }
 
-// ============================================================================
-// Position assignment: called by windowManagerListener when render_start fires
-// ============================================================================
-
-/// Called when river_window_manager_v1 sends .render_start event.
-/// This is the hook point where we:
-/// 1. Compute the X position for each window (left-to-right tiling)
-/// 2. Tell the compositor where to position each window on the output
-/// 3. Finish the render operation (tells river the layout is complete)
-///
-/// Window dimensions should already be set by manage(). This only assigns
-/// X,Y positions.
-pub fn render(manager: *WindowManager) void {
-    const window_count = manager.windowCount();
-
-    std.log.info("[LAYOUT] render_start: positioning {d} windows", .{window_count});
-
-    if (window_count == 0) {
-        manager.obj.renderFinish();
-        return;
-    }
-
-    // Use the first window's width (all should be equal from manage())
-    // as the stride. If somehow it's zero, compute it fresh.
-    const window_width = blk: {
-        if (manager.windows.first) |first| {
-            if (first.width > 0) {
-                break :blk first.width;
-            }
-        }
-        break :blk @divTrunc(
-            Config.output_width,
-            @as(i32, @intCast(window_count)),
-        );
-    };
-
-    var index: i32 = 0;
-    var current = manager.windows.first;
-
-    while (current) |window| {
-        // Compute x position: index * window_width (left-to-right)
-        const x = index * window_width;
-        const y: i32 = 0; // Always at top of output
-
-        // Update our cached position
-        window.x = x;
-        window.y = y;
-
-        // Tell river where to render this window
-        if (window.node) |node| {
-            node.setPosition(x, y);
-        } else {
-            std.log.warn(
-                "[LAYOUT] window {d} has no node, skipping setPosition",
-                .{index},
-            );
-        }
-
-        index += 1;
-        current = window.next;
-    }
-
-    std.log.debug("[LAYOUT] positioned {d} windows", .{index});
-
-    // Signal to river that we're done positioning windows
-    manager.obj.renderFinish();
+/// Width of a column for a given fraction of the usable width.
+pub fn widthForFraction(usable_width: i32, fraction: f64) i32 {
+    const avail: f64 = @floatFromInt(@max(0, usable_width - Config.gap * 2));
+    const w: i32 = @intFromFloat(avail * fraction);
+    return @max(Config.min_column_width, w);
 }
 
-// ============================================================================
-// Internal: cleanup of closed windows
-// ============================================================================
+/// Total width of all columns including the outer gaps.
+pub fn contentWidth(strip: *Strip) i32 {
+    var total: i32 = Config.gap;
+    var it = strip.columns.first();
+    while (it) |col| : (it = types.nextColumn(col)) {
+        total += col.width + Config.gap;
+    }
+    return total;
+}
 
-/// Scan the windows list for any marked .closed and remove them.
-/// This is called at the start of manage() to ensure layout operates on
-/// the actual current window set.
+/// Compute strip_x for every column. Must run before scrolling math.
+fn assignStripX(strip: *Strip) void {
+    var x: i32 = Config.gap;
+    var it = strip.columns.first();
+    while (it) |col| : (it = types.nextColumn(col)) {
+        col.strip_x = x;
+        x += col.width + Config.gap;
+    }
+}
+
+/// Keep the viewport inside [0, content - viewport]. If everything fits on
+/// screen the strip is pinned to the left edge (no dead space).
+pub fn clampScroll(strip: *Strip, viewport_width: i32) void {
+    const content = contentWidth(strip);
+    if (content <= viewport_width) {
+        strip.scroll_x = 0;
+        return;
+    }
+    const max_scroll = content - viewport_width;
+    strip.scroll_x = std.math.clamp(strip.scroll_x, 0, max_scroll);
+}
+
+/// niri-style "follow focus": scroll the *minimum* amount that brings the
+/// whole column into view. If it is already fully visible, nothing moves.
+/// If the column is wider than the viewport, its left edge is aligned.
+pub fn scrollToColumn(strip: *Strip, target: *Column, viewport_width: i32) void {
+    assignStripX(strip);
+
+    const left = target.strip_x - Config.gap;
+    const right = target.strip_x + target.width + Config.gap;
+
+    if (target.width + Config.gap * 2 >= viewport_width) {
+        strip.scroll_x = left;
+    } else if (left < strip.scroll_x) {
+        strip.scroll_x = left;
+    } else if (right > strip.scroll_x + viewport_width) {
+        strip.scroll_x = right - viewport_width;
+    }
+    clampScroll(strip, viewport_width);
+}
+
+/// Height of one window in a column stacked with `count` windows.
+pub fn windowHeight(count: i32, total_height: i32) i32 {
+    if (count <= 0) return total_height;
+    const total_gaps = (count - 1) * Config.gap;
+    return @max(1, @divTrunc(total_height - total_gaps, count));
+}
+
+/// Recompute strip_x per column and x/y/width/height per window.
 ///
-/// A window is marked .closed when it emits a .closed event from river.
-/// We defer actual removal (destroy + free) to here so we don't mutate
-/// the windows list while iterating event handlers.
-fn removeClosedWindows(manager: *WindowManager) void {
-    var current = manager.windows.first;
+/// Sizes account for the border: river's dimensions refer to the *content*
+/// only and borders are drawn on top, so the content is shrunk by the
+/// border width on each side to keep the visual box inside its slot.
+pub fn recomputeGeometry(strip: *Strip, usable: Rectangle) void {
+    assignStripX(strip);
+    clampScroll(strip, usable.width);
 
-    var removed_count: usize = 0;
+    const bw = Config.border_width;
 
-    while (current) |window| {
-        // Grab next before we potentially remove current
-        const next = window.next;
+    var col_it = strip.columns.first();
+    while (col_it) |col| : (col_it = types.nextColumn(col)) {
+        const count = col.windowCount();
+        const slot_h = windowHeight(count, usable.height - Config.gap * 2);
 
-        if (window.closed) {
-            std.log.info("[LAYOUT] removing closed window", .{});
+        var y: i32 = usable.y + Config.gap;
 
-            // Remove from list
-            manager.windows.remove(window);
-
-            // Clean up river resources
-            window.obj.destroy();
-
-            // Free the Window struct itself
-            manager.allocator.destroy(window);
-
-            removed_count += 1;
+        var win_it = col.windows.first();
+        while (win_it) |win| : (win_it = types.nextWindowInColumn(win)) {
+            win.x = usable.x + col.strip_x - strip.scroll_x + bw;
+            win.y = y + bw;
+            win.width = @max(1, col.width - bw * 2);
+            win.height = @max(1, slot_h - bw * 2);
+            y += slot_h + Config.gap;
         }
-
-        current = next;
     }
+}
 
-    if (removed_count > 0) {
-        std.log.info("[LAYOUT] cleaned up {d} closed windows", .{removed_count});
-    }
+/// True if the window's slot is completely outside the viewport.
+pub fn isOffscreen(win: *const Window, usable: Rectangle) bool {
+    return win.x + win.width <= usable.x or win.x >= usable.x + usable.width;
 }

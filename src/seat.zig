@@ -1,179 +1,234 @@
+// SPDX-License-Identifier: 0BSD
+//
+// river_seat_v1 lifecycle and keybindings.
+//
+// WHY KEYBINDS NEVER WORKED BEFORE (all three had to be fixed):
+//   1. river_xkb_bindings_v1 was never bound in main.zig and its protocol
+//      XML was never scanned in build.zig -> there was no object to create
+//      a binding with at all.
+//   2. get_xkb_binding takes an xkbcommon *keysym*, not a Linux evdev
+//      KEY_* code. Keysyms for letters/digits equal their ASCII value, but
+//      Return, arrows, Home/End, ... do not. The table below uses the real
+//      XKB_KEY_* values from xkbcommon-keysyms.h.
+//   3. `enable` may only be sent inside a manage sequence. Bindings are
+//      therefore created here but enabled from main.zig's manage_start.
+
 const std = @import("std");
 const wayland = @import("wayland");
 const river = wayland.client.river;
-const linux = @import("event-codes");
 
 const types = @import("types.zig");
-const action = @import("action.zig");
 
 const Seat = types.Seat;
-const Window = types.Window;
 const WindowManager = types.WindowManager;
 const Action = types.Action;
 const XkbBinding = types.XkbBinding;
+const Config = types.Config;
+const Modifiers = river.SeatV1.Modifiers;
 
 pub fn create(wm: *WindowManager, river_seat: *river.SeatV1) !*Seat {
     const seat = try wm.gpa.create(Seat);
-
     seat.* = .{
         .obj = river_seat,
         .link = undefined,
         .xkb_bindings = undefined,
-        .pointer_bindings = undefined,
+        // Bindings are created + enabled from manage_start.
+        .needs_binding_setup = true,
     };
-
     seat.xkb_bindings.init();
-    seat.pointer_bindings.init();
 
     wm.seats.append(seat);
-    river_seat.setListener(*Seat, seatListener, seat);
-
-    // IMPORTANT: bindings are *not* set up here. get_xkb_binding is fine
-    // to call any time, but the enable() request it needs (see bindOne
-    // below) "may only be made as part of a manage sequence" per the
-    // protocol, and create() runs from the registry listener, before the
-    // first manage_start has even been received. Setting up bindings here
-    // used to silently violate that ordering. Instead we flag the seat as
-    // needing setup and main.zig's manage_start handler calls
-    // setupBindings() for every such seat once we're actually inside a
-    // manage sequence.
-    seat.needs_binding_setup = true;
-
+    river_seat.setListener(*WindowManager, listener, wm);
     return seat;
 }
 
-/// Must only be called from within a manage sequence (i.e. from
-/// main.zig's manage_start handler) -- see the comment in create() above.
-pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
-    seat.needs_binding_setup = false;
-
-    const xkb_mgr = wm.xkb_bindings orelse return;
-
-    const BindingConfig = struct {
-        key: u32,
-        action: Action,
-    };
-
-    // NOTE: previously this list only bound exit/focus_prev_column/
-    // focus_next_column, so mod+Return (and mod+1..4, mod+C, ...) were
-    // never even registered with river -- the key press had nowhere to
-    // go. get_xkb_binding takes an xkbcommon *keysym*, not a Linux
-    // KEY_* evdev code -- see keycodeToXkbKeysym below for the mapping
-    // used for plain letters/digits, and xkb_keysym_return further down
-    // for why Return specifically needs a real keysym constant instead.
-    const bindings = [_]BindingConfig{
-        .{ .key = linux.KEY_Q, .action = .exit },
-        .{ .key = linux.KEY_H, .action = .focus_prev_column },
-        .{ .key = linux.KEY_L, .action = .focus_next_column },
-        .{ .key = linux.KEY_J, .action = .focus_next_window },
-        .{ .key = linux.KEY_C, .action = .close },
-        .{ .key = linux.KEY_O, .action = .toggle_omnipresent },
-        .{ .key = linux.KEY_1, .action = .workspace_1 },
-        .{ .key = linux.KEY_2, .action = .workspace_2 },
-        .{ .key = linux.KEY_3, .action = .workspace_3 },
-        .{ .key = linux.KEY_4, .action = .workspace_4 },
-    };
-
-    for (bindings) |b| {
-        bindOne(wm, xkb_mgr, seat, keycodeToXkbKeysym(b.key), b.action);
+fn find(wm: *WindowManager, river_seat: *river.SeatV1) ?*Seat {
+    var it = wm.seats.first();
+    while (it) |s| : (it = types.nextSeat(s, wm)) {
+        if (s.obj == river_seat) return s;
     }
-
-    // mod+Return: spawn a terminal. XKB_KEY_Return (0xff0d) is an
-    // xkbcommon *keysym*, unrelated to the evdev KEY_ENTER numeric value
-    // (28) in event-codes.zig -- binding KEY_ENTER directly, as if it
-    // were a keysym, is the actual reason mod+Return never fired.
-    bindOne(wm, xkb_mgr, seat, xkb_keysym_return, .spawn_terminal);
+    return null;
 }
 
-/// XKB_KEY_Return from <xkbcommon/xkbcommon-keysyms.h>. Pulled in as a
-/// bare constant (rather than xkbcommon.Keysym.fromName at runtime,
-/// which rill uses for its fully data-driven config) since we only need
-/// this one fixed binding for now; see docs/TODO.md for switching the
-/// rest of the table over to keysym names too.
-const xkb_keysym_return: u32 = 0xff0d;
-
-/// evdev KEY_* codes (from linux/input-event-codes.h, i.e. our
-/// `event-codes` module) happen to equal the corresponding xkbcommon
-/// keysym for the small set of alphanumeric keys used above (letters and
-/// digits 1-4 map 1:1 in both numbering schemes in the ranges we use
-/// here), so a straight passthrough is correct for those specific keys.
-/// It is NOT correct in general (Return, Escape, function keys, etc் all
-/// differ) -- do not extend this table blindly, use real keysym values
-/// (see xkb_keysym_return above) for anything outside plain letters/digits.
-fn keycodeToXkbKeysym(evdev_key: u32) u32 {
-    return switch (evdev_key) {
-        linux.KEY_1 => '1',
-        linux.KEY_2 => '2',
-        linux.KEY_3 => '3',
-        linux.KEY_4 => '4',
-        linux.KEY_Q => 'q',
-        linux.KEY_H => 'h',
-        linux.KEY_J => 'j',
-        linux.KEY_L => 'l',
-        linux.KEY_C => 'c',
-        linux.KEY_O => 'o',
-        else => evdev_key,
-    };
-}
-
-fn bindOne(wm: *WindowManager, xkb_mgr: *river.XkbBindingsV1, seat: *Seat, keysym: u32, act: Action) void {
-    const xkb_binding = xkb_mgr.getXkbBinding(
-        seat.obj,
-        keysym,
-        types.Config.mod,
-    ) catch |err| {
-        std.log.err("[SEAT] Failed to create xkb binding for keysym {x}: {}", .{ keysym, err });
-        return;
-    };
-
-    const binding_node = wm.gpa.create(XkbBinding) catch return;
-    binding_node.* = .{
-        .obj = xkb_binding,
-        .seat = seat,
-        .action = act,
-        .link = undefined,
-    };
-    seat.xkb_bindings.append(binding_node);
-
-    const ctx = wm.gpa.create(BindingContext) catch return;
-    ctx.* = .{ .wm = wm, .action = act };
-
-    xkb_binding.setListener(*BindingContext, xkbBindingListener, ctx);
-    xkb_binding.enable();
-}
-
-const BindingContext = struct {
-    wm: *WindowManager,
-    action: Action,
-};
-
-fn xkbBindingListener(
-    xkb_binding: *river.XkbBindingV1,
-    event: river.XkbBindingV1.Event,
-    ctx: *BindingContext,
-) void {
-    _ = xkb_binding;
+fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowManager) void {
+    const seat = find(wm, river_seat) orelse return;
     switch (event) {
-        .pressed => {
-            action.handleAction(ctx.wm, ctx.action);
+        .removed => {
+            seat.removed = true;
+        },
+        .window_interaction => |ev| {
+            // Click-to-focus: an interaction moves focus to that window.
+            var it = wm.windows.first();
+            while (it) |w| : (it = types.nextWindow(w, wm)) {
+                if (w.obj == ev.window) {
+                    @import("window.zig").setActive(w);
+                    wm.pending_focus = w;
+                    wm.needs_layout = true;
+                    break;
+                }
+            }
         },
         else => {},
     }
 }
 
-pub fn focus(seat: *Seat, win: ?*Window) void {
-    if (win) |w| {
-        seat.obj.focusWindow(w.obj);
+// ----------------------------------------------------------------------------
+// Default keybindings
+// ----------------------------------------------------------------------------
+
+const Def = struct {
+    /// xkbcommon keysym (value of XKB_KEY_* in xkbcommon-keysyms.h).
+    key: u32,
+    mods: Modifiers,
+    action: Action,
+};
+
+// Keysyms that are NOT just their ASCII value. Values taken from
+// <xkbcommon/xkbcommon-keysyms.h>.
+const KEY_Return: u32 = 0xff0d;
+const KEY_Home: u32 = 0xff50;
+const KEY_Left: u32 = 0xff51;
+const KEY_Up: u32 = 0xff52;
+const KEY_Right: u32 = 0xff53;
+const KEY_Down: u32 = 0xff54;
+const KEY_End: u32 = 0xff57;
+// Printable keys: keysym == ASCII code of the unshifted character.
+const KEY_comma: u32 = ',';
+const KEY_period: u32 = '.';
+const KEY_minus: u32 = '-';
+const KEY_equal: u32 = '=';
+
+const M = Config.mod;
+const MS = Config.mod_shift;
+
+pub const default_bindings = [_]Def{
+    // --- launching --------------------------------------------------------
+    .{ .key = KEY_Return, .mods = M, .action = .spawn_terminal },
+    .{ .key = KEY_Return, .mods = MS, .action = .spawn_alt_terminal },
+    .{ .key = 'd', .mods = M, .action = .spawn_launcher },
+    .{ .key = 'b', .mods = M, .action = .spawn_browser },
+
+    // --- window / session -------------------------------------------------
+    .{ .key = 'q', .mods = M, .action = .close },
+    .{ .key = 'q', .mods = MS, .action = .exit },
+
+    // --- focus (vim keys + arrows) ---------------------------------------
+    .{ .key = 'h', .mods = M, .action = .focus_left },
+    .{ .key = 'l', .mods = M, .action = .focus_right },
+    .{ .key = 'j', .mods = M, .action = .focus_down },
+    .{ .key = 'k', .mods = M, .action = .focus_up },
+    .{ .key = KEY_Left, .mods = M, .action = .focus_left },
+    .{ .key = KEY_Right, .mods = M, .action = .focus_right },
+    .{ .key = KEY_Down, .mods = M, .action = .focus_down },
+    .{ .key = KEY_Up, .mods = M, .action = .focus_up },
+    .{ .key = KEY_Home, .mods = M, .action = .focus_first_column },
+    .{ .key = KEY_End, .mods = M, .action = .focus_last_column },
+
+    // --- moving columns / windows ----------------------------------------
+    .{ .key = 'h', .mods = MS, .action = .move_column_left },
+    .{ .key = 'l', .mods = MS, .action = .move_column_right },
+    .{ .key = 'j', .mods = MS, .action = .move_window_down },
+    .{ .key = 'k', .mods = MS, .action = .move_window_up },
+    .{ .key = KEY_Left, .mods = MS, .action = .move_column_left },
+    .{ .key = KEY_Right, .mods = MS, .action = .move_column_right },
+    .{ .key = KEY_comma, .mods = M, .action = .consume_left },
+    .{ .key = KEY_period, .mods = M, .action = .expel_right },
+
+    // --- column width -----------------------------------------------------
+    .{ .key = 'r', .mods = M, .action = .cycle_column_width },
+    .{ .key = KEY_minus, .mods = M, .action = .narrow_column },
+    .{ .key = KEY_equal, .mods = M, .action = .widen_column },
+
+    // --- workspaces -------------------------------------------------------
+    .{ .key = '1', .mods = M, .action = .workspace_1 },
+    .{ .key = '2', .mods = M, .action = .workspace_2 },
+    .{ .key = '3', .mods = M, .action = .workspace_3 },
+    .{ .key = '4', .mods = M, .action = .workspace_4 },
+    .{ .key = '1', .mods = MS, .action = .move_to_workspace_1 },
+    .{ .key = '2', .mods = MS, .action = .move_to_workspace_2 },
+    .{ .key = '3', .mods = MS, .action = .move_to_workspace_3 },
+    .{ .key = '4', .mods = MS, .action = .move_to_workspace_4 },
+};
+
+/// Create (but do not enable) all default bindings for `seat`.
+/// Called from manage_start; the `enable` request is only legal there.
+pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
+    seat.needs_binding_setup = false;
+
+    const mgr = wm.xkb_bindings orelse {
+        // river_xkb_bindings_v1 not available (yet): retry next manage.
+        seat.needs_binding_setup = true;
+        return;
+    };
+
+    for (default_bindings) |def| {
+        bindOne(wm, mgr, seat, def);
+    }
+    std.log.info("[SEAT] registered {d} keybindings", .{default_bindings.len});
+}
+
+fn bindOne(wm: *WindowManager, mgr: *river.XkbBindingsV1, seat: *Seat, def: Def) void {
+    const binding = mgr.getXkbBinding(seat.obj, def.key, def.mods) catch |err| {
+        std.log.err("[SEAT] getXkbBinding({x}) failed: {}", .{ def.key, err });
+        return;
+    };
+
+    const node = wm.gpa.create(XkbBinding) catch return;
+    node.* = .{
+        .obj = binding,
+        .seat = seat,
+        .action = def.action,
+        .link = undefined,
+    };
+    seat.xkb_bindings.append(node);
+
+    // The listener context is the XkbBinding node itself, so `pressed`
+    // knows both the action and the WindowManager (via seat -> global).
+    binding.setListener(*XkbBinding, bindingListener, node);
+    binding.enable();
+}
+
+fn bindingListener(_: *river.XkbBindingV1, event: river.XkbBindingV1.Event, node: *XkbBinding) void {
+    switch (event) {
+        .pressed => {
+            const wm = @import("window.zig").global_wm orelse return;
+            // Queue only. The manage_start that follows executes it, where
+            // the Wayland requests it needs are actually legal.
+            wm.pending_actions.append(wm.gpa, node.action) catch {
+                std.log.err("[SEAT] out of memory queueing action", .{});
+                return;
+            };
+            wm.needs_layout = true;
+        },
+        else => {},
     }
 }
 
-pub fn nextSeat(s: *Seat) ?*Seat {
-    const n = s.link.next orelse return null;
-    return @fieldParentPtr("link", n);
+/// Drop seats river told us are gone.
+pub fn reap(wm: *WindowManager) void {
+    var it = wm.seats.first();
+    while (it) |s| {
+        const next = types.nextSeat(s, wm);
+        if (s.removed) {
+            while (s.xkb_bindings.first()) |b| {
+                b.link.remove();
+                b.obj.destroy();
+                wm.gpa.destroy(b);
+            }
+            s.link.remove();
+            s.obj.destroy();
+            wm.gpa.destroy(s);
+        }
+        it = next;
+    }
 }
 
-fn seatListener(river_seat: *river.SeatV1, event: river.SeatV1.Event, seat: *Seat) void {
-    _ = river_seat;
-    _ = seat;
-    _ = event;
+pub fn focus(seat: *Seat, win: ?*types.Window) void {
+    if (win) |w| {
+        seat.obj.focusWindow(w.obj);
+        seat.focused = w;
+    } else {
+        seat.obj.clearFocus();
+        seat.focused = null;
+    }
 }

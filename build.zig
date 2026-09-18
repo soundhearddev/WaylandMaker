@@ -1,37 +1,29 @@
+// SPDX-License-Identifier: 0BSD
+//
+// Build script for wmaker-wl: a scrollable-tiling / Window Maker flavoured
+// window manager client for river (river-window-management-v1).
+
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
 
-pub fn build(b: *std.Build) !void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const use_llvm = b.option(
-        bool,
-        "llvm",
-        "Use LLVM linker",
-    ) orelse true;
+    // Optional: allow -Dllvm=false to try the self-hosted backend.
+    const use_llvm = b.option(bool, "llvm", "Use LLVM backend + lld linker") orelse true;
 
-    // 1. River-Dependency laden
-    const river_dep = b.dependency("river", .{
-        .target = target,
-        .optimize = optimize,
-        .llvm = use_llvm,
-        .xwayland = false,
-    });
-
-    // 2. Wayland-Scanner initialisieren
+    // ------------------------------------------------------------------
+    // Wayland protocol bindings. BOTH river protocols must be scanned:
+    // river_xkb_bindings_v1 is a *separate* protocol file, and without it
+    // no keybinding can ever be registered (this was the reason Mod+Return
+    // did nothing).
+    // ------------------------------------------------------------------
     const scanner = Scanner.create(b, .{});
-
-    // Custom Protocol von River hinzufügen
-    scanner.addCustomProtocol(
-        b.path("protocol/river-window-management-v1.xml"),
-    );
-
-    // Protocol-Code generieren
-    scanner.generate(
-        "river_window_manager_v1",
-        4,
-    );
+    scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
+    scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
+    scanner.generate("river_window_manager_v1", 6);
+    scanner.generate("river_xkb_bindings_v1", 1);
 
     const wayland_module = b.createModule(.{
         .root_source_file = scanner.result,
@@ -39,46 +31,34 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    // Imports zusammenstellen
-    var imports_list = std.ArrayList(std.Build.Module.Import).empty;
-    try imports_list.append(b.allocator, .{
-        .name = "wayland",
-        .module = wayland_module,
+    // xkbcommon: used to resolve keysym *names* ("Return", "h", ...) to
+    // real keysyms instead of hand-maintained numeric tables.
+    const xkbcommon_module = b.dependency("xkbcommon", .{}).module("xkbcommon");
+
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "wayland", .module = wayland_module },
+            .{ .name = "xkbcommon", .module = xkbcommon_module },
+        },
     });
+    exe_module.linkSystemLibrary("wayland-client", .{});
+    exe_module.linkSystemLibrary("xkbcommon", .{});
 
-    if (river_dep.builder.modules.get("river-layout-toolkit")) |river_layout| {
-        try imports_list.append(b.allocator, .{
-            .name = "river-layout-toolkit",
-            .module = river_layout,
-        });
-    }
-
-    // 3. Executable (wmaker-wl) konfigurieren
     const exe = b.addExecutable(.{
         .name = "wmaker-wl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = imports_list.items,
-            .link_libc = true,
-        }),
+        .root_module = exe_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
-
-    // System-Library an das Root-Modul binden
-    exe.root_module.linkSystemLibrary("wayland-client", .{});
-
     b.installArtifact(exe);
 
-    // 4. Run-Step
-    const run_cmd = b.addRunArtifact(exe);
+    // `zig build run` starts river with us as its window manager.
+    const run_cmd = b.addSystemCommand(&.{ "river", "-c", "zig-out/bin/wmaker-wl" });
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run wmaker-wl");
+    const run_step = b.step("run", "Run river with wmaker-wl as window manager");
     run_step.dependOn(&run_cmd.step);
 }

@@ -1,264 +1,353 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: 0BSD
 //
-// Event loop and Wayland protocol handlers.
-// Responsibilities:
-// - Connect to Wayland display
-// - Bind river_window_manager_v1 protocol
-// - Listen for window/manager events
-// - Call layout engine to compute and apply layouts
-// - Main dispatch loop
+// wmaker-wl: scrollable-tiling window manager client for river.
+//
+// Protocol flow (river-window-management-v1):
+//   input/window events ... -> manage_start -> [we edit window-management
+//   state, then manage_finish] -> render_start -> [we edit rendering state,
+//   then render_finish].
+//
+// Rules this file follows:
+//   * propose_dimensions, focus_window, close, use_ssd, set_tiled,
+//     xkb_binding.enable ... are window-management state: ONLY between
+//     manage_start and manage_finish.
+//   * node.set_position, hide/show, set_borders are rendering state: legal
+//     in manage OR render sequences. We do them in render_start.
 
 const std = @import("std");
 const wayland = @import("wayland");
-const river = wayland.client.river;
 const wl = wayland.client.wl;
+const river = wayland.client.river;
 
 const types = @import("types.zig");
 const layout = @import("layout.zig");
+const window_mod = @import("window.zig");
+const output = @import("output.zig");
+const seat = @import("seat.zig");
+const action = @import("action.zig");
 
 const WindowManager = types.WindowManager;
-const Window = types.Window;
+const Config = types.Config;
 
-// ============================================================================
-// Wayland event listeners
-// ============================================================================
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-/// Listener for individual river_window_v1 events.
-/// A Window is created when river sends .window event from river_window_manager_v1.
-/// It is marked closed when it emits .closed, and actually removed during
-/// the next manage() call.
-fn windowListener(
-    _: *river.WindowV1,
-    event: river.WindowV1.Event,
-    window: *Window,
-) void {
-    switch (event) {
-        .closed => {
-            std.log.info("[WINDOW] window closed event received", .{});
-            window.closed = true;
-        },
-        else => {
-            // Ignore other window events (.configure_request, etc.)
-        },
-    }
-}
+    // Spawned programs are fire-and-forget. Ignoring SIGCHLD makes the
+    // kernel reap them automatically, so we never accumulate zombies and
+    // never have to call wait() on a blocking event loop.
+    ignoreSigchld();
 
-/// Listener for river_window_manager_v1 events.
-/// Called when:
-/// - .window: a new window is being managed (create Window, add to manager)
-/// - .manage_start: layout pass for new windows (call layout.manage)
-/// - .render_start: position windows (call layout.render)
-fn windowManagerListener(
-    _: *river.WindowManagerV1,
-    event: river.WindowManagerV1.Event,
-    manager: *WindowManager,
-) void {
-    switch (event) {
-        .window => |args| {
-            // A new window is being managed by river.
-            // args.id is the river_window_v1 object.
-            const river_window = args.id;
-
-            std.log.info("[WINDOW] new window event", .{});
-
-            // Try to get the river_node_v1 for this window.
-            // This may fail if the window isn't ready yet, but we still
-            // proceed (we just won't be able to setPosition() until we have it).
-            const node = river_window.getNode() catch |err| {
-                std.log.warn(
-                    "[WINDOW] failed to get node for window: {any}",
-                    .{err},
-                );
-                return;
-            };
-
-            // Allocate a Window struct
-            const window = manager.allocator.create(Window) catch |err| {
-                std.log.err(
-                    "[WINDOW] failed to allocate Window struct: {any}",
-                    .{err},
-                );
-                return;
-            };
-
-            // Initialize the Window
-            window.* = .{
-                .obj = river_window,
-                .node = node,
-            };
-
-            // Attach our listener to the window so we get .closed events
-            river_window.setListener(
-                *Window,
-                windowListener,
-                window,
-            );
-
-            // Add it to the manager's window list
-            manager.addWindow(window);
-        },
-
-        .manage_start => {
-            // River is starting a manage pass. This means one or more new
-            // windows have been created and are ready to be tiled.
-            // Call the layout engine to assign dimensions.
-            std.log.info("[MANAGER] manage_start event", .{});
-            layout.manage(manager);
-        },
-
-        .render_start => {
-            // River is starting a render pass. Windows should now have
-            // accepted their proposed dimensions and are ready to be
-            // positioned on screen.
-            // Call the layout engine to assign positions.
-            std.log.info("[MANAGER] render_start event", .{});
-            layout.render(manager);
-        },
-
-        else => {
-            // Ignore other manager events
-        },
-    }
-}
-
-/// Listener for wl_registry events.
-/// When the registry advertises "river_window_manager_v1", we bind it
-/// and store the pointer so main() can use it.
-fn registryListener(
-    registry: *wl.Registry,
-    event: wl.Registry.Event,
-    window_manager_ptr: *?*river.WindowManagerV1,
-) void {
-    switch (event) {
-        .global => |args| {
-            const interface_name = std.mem.span(args.interface);
-
-            if (std.mem.eql(u8, interface_name, "river_window_manager_v1")) {
-                std.log.info(
-                    "[REGISTRY] found river_window_manager_v1 (version {d})",
-                    .{args.version},
-                );
-
-                // Bind to river_window_manager_v1
-                window_manager_ptr.* = registry.bind(
-                    args.name,
-                    river.WindowManagerV1,
-                    args.version,
-                ) catch |err| {
-                    std.log.err(
-                        "[REGISTRY] failed to bind river_window_manager_v1: {any}",
-                        .{err},
-                    );
-                    return;
-                };
-
-                std.log.info("[REGISTRY] successfully bound river_window_manager_v1", .{});
-            }
-        },
-
-        else => {
-            // Ignore other registry events
-        },
-    }
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const allocator = gpa.allocator();
-
-    std.log.info("[INIT] starting Wayland window manager", .{});
-
-    // Connect to Wayland display (via WAYLAND_DISPLAY env var or default)
     const display = wl.Display.connect(null) catch |err| {
-        std.log.err("[INIT] failed to connect to Wayland display: {any}", .{err});
+        std.log.err("cannot connect to wayland display: {}", .{err});
         return err;
     };
     defer display.disconnect();
 
-    std.log.info("[INIT] connected to Wayland display", .{});
+    const wm = try gpa.create(WindowManager);
+    defer gpa.destroy(wm);
 
-    // Get the global registry to discover available protocols
+    wm.* = .{
+        .gpa = gpa,
+        .io = io,
+        .outputs = undefined,
+        .windows = undefined,
+        .seats = undefined,
+    };
+    wm.outputs.init();
+    wm.windows.init();
+    wm.seats.init();
+    defer wm.pending_actions.deinit(gpa);
+
+    window_mod.global_wm = wm;
+
     const registry = try display.getRegistry();
+    registry.setListener(*WindowManager, registryListener, wm);
 
-    // Allocate and initialize the WindowManager state
-    const manager = try allocator.create(WindowManager);
-    defer allocator.destroy(manager);
+    // Roundtrip 1: learn the globals (binds window manager + xkb bindings).
+    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    manager.* = .{
-        .allocator = allocator,
-        .obj = undefined, // Will be set by registryListener
-    };
-
-    // Set up registry listener to find river_window_manager_v1
-    var wm_obj: ?*river.WindowManagerV1 = null;
-
-    registry.setListener(
-        *?*river.WindowManagerV1,
-        registryListener,
-        &wm_obj,
-    );
-
-    // First roundtrip: let the registry listener process all .global events
-    std.log.info("[INIT] first roundtrip (discover protocols)", .{});
-    if (display.roundtrip() != .SUCCESS) {
-        std.log.err("[INIT] first roundtrip failed", .{});
-        return error.RoundtripFailed;
-    }
-
-    // Check that we found river_window_manager_v1
-    const river_manager = wm_obj orelse {
-        std.log.err(
-            "[INIT] river_window_manager_v1 not found. Is river running?",
-            .{},
-        );
+    if (wm.obj == null) {
+        std.log.err("river_window_manager_v1 not advertised. Run me from river: `river -c wmaker-wl`", .{});
         return error.MissingRiverWindowManagement;
-    };
-
-    manager.obj = river_manager;
-
-    std.log.info("[INIT] river_window_manager_v1 available, attaching listener", .{});
-
-    // Attach our listener to the window manager
-    river_manager.setListener(
-        *WindowManager,
-        windowManagerListener,
-        manager,
-    );
-
-    // Second roundtrip: let the window manager listener receive initial
-    // events (e.g., if there are already windows, or if the compositor
-    // sends synchronous responses to our listener attachment).
-    std.log.info("[INIT] second roundtrip (initial window manager events)", .{});
-    if (display.roundtrip() != .SUCCESS) {
-        std.log.err("[INIT] second roundtrip failed", .{});
-        return error.RoundtripFailed;
+    }
+    if (wm.xkb_bindings == null) {
+        std.log.err("river_xkb_bindings_v1 not advertised - keybindings will not work", .{});
     }
 
-    std.log.info("[INIT] initialization complete, entering dispatch loop", .{});
+    // Roundtrip 2: receive the initial output/seat/window events.
+    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    // Main event loop: dispatch all pending Wayland events.
-    // dispatch() blocks until at least one event is available, then processes
-    // all events, then returns. We loop forever, only exiting if dispatch()
-    // fails (which means the display connection is broken).
-    while (true) {
-        const result = display.dispatch();
+    std.log.info("wmaker-wl running", .{});
 
-        switch (result) {
-            .SUCCESS => {
-                // Events were dispatched; loop and wait for more.
-            },
-            else => {
-                std.log.err("[DISPATCH] display.dispatch() failed: {any}", .{result});
-                break;
-            },
+    while (!wm.quit) {
+        if (display.dispatch() != .SUCCESS) break;
+    }
+
+    if (wm.quit) {
+        // The user explicitly asked to leave: end the whole session.
+        // exit_session exists since protocol version 4.
+        if (wm.obj) |o| {
+            if (wm.obj_version >= 4) o.exitSession() else o.stop();
+        }
+        _ = display.flush();
+    }
+}
+
+fn ignoreSigchld() void {
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.CHLD, &act, null);
+}
+
+// ============================================================================
+// Registry
+// ============================================================================
+
+fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, wm: *WindowManager) void {
+    switch (event) {
+        .global => |g| {
+            const name = std.mem.span(g.interface);
+
+            if (std.mem.eql(u8, name, std.mem.span(river.WindowManagerV1.interface.name))) {
+                // Use the highest version we know (scanner was generated
+                // for 6), capped by what river offers.
+                const version = @min(g.version, 6);
+                const obj = registry.bind(g.name, river.WindowManagerV1, version) catch |err| {
+                    std.log.err("bind river_window_manager_v1 failed: {}", .{err});
+                    return;
+                };
+                wm.obj = obj;
+                wm.obj_version = version;
+                obj.setListener(*WindowManager, riverWmListener, wm);
+            } else if (std.mem.eql(u8, name, std.mem.span(river.XkbBindingsV1.interface.name))) {
+                wm.xkb_bindings = registry.bind(g.name, river.XkbBindingsV1, 1) catch |err| {
+                    std.log.err("bind river_xkb_bindings_v1 failed: {}", .{err});
+                    return;
+                };
+                // Seats created before this global showed up still need
+                // their bindings.
+                var it = wm.seats.first();
+                while (it) |s| : (it = types.nextSeat(s, wm)) s.needs_binding_setup = true;
+            }
+        },
+        else => {},
+    }
+}
+
+// ============================================================================
+// river_window_manager_v1
+// ============================================================================
+
+fn riverWmListener(river_wm: *river.WindowManagerV1, event: river.WindowManagerV1.Event, wm: *WindowManager) void {
+    switch (event) {
+        .unavailable => {
+            std.log.err("window management unavailable: another WM is already running", .{});
+            std.process.exit(1);
+        },
+        .finished => {
+            std.log.info("river finished, exiting", .{});
+            std.process.exit(0);
+        },
+        .window => |ev| {
+            _ = window_mod.create(wm, ev.id) catch |err| {
+                std.log.err("create window failed: {}", .{err});
+            };
+        },
+        .output => |ev| {
+            _ = output.create(wm, ev.id) catch |err| {
+                std.log.err("create output failed: {}", .{err});
+            };
+        },
+        .seat => |ev| {
+            _ = seat.create(wm, ev.id) catch |err| {
+                std.log.err("create seat failed: {}", .{err});
+            };
+        },
+        .manage_start => handleManageStart(river_wm, wm),
+        .render_start => handleRenderStart(river_wm, wm),
+        else => {},
+    }
+}
+
+// ============================================================================
+// manage sequence
+// ============================================================================
+
+fn handleManageStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void {
+    // 1. Bindings: enable() is only legal here.
+    var sit = wm.seats.first();
+    while (sit) |s| : (sit = types.nextSeat(s, wm)) {
+        if (s.needs_binding_setup) seat.setupBindings(wm, s);
+    }
+    seat.reap(wm);
+    output.reap(wm);
+
+    // 2. Place brand-new windows into the strip.
+    var wit = wm.windows.first();
+    while (wit) |w| {
+        const next = types.nextWindow(w, wm);
+        if (w.new) window_mod.manage(w, wm);
+        wit = next;
+    }
+
+    // 3. Execute queued keybinding actions. We drain a copy so an action
+    //    that queues another one cannot invalidate our iteration.
+    while (wm.pending_actions.items.len > 0) {
+        const act = wm.pending_actions.orderedRemove(0);
+        action.run(wm, act);
+        if (wm.quit) break;
+    }
+
+    if (wm.quit) {
+        river_wm.manageFinish();
+        return;
+    }
+
+    // 4. Geometry + dimensions for every output's active workspace.
+    applyLayout(wm);
+
+    // 5. Focus / close / spawn requested by actions or events.
+    if (wm.pending_close) |w| {
+        w.obj.close();
+        wm.pending_close = null;
+    }
+
+    if (wm.pending_focus) |w| {
+        if (wm.seats.first()) |s| seat.focus(s, w);
+        wm.pending_focus = null;
+    } else if (wm.seats.first()) |s| {
+        // Nothing requested, but if focus is empty (e.g. the focused
+        // window closed) hand it to the active column.
+        if (s.focused == null) {
+            if (wm.outputs.first()) |o| {
+                if (o.activeWorkspace().strip.focusedWindow()) |w| seat.focus(s, w);
+            }
         }
     }
 
-    std.log.info("[SHUTDOWN] exiting", .{});
+    if (wm.pending_spawn) |argv| {
+        spawn(wm, argv);
+        wm.pending_spawn = null;
+    }
+
+    wm.needs_layout = false;
+    river_wm.manageFinish();
+}
+
+/// Compute geometry and send propose_dimensions / set_tiled.
+/// Manage sequence only.
+fn applyLayout(wm: *WindowManager) void {
+    var oit = wm.outputs.first();
+    while (oit) |out| : (oit = types.nextOutput(out, wm)) {
+        if (!out.isReady()) continue;
+
+        const ws = out.activeWorkspace();
+        const strip = &ws.strip;
+        const usable = out.rect();
+
+        // Scroll just enough to reveal the active column.
+        if (strip.active_column) |active| {
+            layout.recomputeGeometry(strip, usable);
+            layout.scrollToColumn(strip, active, usable.width);
+        }
+        layout.recomputeGeometry(strip, usable);
+
+        var cit = strip.columns.first();
+        while (cit) |col| : (cit = types.nextColumn(col)) {
+            var wit = col.windows.first();
+            while (wit) |win| : (wit = types.nextWindowInColumn(win)) {
+                if (win.proposed_w != win.width or win.proposed_h != win.height) {
+                    win.obj.proposeDimensions(win.width, win.height);
+                    win.proposed_w = win.width;
+                    win.proposed_h = win.height;
+                }
+                win.obj.setTiled(.{ .top = true, .bottom = true, .left = true, .right = true });
+            }
+        }
+    }
+}
+
+fn spawn(wm: *WindowManager, argv: []const []const u8) void {
+    // Zig 0.16: process spawning goes through std.Io. Stdio is ignored so
+    // no pipe is left open for us to leak. The child is never wait()ed on;
+    // SIGCHLD is ignored (see ignoreSigchld) so the kernel reaps it.
+    _ = std.process.spawn(wm.io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        std.log.err("failed to spawn {s}: {}", .{ argv[0], err });
+        return;
+    };
+}
+
+// ============================================================================
+// render sequence
+// ============================================================================
+
+fn handleRenderStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void {
+    const focused = if (wm.seats.first()) |s| s.focused else null;
+
+    // Hide everything that lives on a non-active workspace.
+    var oit = wm.outputs.first();
+    while (oit) |out| : (oit = types.nextOutput(out, wm)) {
+        if (!out.isReady()) continue;
+
+        for (&out.workspaces, 0..) |*ws, i| {
+            const active = (i == out.active_workspace);
+            var cit = ws.strip.columns.first();
+            while (cit) |col| : (cit = types.nextColumn(col)) {
+                var wit = col.windows.first();
+                while (wit) |win| : (wit = types.nextWindowInColumn(win)) {
+                    renderWindow(win, active, win == focused, out.rect());
+                }
+            }
+        }
+    }
+
+    river_wm.renderFinish();
+}
+
+fn renderWindow(win: *types.Window, workspace_active: bool, is_focused: bool, usable: types.Rectangle) void {
+    // Hide/show on workspace change.
+    if (workspace_active and win.hidden) {
+        win.obj.show();
+        win.hidden = false;
+    } else if (!workspace_active and !win.hidden) {
+        win.obj.hide();
+        win.hidden = true;
+    }
+    if (!workspace_active) return;
+
+    if (win.node) |node| {
+        node.setPosition(win.x, win.y);
+        if (is_focused) node.placeTop();
+    }
+
+    // Skip the border request entirely for windows scrolled out of view;
+    // they get it when they scroll back in.
+    if (layout.isOffscreen(win, usable)) return;
+
+    if (win.border_focused != is_focused) {
+        const c = if (is_focused) Config.border_focused else Config.border_unfocused;
+        win.obj.setBorders(
+            .{ .top = true, .bottom = true, .left = true, .right = true },
+            Config.border_width,
+            channel((c >> 16) & 0xff),
+            channel((c >> 8) & 0xff),
+            channel(c & 0xff),
+            0xffffffff,
+        );
+        win.border_focused = is_focused;
+    }
+}
+
+/// river takes colour channels as 32-bit fractions (0xffffffff = 100 %).
+fn channel(v: u32) u32 {
+    return v * 0x01010101;
 }

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: 0BSD
 //
-// river_output_v1 lifecycle. An Output object only becomes useful for
-// layout once we've received at least one `position` and one `dimensions`
-// event -- see types.Output.isReady().
+// river_output_v1 lifecycle. river does NOT advertise outputs through
+// wl_registry: it sends an `output` event on river_window_manager_v1 once
+// that is bound, carrying the new river_output_v1 object.
 
 const std = @import("std");
-
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
@@ -14,64 +13,60 @@ const WindowManager = types.WindowManager;
 const Output = types.Output;
 
 pub fn create(wm: *WindowManager, river_out: *river.OutputV1) !*Output {
-    const output = try wm.gpa.create(Output);
-    output.* = .{
+    const out = try wm.gpa.create(Output);
+    out.* = .{
         .obj = river_out,
         .link = undefined,
     };
 
-    for (&output.workspaces, 0..) |*ws, i| {
-        ws.init(output, @intCast(i));
+    for (&out.workspaces, 0..) |*ws, i| {
+        ws.init(out, @intCast(i));
     }
 
-    wm.outputs.append(output);
+    wm.outputs.append(out);
     river_out.setListener(*WindowManager, listener, wm);
-
-    return output;
+    return out;
 }
 
-fn findOutput(wm: *WindowManager, river_out: *river.OutputV1) ?*Output {
+fn find(wm: *WindowManager, river_out: *river.OutputV1) ?*Output {
     var it = wm.outputs.first();
-    while (it) |out| : (it = nextOutput(out)) {
+    while (it) |out| : (it = types.nextOutput(out, wm)) {
         if (out.obj == river_out) return out;
     }
     return null;
 }
 
-fn nextOutput(out: *Output) ?*Output {
-    const n = out.link.next orelse return null;
-    return @fieldParentPtr("link", n);
-}
-
 fn listener(river_out: *river.OutputV1, event: river.OutputV1.Event, wm: *WindowManager) void {
-    const output = findOutput(wm, river_out) orelse return;
+    const out = find(wm, river_out) orelse return;
 
     switch (event) {
         .position => |pos| {
-            output.x = pos.x;
-            output.y = pos.y;
+            out.x = pos.x;
+            out.y = pos.y;
             wm.needs_layout = true;
         },
         .dimensions => |dim| {
-            output.width = dim.width;
-            output.height = dim.height;
+            out.width = dim.width;
+            out.height = dim.height;
             wm.needs_layout = true;
         },
         .removed => {
-            output.removed = true;
+            out.removed = true;
+            wm.needs_layout = true;
         },
         else => {},
     }
 }
 
-/// Destroy outputs marked as removed.
+/// Destroy outputs marked as removed. Windows on a removed output are
+/// moved to the first remaining output (see window.rehome).
 pub fn reap(wm: *WindowManager) void {
     var it = wm.outputs.first();
     while (it) |out| {
-        const next = nextOutput(out);
+        const next = types.nextOutput(out, wm);
         if (out.removed) {
-            out.obj.destroy();
             out.link.remove();
+            out.obj.destroy();
             wm.gpa.destroy(out);
         }
         it = next;

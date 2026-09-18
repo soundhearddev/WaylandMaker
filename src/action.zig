@@ -1,114 +1,190 @@
+// SPDX-License-Identifier: 0BSD
+//
+// Keybinding actions. Every function here runs from manage_start (see
+// main.zig), i.e. INSIDE a manage sequence, so window-management requests
+// like focus_window / close are legal. Actions mostly just edit our own
+// data model; main.zig then lays it out and pushes the result to river.
+
 const std = @import("std");
 
 const types = @import("types.zig");
+const layout = @import("layout.zig");
+const window = @import("window.zig");
 
 const Action = types.Action;
 const WindowManager = types.WindowManager;
+const Strip = types.Strip;
+const Config = types.Config;
 
-/// Runs directly from the xkb_binding `pressed` event callback (see
-/// seat.xkbBindingListener), which happens *before* the manage_start that
-/// the protocol guarantees always follows it. river_seat_v1.focus_window
-/// and other window-management requests may only be made *during* a
-/// manage sequence, so this function must not call them directly -- it
-/// only mutates our own plain data (active_column, workspace index, ...)
-/// and stashes anything that needs a real Wayland request into
-/// wm.pending_focus / wm.pending_spawn / wm.needs_layout for main.zig's
-/// handleManageStart to apply once manage_start actually arrives.
-pub fn handleAction(wm: *WindowManager, action: Action) void {
-    switch (action) {
+pub fn run(wm: *WindowManager, act: Action) void {
+    const out = wm.outputs.first();
+    const strip: ?*Strip = if (out) |o| &o.activeWorkspace().strip else null;
+
+    switch (act) {
         .none => {},
 
+        // ---- spawning ---------------------------------------------------
+        .spawn_terminal => wm.pending_spawn = &Config.terminal_cmd,
+        .spawn_alt_terminal => wm.pending_spawn = &Config.alt_terminal_cmd,
+        .spawn_launcher => wm.pending_spawn = &Config.launcher_cmd,
+        .spawn_browser => wm.pending_spawn = &Config.browser_cmd,
+
+        // ---- session / window -------------------------------------------
         .exit => {
-            std.log.info("[ACTION] Exiting wmaker-wl...", .{});
-            std.process.exit(0);
+            std.log.info("[ACTION] exit requested", .{});
+            wm.quit = true;
         },
-
-        .spawn_terminal => {
-            wm.pending_spawn = &types.Config.terminal_cmd;
-        },
-
         .close => {
-            // river_window_v1.close is window-management state (manage-
-            // sequence-only), so defer it like focus_window -- see
-            // pending_close's doc comment in types.zig.
-            wm.pending_close = activeWindow(wm);
+            const s = strip orelse return;
+            wm.pending_close = s.focusedWindow();
         },
 
-        .focus_prev_column => {
-            if (activeStrip(wm)) |strip| {
-                const col = strip.active_column orelse return;
-                if (types.prevColumn(col)) |prev_col| {
-                    strip.active_column = prev_col;
-                    wm.pending_focus = prev_col.focusedWindow();
-                    wm.needs_layout = true;
-                }
-            }
+        // ---- focus ------------------------------------------------------
+        .focus_left => {
+            const s = strip orelse return;
+            const col = s.active_column orelse return;
+            const prev = types.prevColumn(col) orelse return;
+            focusColumn(wm, s, prev);
+        },
+        .focus_right => {
+            const s = strip orelse return;
+            const col = s.active_column orelse return;
+            const next = types.nextColumn(col) orelse return;
+            focusColumn(wm, s, next);
+        },
+        .focus_up => {
+            const s = strip orelse return;
+            const win = s.focusedWindow() orelse return;
+            const target = types.prevWindowInColumn(win) orelse return;
+            focusWindow(wm, target);
+        },
+        .focus_down => {
+            const s = strip orelse return;
+            const win = s.focusedWindow() orelse return;
+            const target = types.nextWindowInColumn(win) orelse return;
+            focusWindow(wm, target);
+        },
+        .focus_first_column => {
+            const s = strip orelse return;
+            const first = s.columns.first() orelse return;
+            focusColumn(wm, s, first);
+        },
+        .focus_last_column => {
+            const s = strip orelse return;
+            const last = s.columns.last() orelse return;
+            focusColumn(wm, s, last);
         },
 
-        .focus_next_column => {
-            if (activeStrip(wm)) |strip| {
-                const col = strip.active_column orelse return;
-                if (types.nextColumn(col)) |next_col| {
-                    strip.active_column = next_col;
-                    wm.pending_focus = next_col.focusedWindow();
-                    wm.needs_layout = true;
-                }
-            }
+        // ---- rearranging ------------------------------------------------
+        .move_column_left => {
+            const s = strip orelse return;
+            window.moveColumnLeft(s);
+            followFocus(wm, s);
+        },
+        .move_column_right => {
+            const s = strip orelse return;
+            window.moveColumnRight(s);
+            followFocus(wm, s);
+        },
+        .move_window_up => {
+            const s = strip orelse return;
+            const win = s.focusedWindow() orelse return;
+            window.moveWindowUp(win);
+            wm.needs_layout = true;
+        },
+        .move_window_down => {
+            const s = strip orelse return;
+            const win = s.focusedWindow() orelse return;
+            window.moveWindowDown(win);
+            wm.needs_layout = true;
+        },
+        .consume_left => {
+            const s = strip orelse return;
+            window.consumeLeft(wm, s);
+            followFocus(wm, s);
+        },
+        .expel_right => {
+            const s = strip orelse return;
+            const o = out orelse return;
+            window.expelRight(wm, s, o.rect());
+            followFocus(wm, s);
         },
 
-        .focus_next_window => {
-            // Cycle focus within the active column: if there's more than
-            // one window stacked in it, move to the next one (wrapping to
-            // the first). Single-window columns have nothing to cycle.
-            if (activeStrip(wm)) |strip| {
-                const col = strip.active_column orelse return;
-                const current = col.focusedWindow() orelse return;
-                const next = types.nextWindowInColumn(current) orelse col.windows.first() orelse return;
-                if (next != current) {
-                    // Move `next` to the tail so focusedWindow() (which
-                    // returns .last()) picks it up next time.
-                    next.column_link.remove();
-                    col.windows.append(next);
-                    wm.pending_focus = next;
-                    wm.needs_layout = true;
-                }
-            }
+        // ---- sizing -----------------------------------------------------
+        .cycle_column_width => {
+            const s = strip orelse return;
+            const o = out orelse return;
+            const col = s.active_column orelse return;
+            col.width = nextPresetWidth(o.width, col.width);
+            followFocus(wm, s);
         },
+        .widen_column => resizeActive(wm, strip, out, Config.width_step),
+        .narrow_column => resizeActive(wm, strip, out, -Config.width_step),
 
+        // ---- workspaces -------------------------------------------------
         .workspace_1 => switchWorkspace(wm, 0),
         .workspace_2 => switchWorkspace(wm, 1),
         .workspace_3 => switchWorkspace(wm, 2),
         .workspace_4 => switchWorkspace(wm, 3),
-
-        .toggle_omnipresent => {
-            if (activeWindow(wm)) |win| {
-                win.is_omnipresent = !win.is_omnipresent;
-            }
-        },
-
-        .move, .resize => {
-            // Interactive move/resize needs an op_start_pointer request,
-            // which -- like focus_window -- is manage-sequence-only. Not
-            // wired up yet; see docs/TODO.md.
-        },
+        .move_to_workspace_1 => sendTo(wm, 0),
+        .move_to_workspace_2 => sendTo(wm, 1),
+        .move_to_workspace_3 => sendTo(wm, 2),
+        .move_to_workspace_4 => sendTo(wm, 3),
     }
 }
 
-fn activeStrip(wm: *WindowManager) ?*types.Strip {
-    const out = wm.outputs.first() orelse return null;
-    return &out.activeWorkspace().strip;
+// ----------------------------------------------------------------------------
+
+fn focusColumn(wm: *WindowManager, strip: *Strip, col: *types.Column) void {
+    strip.active_column = col;
+    wm.pending_focus = col.focusedWindow();
+    wm.needs_layout = true;
 }
 
-fn activeWindow(wm: *WindowManager) ?*types.Window {
-    const strip = activeStrip(wm) orelse return null;
-    return strip.focusedWindow();
+fn focusWindow(wm: *WindowManager, win: *types.Window) void {
+    window.setActive(win);
+    wm.pending_focus = win;
+    wm.needs_layout = true;
+}
+
+/// After a structural change keep keyboard focus on the active column.
+fn followFocus(wm: *WindowManager, strip: *Strip) void {
+    wm.pending_focus = strip.focusedWindow();
+    wm.needs_layout = true;
+}
+
+fn nextPresetWidth(output_width: i32, current: i32) i32 {
+    // Pick the first preset strictly wider than the current width, or wrap
+    // around to the smallest one.
+    for (Config.width_presets) |f| {
+        const w = layout.widthForFraction(output_width, f);
+        if (w > current + 2) return w;
+    }
+    return layout.widthForFraction(output_width, Config.width_presets[0]);
+}
+
+fn resizeActive(wm: *WindowManager, strip: ?*Strip, out: ?*types.Output, delta_fraction: f64) void {
+    const s = strip orelse return;
+    const o = out orelse return;
+    const col = s.active_column orelse return;
+
+    const avail: f64 = @floatFromInt(@max(1, o.width - Config.gap * 2));
+    const delta: i32 = @intFromFloat(avail * delta_fraction);
+    const max_w = @max(Config.min_column_width, o.width - Config.gap * 2);
+    col.width = std.math.clamp(col.width + delta, Config.min_column_width, max_w);
+    followFocus(wm, s);
 }
 
 fn switchWorkspace(wm: *WindowManager, index: u32) void {
     const out = wm.outputs.first() orelse return;
-    if (out.active_workspace == index) return;
+    if (index >= Config.workspace_count or out.active_workspace == index) return;
 
-    out.switchWorkspace(index);
+    out.active_workspace = index;
     wm.pending_focus = out.activeWorkspace().strip.focusedWindow();
     wm.needs_layout = true;
+}
+
+fn sendTo(wm: *WindowManager, index: u32) void {
+    const out = wm.outputs.first() orelse return;
+    window.sendToWorkspace(wm, out, index);
 }
