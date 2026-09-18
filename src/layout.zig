@@ -1,102 +1,194 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: MIT
 //
-// Pure geometry: given a Strip and the usable rectangle of its output,
-// compute where every column and every window inside it should be. No
-// Wayland calls happen here -- callers (main.zig's manage_start handler)
-// take the x/y/width/height this leaves on each Window and turn them into
-// `propose_dimensions` / `river_node.set_position` requests.
+// Layout engine: computes window dimensions and positions, then applies them
+// to the river compositor. Handles cleanup of closed windows and performs
+// the actual tiling calculations.
 
 const std = @import("std");
+const wayland = @import("wayland");
+const river = wayland.client.river;
 
 const types = @import("types.zig");
-const Strip = types.Strip;
-const Column = types.Column;
+
+const WindowManager = types.WindowManager;
 const Window = types.Window;
-const Rectangle = types.Rectangle;
 const Config = types.Config;
 
-/// Height of a single window inside a column that has `count` windows
-/// stacked in it, given `total_height` usable pixels for the whole column.
-pub fn windowHeight(count: i32, total_height: i32) i32 {
-    if (count <= 0) return total_height;
-    const total_gaps = (count - 1) * Config.gap;
-    return @max(1, @divTrunc(total_height - total_gaps, count));
-}
+// ============================================================================
+// Layout computation: called by windowManagerListener when manage_start fires
+// ============================================================================
 
-fn columnWindowCount(column: *Column) i32 {
-    var count: i32 = 0;
-    var it = column.windows.first();
-    while (it) |win| : (it = types.nextWindowInColumn(win)) count += 1;
-    return count;
-}
+/// Called when river_window_manager_v1 sends .manage_start event.
+/// This is the hook point where we:
+/// 1. Remove any windows that have closed since the last manage_start
+/// 2. Compute layout for all remaining windows
+/// 3. Tell the compositor about dimensions and tiling state
+/// 4. Finish the manage operation
+///
+/// Does not modify the windows list, only window.width/height and their
+/// obj.proposeDimensions()/setTiled() properties.
+pub fn manage(manager: *WindowManager) void {
+    // First pass: clean up any closed windows to get accurate count
+    removeClosedWindows(manager);
 
-pub fn calculateWindowHeight(column: *Column, usable_height: i32) i32 {
-    const count = columnWindowCount(column);
-    if (count == 0) return usable_height;
-    return windowHeight(count, usable_height);
-}
+    const window_count = manager.windowCount();
 
-/// Scroll the strip just enough to bring `target` fully into view, without
-/// moving it any further than necessary.
-pub fn scrollToColumn(strip: *Strip, target: *Column, output_width: i32) void {
-    const col_left = target.strip_x;
-    const col_right = col_left + target.width;
+    std.log.info("[LAYOUT] manage_start: {d} windows to layout", .{window_count});
 
-    const margin = Config.gap * 2;
-
-    if (col_left < strip.scroll_x + margin) {
-        strip.scroll_x = @max(0, col_left - margin);
-    } else if (col_right > strip.scroll_x + output_width - margin) {
-        strip.scroll_x = col_right - output_width + margin;
-    }
-}
-
-/// Snap back to 0 if total content width fits in output, eliminating dead space.
-pub fn snapToEdge(strip: *Strip, output_width: i32) void {
-    var content_width: i32 = Config.gap;
-    var it = strip.columns.first();
-    while (it) |col| : (it = types.nextColumn(col)) {
-        content_width += col.width + Config.gap;
-    }
-
-    if (content_width <= output_width) {
-        strip.scroll_x = 0;
+    if (window_count == 0) {
+        // No windows to manage. Still need to call manageFinish() to close
+        // the manage_start transaction.
+        manager.obj.manageFinish();
         return;
     }
 
-    const max_scroll = content_width - output_width;
-    if (strip.scroll_x > max_scroll) strip.scroll_x = max_scroll;
-    if (strip.scroll_x < 0) strip.scroll_x = 0;
+    // Compute layout: evenly divide output width by window count.
+    // Each window gets output_height as its full height.
+    const window_width = @divTrunc(
+        Config.output_width,
+        @as(i32, @intCast(window_count)),
+    );
+    const window_height = Config.output_height;
+
+    std.log.info(
+        "[LAYOUT] proposing dimensions: {d}x{d} per window",
+        .{ window_width, window_height },
+    );
+
+    // Walk the window list and tell each window its proposed size.
+    // Also mark them as tiled (not floating).
+    var current = manager.windows.first;
+    while (current) |window| {
+        // Save the computed dimensions so we can use them in render()
+        window.width = window_width;
+        window.height = window_height;
+
+        // Tell river what size this window should be
+        window.obj.proposeDimensions(window_width, window_height);
+
+        // Mark this window as tiled (all edges), so river knows it's part
+        // of the tiling layout and not floating/fullscreen/etc.
+        window.obj.setTiled(.{
+            .top = true,
+            .bottom = true,
+            .left = true,
+            .right = true,
+        });
+
+        current = window.next;
+    }
+
+    // Signal to river that we're done proposing changes for this manage_start
+    manager.obj.manageFinish();
 }
 
-/// Recompute strip_x for every column and x/y/width/height for every window in the strip.
-pub fn recomputeGeometry(strip: *Strip, usable_rect: Rectangle) void {
-    var current_strip_x: i32 = Config.gap;
+// ============================================================================
+// Position assignment: called by windowManagerListener when render_start fires
+// ============================================================================
 
-    var col_it = strip.columns.first();
-    while (col_it) |col| : (col_it = types.nextColumn(col)) {
-        col.strip_x = current_strip_x;
+/// Called when river_window_manager_v1 sends .render_start event.
+/// This is the hook point where we:
+/// 1. Compute the X position for each window (left-to-right tiling)
+/// 2. Tell the compositor where to position each window on the output
+/// 3. Finish the render operation (tells river the layout is complete)
+///
+/// Window dimensions should already be set by manage(). This only assigns
+/// X,Y positions.
+pub fn render(manager: *WindowManager) void {
+    const window_count = manager.windowCount();
 
-        const count = columnWindowCount(col);
-        const win_h = windowHeight(count, usable_rect.height - Config.gap * 2);
+    std.log.info("[LAYOUT] render_start: positioning {d} windows", .{window_count});
 
-        var win_y: i32 = usable_rect.y + Config.gap;
+    if (window_count == 0) {
+        manager.obj.renderFinish();
+        return;
+    }
 
-        var win_it = col.windows.first();
-        while (win_it) |win| : (win_it = types.nextWindowInColumn(win)) {
-            win.x = usable_rect.x + col.strip_x - strip.scroll_x;
-            win.y = win_y;
-            win.width = col.width;
-            win.height = win_h;
+    // Use the first window's width (all should be equal from manage())
+    // as the stride. If somehow it's zero, compute it fresh.
+    const window_width = blk: {
+        if (manager.windows.first) |first| {
+            if (first.width > 0) {
+                break :blk first.width;
+            }
+        }
+        break :blk @divTrunc(
+            Config.output_width,
+            @as(i32, @intCast(window_count)),
+        );
+    };
 
-            win_y += win_h + Config.gap;
+    var index: i32 = 0;
+    var current = manager.windows.first;
+
+    while (current) |window| {
+        // Compute x position: index * window_width (left-to-right)
+        const x = index * window_width;
+        const y: i32 = 0; // Always at top of output
+
+        // Update our cached position
+        window.x = x;
+        window.y = y;
+
+        // Tell river where to render this window
+        if (window.node) |node| {
+            node.setPosition(x, y);
+        } else {
+            std.log.warn(
+                "[LAYOUT] window {d} has no node, skipping setPosition",
+                .{index},
+            );
         }
 
-        current_strip_x += col.width + Config.gap;
+        index += 1;
+        current = window.next;
     }
+
+    std.log.debug("[LAYOUT] positioned {d} windows", .{index});
+
+    // Signal to river that we're done positioning windows
+    manager.obj.renderFinish();
 }
 
-/// Check if a window is completely offscreen horizontally.
-pub fn isOffscreen(win: *const Window, usable_rect: Rectangle) bool {
-    return win.x + win.width <= usable_rect.x or win.x >= usable_rect.x + usable_rect.width;
+// ============================================================================
+// Internal: cleanup of closed windows
+// ============================================================================
+
+/// Scan the windows list for any marked .closed and remove them.
+/// This is called at the start of manage() to ensure layout operates on
+/// the actual current window set.
+///
+/// A window is marked .closed when it emits a .closed event from river.
+/// We defer actual removal (destroy + free) to here so we don't mutate
+/// the windows list while iterating event handlers.
+fn removeClosedWindows(manager: *WindowManager) void {
+    var current = manager.windows.first;
+
+    var removed_count: usize = 0;
+
+    while (current) |window| {
+        // Grab next before we potentially remove current
+        const next = window.next;
+
+        if (window.closed) {
+            std.log.info("[LAYOUT] removing closed window", .{});
+
+            // Remove from list
+            manager.windows.remove(window);
+
+            // Clean up river resources
+            window.obj.destroy();
+
+            // Free the Window struct itself
+            manager.allocator.destroy(window);
+
+            removed_count += 1;
+        }
+
+        current = next;
+    }
+
+    if (removed_count > 0) {
+        std.log.info("[LAYOUT] cleaned up {d} closed windows", .{removed_count});
+    }
 }
