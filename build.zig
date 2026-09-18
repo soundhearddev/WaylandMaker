@@ -61,21 +61,16 @@ pub fn build(b: *std.Build) !void {
             .target = target,
             .optimize = optimize,
             .imports = imports_list.items,
-            .link_libc = true, // In Zig 0.16 wird libc direkt im Modul aktiviert
+            .link_libc = true,
         }),
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
 
     // System-Library an das Root-Modul binden
-    exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
     exe.root_module.linkSystemLibrary("wayland-client", .{});
 
     b.installArtifact(exe);
-
-    // River Executable installieren
-    const river_exe = river_dep.artifact("river");
-    b.installArtifact(river_exe);
 
     // 4. Run-Step
     const run_cmd = b.addRunArtifact(exe);
