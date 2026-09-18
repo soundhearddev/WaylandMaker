@@ -48,9 +48,8 @@ pub const Config = struct {
     pub const workspace_count: u32 = 4;
 
     // Default programs for the spawn keybinds.
-    pub const terminal_cmd = [_][]const u8{"foot"};
+    pub const terminal_cmd = [_][]const u8{"alacritty"};
     pub const launcher_cmd = [_][]const u8{"fuzzel"};
-    pub const alt_terminal_cmd = [_][]const u8{"alacritty"};
     pub const browser_cmd = [_][]const u8{"firefox"};
 };
 
@@ -251,7 +250,6 @@ pub const Action = enum {
     none,
     // spawning
     spawn_terminal,
-    spawn_alt_terminal,
     spawn_launcher,
     spawn_browser,
     // window / column focus

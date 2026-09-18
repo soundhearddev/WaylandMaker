@@ -104,13 +104,12 @@ const MS = Config.mod_shift;
 pub const default_bindings = [_]Def{
     // --- launching --------------------------------------------------------
     .{ .key = KEY_Return, .mods = M, .action = .spawn_terminal },
-    .{ .key = KEY_Return, .mods = MS, .action = .spawn_alt_terminal },
     .{ .key = 'd', .mods = M, .action = .spawn_launcher },
     .{ .key = 'b', .mods = M, .action = .spawn_browser },
 
     // --- window / session -------------------------------------------------
     .{ .key = 'q', .mods = M, .action = .close },
-    .{ .key = 'q', .mods = MS, .action = .exit },
+    .{ .key = 'e', .mods = MS, .action = .exit },
 
     // --- focus (vim keys + arrows) ---------------------------------------
     .{ .key = 'h', .mods = M, .action = .focus_left },

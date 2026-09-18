@@ -25,7 +25,6 @@ pub fn run(wm: *WindowManager, act: Action) void {
 
         // ---- spawning ---------------------------------------------------
         .spawn_terminal => wm.pending_spawn = &Config.terminal_cmd,
-        .spawn_alt_terminal => wm.pending_spawn = &Config.alt_terminal_cmd,
         .spawn_launcher => wm.pending_spawn = &Config.launcher_cmd,
         .spawn_browser => wm.pending_spawn = &Config.browser_cmd,
 
