@@ -1,24 +1,40 @@
-// SPDX-FileCopyrightText: © 2026 Vladyslav Khardel
-// SPDX-License-Identifier: 0BSD
-
 .{
-    .name = .tinyrwm,
-    .version = "0.0.0",
-    .fingerprint = 0x9e8d1d04d289e4fa,
-    .minimum_zig_version = "0.16.0",
+    .name = .wmaker_wl,
+    .version = "0.1.0",
+    .fingerprint = 0xa5a98cf56f86884e,
+
     .dependencies = .{
-        .wayland = .{
-            .url = "git+https://github.com/ifreund/zig-wayland.git#589aaf7c213159547d774ef8e6491f0045c511d5",
-            .hash = "wayland-0.7.0-dev-lQa1krn7AQCMUzT3J6gWyukl3L3kbMtCZy9djQemUYA-",
+        .river = .{
+            .path = "river",
         },
+
+        .wayland = .{
+            .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.6.0.tar.gz",
+            .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
+        },
+
         .xkbcommon = .{
-            .url = "git+https://codeberg.org/ifreund/zig-xkbcommon.git#6c2f41e269adde0d2cd58d20c02c4f8803d83eb1",
-            .hash = "xkbcommon-0.5.0-dev-VDqIe0y2AgA1RzA2ICMdGhaAgSXdhtRTbYybQQu7WfOa",
+            .url = "https://codeberg.org/ifreund/zig-xkbcommon/archive/v0.4.0.tar.gz",
+            .hash = "xkbcommon-0.4.0-VDqIe0i2AgDRsok2GpMFYJ8SVhQS10_PI2M_CnHXsJJZ",
+        },
+
+        .pixman = .{
+            .url = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz",
+            .hash = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX",
+        },
+
+        .wlroots = .{
+            .url = "git+https://codeberg.org/ifreund/zig-wlroots#c183af18ae35dd5fb3dde709697c8f84bb1dc7f3",
+            .hash = "wlroots-0.20.2-dev-jmOlcrJuBABMWPGDKK86BO7zrfmxm17nimqFb0gffZTn",
+        },
+
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ifreund/translate-c?ref=0.16.x#64570104eeed461dc221e77574cd3f1c5b7eb974",
+            .hash = "translate_c-0.0.0-Q_BUWlL1BgD7PmL27vTsccyNCOvKb-B65O5Ki1ZKm-ED",
         },
     },
+
     .paths = .{
-        "build.zig",
-        "build.zig.zon",
-        "src",
+        "",
     },
 }
