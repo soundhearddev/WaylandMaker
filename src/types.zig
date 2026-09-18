@@ -13,7 +13,22 @@ const wl = wayland.client.wl;
 // ============================================================================
 
 pub const Config = struct {
-    pub const default_column_width: i32 = 700;
+    /// Default width of a newly created column, as a fraction of the
+    /// output's usable width (0.0-1.0). FACT (verified by grep): the
+    /// previous fixed-pixel `default_column_width: i32 = 700` was never
+    /// adjusted anywhere in the codebase after a Column was created --
+    /// `col.width` had exactly one write site (Column's own field
+    /// initializer) in the entire project, so every column on every
+    /// monitor at every window count ended up exactly 700px wide. That's
+    /// the actual bug behind "it never tiles, always the default size".
+    /// A fraction of the *current* output's usable width, recomputed each
+    /// time a column is created (see window.assignToStrip), fixes that at
+    /// the source instead of letting layout.zig or main.zig patch over a
+    /// stale absolute pixel value later.
+    pub const default_column_width_fraction: f64 = 0.5;
+    /// Absolute floor so a column is never created unusably narrow (e.g.
+    /// output not ready yet, or a very small/rotated output).
+    pub const min_column_width: i32 = 200;
     pub const gap: i32 = 8;
     pub const mod: river.SeatV1.Modifiers = .{ .mod4 = true };
     pub const workspace_count: u32 = 4;
@@ -29,7 +44,10 @@ pub const Column = struct {
     strip: *Strip,
     link: wl.list.Link,
 
-    width: i32 = Config.default_column_width,
+    /// Set by window.assignToStrip() from the output's *current* usable
+    /// width -- never left at a type-level default, see Config's doc
+    /// comment above for why that mattered.
+    width: i32,
     strip_x: i32 = 0,
 
     windows: wl.list.Head(Window, .column_link),
@@ -177,7 +195,10 @@ pub const Window = struct {
 
     x: i32 = 0,
     y: i32 = 0,
-    width: i32 = Config.default_column_width,
+    /// Initial guess only -- overwritten by layout.recomputeGeometry as
+    /// soon as this window is assigned to a column (window.assignToStrip
+    /// + manage() do this before the first propose_dimensions is sent).
+    width: i32 = Config.min_column_width,
     height: i32 = 0,
 
     is_omnipresent: bool = false,
@@ -241,6 +262,10 @@ pub const Seat = struct {
     obj: *river.SeatV1,
     new: bool = true,
     removed: bool = false,
+    /// True until setupBindings() has run for this seat inside a manage
+    /// sequence. See seat.create()/seat.setupBindings() for why this
+    /// can't happen immediately when the seat is created.
+    needs_binding_setup: bool = false,
     link: wl.list.Link,
 
     focused: ?*Window = null,
@@ -263,6 +288,11 @@ pub const Seat = struct {
 
 pub const WindowManager = struct {
     gpa: std.mem.Allocator,
+    /// Io backend for this process, from std.process.Init (see main.zig).
+    /// Needed for std.process.Child.spawn(io) in main.zig's spawn() --
+    /// Zig 0.16 made process spawning go through std.Io like the rest of
+    /// I/O, rather than being implicit/global.
+    io: std.Io,
 
     obj: ?*river.WindowManagerV1 = null,
     xkb_bindings: ?*river.XkbBindingsV1 = null,
@@ -273,6 +303,27 @@ pub const WindowManager = struct {
 
     pending_windows: std.ArrayList(*Window) = .empty,
     needs_layout: bool = true,
+
+    /// Window that a keybinding wants focused, applied on the next
+    /// manage_start via river_seat_v1.focus_window. That request "may only
+    /// be made as part of a manage sequence" per the protocol, but
+    /// keybinding actions (action.zig's handleAction) run directly from
+    /// the xkb_binding `pressed` event callback, which happens *before*
+    /// the manage_start that always follows it -- so we can't call
+    /// focus_window right there. Deferring through this field is the fix.
+    pending_focus: ?*Window = null,
+
+    /// Argv of a command a keybinding wants spawned, applied on the next
+    /// manage_start. Spawning (std.process.Child) isn't a Wayland request
+    /// and has no ordering requirement of its own, but we defer it anyway
+    /// so all side effects of an action happen in one predictable place
+    /// (manage_start) instead of half in the input callback, half later.
+    pending_spawn: ?[]const []const u8 = null,
+
+    /// Window a keybinding wants closed, applied on the next manage_start
+    /// via river_window_v1.close. Same manage-sequence-only reasoning as
+    /// pending_focus.
+    pending_close: ?*Window = null,
 };
 
 pub fn nextWindow(win: *Window, wm: *WindowManager) ?*Window {

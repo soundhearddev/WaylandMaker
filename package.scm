@@ -1,14 +1,17 @@
-(use-modules (guix profiles)
-             (gnu packages))
+(use-modules (gnu packages)
+             (gnu packages freedesktop)
+             (gnu packages pkg-config)
+             (gnu packages xdisorg)
+             (gnu packages xorg)
+             (gnu packages zig-xyz)
+             (gnu packages zig))
 
-(specifications->manifest
-  '(
-    "river"
-    "zig"
-    "wayland"
-    "wayland-protocols"
-    "libxkbcommon"
-    "pkg-config"
-    "libevdev"
-    "pixman"
-   ))
+(list
+  (specification->package "river")
+  (specification->package "zig")
+  (specification->package "wayland")
+  (specification->package "wayland-protocols")
+  (specification->package "libxkbcommon")
+  (specification->package "pkg-config")
+  (specification->package "libevdev")
+  (specification->package "pixman"))
