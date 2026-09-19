@@ -2,3 +2,4 @@ zig-out/
 zig-pkg/
 .zig-cache/
 docs/other/*
+log.txt
