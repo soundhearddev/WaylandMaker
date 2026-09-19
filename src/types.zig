@@ -348,6 +348,9 @@ pub const Seat = struct {
     pointer_drag_dy: i32 = 0,
     pointer_last_reorder_x: i32 = 0,
     pointer_last_reorder_y: i32 = 0,
+
+    pointer_start_pending: bool = false,
+    pointer_end_pending: bool = false,
 };
 
 // ============================================================================

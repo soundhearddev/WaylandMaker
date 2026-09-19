@@ -198,6 +198,19 @@ fn handleManageStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
         return;
     }
 
+    var sit2 = wm.seats.first();
+    while (sit2) |s| : (sit2 = types.nextSeat(s, wm)) {
+        if (s.pointer_start_pending) {
+            s.pointer_start_pending = false;
+            s.obj.opStartPointer();
+        }
+
+        if (s.pointer_end_pending) {
+            s.pointer_end_pending = false;
+            s.obj.opEnd();
+        }
+    }
+
     applyLayout(wm);
 
     if (wm.pending_close) |w| {

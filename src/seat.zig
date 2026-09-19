@@ -95,7 +95,7 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
             seat.pointer_last_reorder_x = 0;
             seat.pointer_last_reorder_y = 0;
 
-            seat.obj.opEnd();
+            seat.pointer_end_pending = true;
         },
 
         else => {},
@@ -261,7 +261,8 @@ fn pointerBindingListener(
             seat.pointer_last_reorder_x = 0;
             seat.pointer_last_reorder_y = 0;
 
-            seat.obj.opStartPointer();
+            seat.pointer_start_pending = true;
+            seat.pointer_end_pending = false;
 
             @import("window.zig").setActive(win);
             wm.pending_focus = win;
