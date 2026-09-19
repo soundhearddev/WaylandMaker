@@ -99,6 +99,7 @@ pub const default_bindings = [_]Def{
 
     // --- window / session -------------------------------------------------
     .{ .key = 'q', .mods = M, .action = .close },
+    .{ .key = 'T', .mods = M, .action = .toggle_floating },
     .{ .key = 'e', .mods = MS, .action = .exit },
 
     // --- focus (vim keys + arrows) ---------------------------------------

@@ -263,6 +263,7 @@ pub const Action = enum {
     spawn_browser,
     // window / column focus
     close,
+    toggle_floating,
     focus_left,
     focus_right,
     focus_up,

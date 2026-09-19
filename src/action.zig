@@ -38,6 +38,15 @@ pub fn run(wm: *WindowManager, act: Action) void {
             wm.pending_close = s.focusedWindow();
         },
 
+        .toggle_floating => {
+            const s = strip orelse return;
+            const win = s.focusedWindow() orelse return;
+
+            window.setFloating(wm, win, !win.floating);
+            wm.pending_focus = win;
+            wm.needs_layout = true;
+        },
+
         // ---- focus ------------------------------------------------------
         .focus_left => {
             const s = strip orelse return;
