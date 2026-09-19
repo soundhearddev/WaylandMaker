@@ -318,6 +318,7 @@ pub const WindowManager = struct {
     /// Version we bound river_window_manager_v1 with (see main.zig).
     obj_version: u32 = 1,
     xkb_bindings: ?*river.XkbBindingsV1 = null,
+    layer_shell: ?*river.LayerShellV1 = null,
 
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),

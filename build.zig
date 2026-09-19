@@ -22,8 +22,11 @@ pub fn build(b: *std.Build) void {
     const scanner = Scanner.create(b, .{});
     scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
+    scanner.addCustomProtocol(b.path("protocol/river-layer-shell-v1.xml"));
+
     scanner.generate("river_window_manager_v1", 6);
     scanner.generate("river_xkb_bindings_v1", 1);
+    scanner.generate("river_layer_shell_v1", 1);
 
     const wayland_module = b.createModule(.{
         .root_source_file = scanner.result,

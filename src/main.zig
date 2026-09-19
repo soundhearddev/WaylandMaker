@@ -119,8 +119,22 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, wm: *Windo
                     std.log.err("bind river_xkb_bindings_v1 failed: {}", .{err});
                     return;
                 };
+
                 var it = wm.seats.first();
-                while (it) |s| : (it = types.nextSeat(s, wm)) s.needs_binding_setup = true;
+                while (it) |s| : (it = types.nextSeat(s, wm)) {
+                    s.needs_binding_setup = true;
+                }
+            } else if (std.mem.eql(u8, name, std.mem.span(river.LayerShellV1.interface.name))) {
+                wm.layer_shell = registry.bind(
+                    g.name,
+                    river.LayerShellV1,
+                    1,
+                ) catch |err| {
+                    std.log.err("bind river_layer_shell_v1 failed: {}", .{err});
+                    return;
+                };
+
+                std.log.info("bound river_layer_shell_v1", .{});
             }
         },
         else => {},
