@@ -242,8 +242,10 @@ fn applyLayout(wm: *WindowManager) void {
             layout.recomputeGeometry(strip, usable);
             layout.scrollToColumn(strip, active, usable.width);
         }
+
         layout.recomputeGeometry(strip, usable);
 
+        // Tiled windows.
         var cit = strip.columns.first();
         while (cit) |col| : (cit = types.nextColumn(col)) {
             var wit = col.windows.first();
@@ -253,7 +255,25 @@ fn applyLayout(wm: *WindowManager) void {
                     win.proposed_w = win.width;
                     win.proposed_h = win.height;
                 }
-                win.obj.setTiled(.{ .top = true, .bottom = true, .left = true, .right = true });
+
+                win.obj.setTiled(.{
+                    .top = true,
+                    .bottom = true,
+                    .left = true,
+                    .right = true,
+                });
+            }
+        }
+
+        // Floating windows.
+        var fit = ws.floating.first();
+        while (fit) |win| : (fit = if (win.floating_link.next) |next| blk: {
+            break :blk @fieldParentPtr("floating_link", next);
+        } else null) {
+            if (win.proposed_w != win.width or win.proposed_h != win.height) {
+                win.obj.proposeDimensions(win.width, win.height);
+                win.proposed_w = win.width;
+                win.proposed_h = win.height;
             }
         }
     }
@@ -268,12 +288,32 @@ fn handleRenderStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
 
         for (&out.workspaces, 0..) |*ws, i| {
             const active = (i == out.active_workspace);
+
             var cit = ws.strip.columns.first();
             while (cit) |col| : (cit = types.nextColumn(col)) {
                 var wit = col.windows.first();
                 while (wit) |win| : (wit = types.nextWindowInColumn(win)) {
-                    renderWindow(win, active, win == focused, out.rect(), wm.config);
+                    renderWindow(
+                        win,
+                        active,
+                        win == focused,
+                        out.rect(),
+                        wm.config,
+                    );
                 }
+            }
+
+            var fit = ws.floating.first();
+            while (fit) |win| : (fit = if (win.floating_link.next) |next| blk: {
+                break :blk @fieldParentPtr("floating_link", next);
+            } else null) {
+                renderWindow(
+                    win,
+                    active,
+                    win == focused,
+                    out.rect(),
+                    wm.config,
+                );
             }
         }
     }

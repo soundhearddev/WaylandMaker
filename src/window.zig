@@ -387,17 +387,7 @@ pub fn pointerDelta(
             if (win.floating) {
                 win.x = seat.pointer_initial_x + dx;
                 win.y = seat.pointer_initial_y + dy;
-
-                std.log.info(
-                    "[POINTER] MOVE x={d} y={d} -> {d} {d}",
-                    .{
-                        seat.pointer_initial_x,
-                        seat.pointer_initial_y,
-                        win.x,
-                        win.y,
-                    },
-                );
-
+                wm.needs_layout = true;
                 return;
             }
 
