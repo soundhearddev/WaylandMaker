@@ -241,13 +241,19 @@ fn applyLayout(wm: *WindowManager) void {
 
         layout.recomputeGeometry(strip, usable);
 
+        // ----------------------------------------------------------------
+        // Tiled layout
+        // ----------------------------------------------------------------
+
         var cit = strip.columns.first();
 
         while (cit) |col| : (cit = types.nextColumn(col)) {
             var wit = col.windows.first();
 
             while (wit) |win| : (wit = types.nextWindowInColumn(win)) {
-                if (win.proposed_w != win.width or win.proposed_h != win.height) {
+                if (win.proposed_w != win.width or
+                    win.proposed_h != win.height)
+                {
                     win.obj.proposeDimensions(win.width, win.height);
                     win.proposed_w = win.width;
                     win.proposed_h = win.height;
@@ -262,21 +268,27 @@ fn applyLayout(wm: *WindowManager) void {
             }
         }
 
+        // ----------------------------------------------------------------
+        // Floating layout
+        //
+        // Floating is independent of the scrolling tiled layout.
+        // Do NOT tell the client that it is tiled, but also don't change
+        // its decoration mode here. use_ssd() was already selected during
+        // manage().
+        // ----------------------------------------------------------------
+
         var fit = ws.floating.first();
 
         while (fit) |win| : (fit = if (win.floating_link.next) |next| blk: {
             break :blk @fieldParentPtr("floating_link", next);
         } else null) {
-            win.obj.proposeDimensions(win.width, win.height);
-            win.proposed_w = win.width;
-            win.proposed_h = win.height;
-
-            win.obj.setTiled(.{
-                .top = false,
-                .bottom = false,
-                .left = false,
-                .right = false,
-            });
+            if (win.proposed_w != win.width or
+                win.proposed_h != win.height)
+            {
+                win.obj.proposeDimensions(win.width, win.height);
+                win.proposed_w = win.width;
+                win.proposed_h = win.height;
+            }
         }
     }
 }

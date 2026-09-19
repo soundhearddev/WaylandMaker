@@ -261,13 +261,13 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     if (floating) {
         const col = win.column orelse return;
 
-        // Remember the exact tiled position.
+        // Save exact tiled placement.
         win.saved_column = col;
         win.saved_window_index = windowIndex(col, win);
         win.saved_column_width = col.width;
 
-        // Remove the window from the column, but deliberately DO NOT
-        // destroy an empty column. The column is our restoration anchor.
+        // The current tiled geometry becomes the initial floating geometry.
+        // Do not destroy the column: it is our restoration anchor.
         win.column_link.remove();
         win.column = null;
 
@@ -313,12 +313,14 @@ fn windowIndex(col: *Column, target: *Window) usize {
 fn restoreTiled(wm: *WindowManager, win: *Window) void {
     const col = win.saved_column orelse {
         const ws = win.workspace orelse return;
+
         insertNewColumn(
             &ws.strip,
             win,
             wm.gpa,
             ws.output.rect(),
         );
+
         return;
     };
 
@@ -544,10 +546,7 @@ pub fn pointerDelta(
     dx: i32,
     dy: i32,
 ) void {
-    const win = seat.pointer_window orelse {
-        std.log.info("[POINTER] delta: NO pointer_window dx={d} dy={d}", .{ dx, dy });
-        return;
-    };
+    const win = seat.pointer_operation_window orelse return;
 
     std.log.info(
         "[POINTER] delta: win={*} floating={} dx={d} dy={d}",
