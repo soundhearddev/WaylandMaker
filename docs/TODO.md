@@ -17,16 +17,18 @@
 
 - [x] Integrate input devices (`river_seat_v1` / `river_xkb_bindings_v1`) for keyboard and mouse interactions.
 
-- [ ] Complete focus handling and event forwarding for active windows (`river_seat.focusWindow`).
+- [x] Complete focus handling and event forwarding for active windows (`river_seat.focusWindow`).
 
 - [x] Implement data structures for windows, columns, strips, and workspaces (`types.zig`).
 
-- [ ] Refine the layout engine for scrollable tiling (Strip → Column → Window, niri-style).
+- [x] Refine the layout engine for scrollable tiling (Strip → Column → Window, niri-style).
 
 - [ ] Implement mouse interactions (move, resize) and workspace visibility.
 
 - [ ] Integrate window titles and title bars inspired by the classic Window Maker look and feel.
 
-- [ ] Add configuration (ZON or another structured format) for keybindings and layout parameters.
+- [x] Add configuration for keybindings and layout parameters.
+
+- [ ] Add floating window support
 
 - [ ] Perform stability testing, memory management (GPA), and performance optimizations in Zig.

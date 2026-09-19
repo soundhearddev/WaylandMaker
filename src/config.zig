@@ -105,9 +105,6 @@ fn loadFromFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, cfg:
     allocator.free(cfg.config_file);
     cfg.config_file = try allocator.dupe(u8, path);
 
-    allocator.free(cfg.config_file);
-    cfg.config_file = try allocator.dupe(u8, path);
-
     // Parse key=value format
     var lines = std.mem.splitSequence(u8, content, "\n");
     while (lines.next()) |line| {
@@ -142,7 +139,10 @@ fn loadFromFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, cfg:
         } else if (std.mem.eql(u8, key, "enable_mouse_support")) {
             cfg.enable_mouse_support = parseBool(value);
         } else if (std.mem.eql(u8, key, "mouse_sensitivity")) {
-            cfg.mouse_sensitivity = @floatCast(std.fmt.parseFloat(f64, value) catch @as(f64, @floatFromInt(@as(i32, @intFromFloat(cfg.mouse_sensitivity)))));
+            // On a bad value, keep the existing sensitivity untouched
+            // (the previous fallback round-tripped it through an i32 and
+            // silently truncated e.g. 1.5 down to 1.0).
+            cfg.mouse_sensitivity = std.fmt.parseFloat(f32, value) catch cfg.mouse_sensitivity;
         } else if (std.mem.eql(u8, key, "enable_floating_windows")) {
             cfg.enable_floating_windows = parseBool(value);
         } else if (std.mem.eql(u8, key, "enable_wmaker_compat")) {
@@ -193,7 +193,6 @@ fn parseCommand(allocator: std.mem.Allocator, cmd_str: []const u8) ![][]const u8
 }
 
 fn defaultKeybinds(allocator: std.mem.Allocator, layout: KeyboardLayout) ![]Keybind {
-    _ = layout;
     var binds = std.ArrayList(Keybind).empty;
     defer binds.deinit(allocator);
 
@@ -206,28 +205,28 @@ fn defaultKeybinds(allocator: std.mem.Allocator, layout: KeyboardLayout) ![]Keyb
 
     try binds.append(allocator, .{
         .modifiers = .{ .mod4 = true },
-        .keysym = 0x64,
+        .keysym = layoutMapKeysym(layout, 'd'),
         .action = "spawn_launcher",
     });
 
     try binds.append(allocator, .{
         .modifiers = .{ .mod4 = true },
-        .keysym = 0x68,
+        .keysym = layoutMapKeysym(layout, 'h'),
         .action = "focus_left",
     });
     try binds.append(allocator, .{
         .modifiers = .{ .mod4 = true },
-        .keysym = 0x6a,
+        .keysym = layoutMapKeysym(layout, 'j'),
         .action = "focus_down",
     });
     try binds.append(allocator, .{
         .modifiers = .{ .mod4 = true },
-        .keysym = 0x6b,
+        .keysym = layoutMapKeysym(layout, 'k'),
         .action = "focus_up",
     });
     try binds.append(allocator, .{
         .modifiers = .{ .mod4 = true },
-        .keysym = 0x6c,
+        .keysym = layoutMapKeysym(layout, 'l'),
         .action = "focus_right",
     });
 

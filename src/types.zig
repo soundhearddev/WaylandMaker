@@ -158,13 +158,18 @@ pub const Workspace = struct {
     index: u32,
     strip: Strip,
 
+    /// Windows that are temporarily floating above the tiled strip.
+    floating: wl.list.Head(Window, .floating_link),
+
     pub fn init(workspace: *Workspace, output: *Output, index: u32) void {
         workspace.* = .{
             .output = output,
             .index = index,
             .strip = undefined,
+            .floating = undefined,
         };
         workspace.strip.init(workspace);
+        workspace.floating.init();
     }
 };
 
@@ -215,6 +220,15 @@ pub const Window = struct {
 
     column: ?*Column = null,
     column_link: wl.list.Link = undefined,
+
+    /// Workspace this window currently belongs to.
+    workspace: ?*Workspace = null,
+
+    /// Link used while the window is in Workspace.floating.
+    floating_link: wl.list.Link = undefined,
+
+    /// WindowMaker "Omnipresent" state.
+    sticky: bool = false,
 
     /// Target geometry computed by layout (output coordinates).
     x: i32 = 0,

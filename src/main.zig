@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     defer cfg.deinit(gpa);
 
     // Initialize WMaker compatibility layer (if available)
-    var wmaker_ctx = try wmaker.init(gpa, &cfg);
+    var wmaker_ctx = try wmaker.init(io, gpa, &cfg);
     defer wmaker_ctx.deinit(gpa);
 
     const display = wl.Display.connect(null) catch |err| {

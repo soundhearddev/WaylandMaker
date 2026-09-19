@@ -9,6 +9,7 @@ const river = wayland.client.river;
 
 const types = @import("types.zig");
 const layout = @import("layout.zig");
+const wmaker = @import("compatibility.zig");
 
 const WindowManager = types.WindowManager;
 const Window = types.Window;
@@ -52,8 +53,28 @@ fn listener(river_win: *river.WindowV1, event: river.WindowV1.Event, win: *Windo
             markClosed(wm, win);
             river_win.destroy();
         },
-        .pointer_move_requested,
-        .pointer_resize_requested,
+        .pointer_move_requested, .pointer_resize_requested => {
+            // river reports that the user grabbed this window with the
+            // pointer (Mod+drag, or a resize handle). Scrollable-tiling
+            // columns don't support free in-place movement, so -- same
+            // as niri -- grabbing a tiled window pops it out into the
+            // floating layer, where it's free to move/resize; grabbing an
+            // already-floating window is a no-op here (it stays put; the
+            // live drag itself is handled by the compositor). The
+            // manage_start river guarantees right after this event (see
+            // the protocol-flow note at the top of main.zig) is what
+            // actually applies the change via setTiled/propose_dimensions.
+            //
+            // NOTE: this does not yet track a live per-pixel drag delta
+            // into win.x/win.y -- that needs whatever position-update
+            // event river-window-management-v1 sends during an ongoing
+            // grab, which isn't in scope of the files reviewed here. The
+            // input.zig MouseState plumbing (handleMouseButtonPress /
+            // handleMouseMotion) is ready to take over that job as soon
+            // as such an event is wired to it.
+            setFloating(wm, win, true);
+            wm.pending_focus = win;
+        },
         .fullscreen_requested,
         .maximize_requested,
         .minimize_requested,
@@ -89,7 +110,27 @@ pub fn manage(win: *Window, wm: *WindowManager) void {
     };
 
     const ws = out.activeWorkspace();
-    insertNewColumn(&ws.strip, win, wm.gpa, out.rect());
+
+    // WindowMaker attribute rule for this window (see compatibility.zig).
+    // We don't yet know the client's app-id here (see TODO.md: "Integrate
+    // window titles" is still open), so today only the wildcard "*" rule
+    // can ever match -- but the mechanism, including the "sticky"
+    // (WindowMaker's Omnipresent) and "floating" behaviour, is real and
+    // ready for a specific app-id as soon as that's wired in.
+    const attrs = wmaker.attributesFor(&wm.wmaker_ctx, null);
+    win.sticky = attrs.sticky;
+
+    if (attrs.floating) {
+        win.workspace = ws;
+        win.floating = true;
+        win.width = @max(Config.min_column_width, @divTrunc(out.width, 2));
+        win.height = @max(1, @divTrunc(out.height, 2));
+        win.x = out.x + @divTrunc(out.width - win.width, 2);
+        win.y = out.y + @divTrunc(out.height - win.height, 2);
+        ws.floating.append(win);
+    } else {
+        insertNewColumn(&ws.strip, win, wm.gpa, out.rect());
+    }
 
     wm.pending_focus = win;
     wm.needs_layout = true;
@@ -107,6 +148,7 @@ pub fn insertNewColumn(strip: *Strip, win: *Window, gpa: std.mem.Allocator, usab
     col.windows.init();
     col.windows.append(win);
     win.column = col;
+    win.workspace = strip.workspace;
     col.focused = win;
 
     if (strip.active_column) |active| {
@@ -132,7 +174,7 @@ fn insertColumnAfter(after: *Column, col: *Column) void {
 
 fn markClosed(wm: *WindowManager, win: *Window) void {
     win.closed = true;
-    detach(wm, win);
+    removeFromLayout(wm, win);
 
     if (wm.pending_focus == win) wm.pending_focus = null;
     if (wm.pending_close == win) wm.pending_close = null;
@@ -145,6 +187,19 @@ fn markClosed(wm: *WindowManager, win: *Window) void {
     win.link.remove();
     wm.gpa.destroy(win);
     wm.needs_layout = true;
+}
+
+/// Take a window out of whichever layer it's currently in (tiled column or
+/// floating layer of its workspace). Used both when a window closes and
+/// when it's about to be re-placed elsewhere (workspace change, output
+/// removal, entering floating).
+fn removeFromLayout(wm: *WindowManager, win: *Window) void {
+    if (win.floating) {
+        win.floating_link.remove();
+        win.floating = false;
+        return;
+    }
+    detach(wm, win);
 }
 
 /// Take a window out of its column, delete the column if it became empty and
@@ -171,6 +226,33 @@ fn detach(wm: *WindowManager, win: *Window) void {
     if (was_active) {
         wm.pending_focus = if (strip.active_column) |a| a.focusedWindow() else null;
     }
+}
+
+// ----------------------------------------------------------------------------
+// Floating layer
+// ----------------------------------------------------------------------------
+
+/// Toggle a window between the tiled strip and the floating layer of its
+/// workspace.
+pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
+    if (win.floating == floating) return;
+
+    const ws = win.workspace orelse return;
+
+    if (floating) {
+        if (win.column != null) {
+            detach(wm, win);
+        }
+
+        win.floating = true;
+        ws.floating.append(win);
+    } else {
+        win.floating_link.remove();
+        win.floating = false;
+        insertNewColumn(&ws.strip, win, wm.gpa, ws.output.rect());
+    }
+
+    wm.needs_layout = true;
 }
 
 // ----------------------------------------------------------------------------
@@ -280,6 +362,50 @@ pub fn expelRight(wm: *WindowManager, strip: *Strip, usable: types.Rectangle) vo
 
     insertColumnAfter(col, new_col);
     strip.active_column = new_col;
+}
+
+// ----------------------------------------------------------------------------
+// Output removal
+// ----------------------------------------------------------------------------
+
+/// Move every window still on `out` onto `dest` (another surviving output),
+/// or mark them for re-placement if no output is left at all.
+///
+/// Must be called from output.reap() BEFORE the removed Output is freed:
+/// Workspace/Strip live embedded inside Output, so once `out` is destroyed
+/// any Column or floating-layer entry still pointing at `out`'s workspaces
+/// is a dangling pointer. Every window (tiled or floating) has to be
+/// detached from `out` first.
+pub fn rehome(wm: *WindowManager, out: *Output, dest: ?*Output) void {
+    for (&out.workspaces, 0..) |*ws, i| {
+        while (ws.strip.columns.first()) |col| {
+            while (col.windows.first()) |win| {
+                detach(wm, win);
+                place(wm, win, dest, i);
+            }
+        }
+        while (ws.floating.first()) |win| {
+            win.floating_link.remove();
+            win.floating = false;
+            place(wm, win, dest, i);
+        }
+    }
+}
+
+/// Shared placement step for rehome(): put `win` on `dest`'s workspace at
+/// index `idx` (clamped), tiled, or flag it for later placement if there
+/// is no destination at all.
+fn place(wm: *WindowManager, win: *Window, dest: ?*Output, idx: usize) void {
+    if (dest) |d| {
+        const clamped = @min(idx, d.workspaces.len - 1);
+        insertNewColumn(&d.workspaces[clamped].strip, win, wm.gpa, d.rect());
+    } else {
+        // No output left to hold it: flag it so the next manage_start
+        // places it as soon as an output appears again (see main.zig
+        // handleManageStart).
+        win.workspace = null;
+        win.new = true;
+    }
 }
 
 /// Move the focused window to another workspace on the same output.

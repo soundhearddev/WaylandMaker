@@ -59,16 +59,29 @@ fn listener(river_out: *river.OutputV1, event: river.OutputV1.Event, wm: *Window
 }
 
 /// Destroy outputs marked as removed. Windows on a removed output are
-/// moved to the first remaining output (see window.rehome).
+/// moved to the first remaining output (see window.rehome) *before* the
+/// Output (and the Workspace/Strip data embedded in it) is freed, so no
+/// Column is ever left pointing at freed memory.
 pub fn reap(wm: *WindowManager) void {
     var it = wm.outputs.first();
     while (it) |out| {
         const next = types.nextOutput(out, wm);
         if (out.removed) {
+            @import("window.zig").rehome(wm, out, firstSurvivor(wm, out));
             out.link.remove();
             out.obj.destroy();
             wm.gpa.destroy(out);
+            wm.needs_layout = true;
         }
         it = next;
     }
+}
+
+/// First output that is not `excluding` and not itself pending removal.
+fn firstSurvivor(wm: *WindowManager, excluding: *Output) ?*Output {
+    var it = wm.outputs.first();
+    while (it) |out| : (it = types.nextOutput(out, wm)) {
+        if (out != excluding and !out.removed) return out;
+    }
+    return null;
 }

@@ -7,6 +7,7 @@ const wayland = @import("wayland");
 const river = wayland.client.river;
 
 const types = @import("types.zig");
+const cfgmod = @import("config.zig");
 
 const Seat = types.Seat;
 const WindowManager = types.WindowManager;
@@ -93,7 +94,7 @@ const MS = Config.mod_shift;
 pub const default_bindings = [_]Def{
     // --- launching --------------------------------------------------------
     .{ .key = KEY_Return, .mods = M, .action = .spawn_terminal },
-    .{ .key = 'd', .mods = M, .action = .spawn_launcher },
+    .{ .key = 'a', .mods = M, .action = .spawn_launcher },
     .{ .key = 'b', .mods = M, .action = .spawn_browser },
 
     // --- window / session -------------------------------------------------
@@ -155,9 +156,22 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     std.log.info("[SEAT] registered {d} keybindings", .{default_bindings.len});
 }
 
+/// def.key is expressed as a QWERTY physical-position keysym; remap it for
+/// the user's configured keyboard_layout so bindings stay on the same
+/// physical key (e.g. Mod+<the key left of "z"> to close, not always the
+/// literal letter 'q'). Non-letter keysyms (Return, arrows, ',', '.', ...)
+/// are unaffected by any of the supported layouts and pass through as-is.
+fn mappedKey(wm: *WindowManager, key: u32) u32 {
+    if (key >= 'a' and key <= 'z') {
+        return cfgmod.layoutMapKeysym(wm.config.keyboard_layout, @intCast(key));
+    }
+    return key;
+}
+
 fn bindOne(wm: *WindowManager, mgr: *river.XkbBindingsV1, seat: *Seat, def: Def) void {
-    const binding = mgr.getXkbBinding(seat.obj, def.key, def.mods) catch |err| {
-        std.log.err("[SEAT] getXkbBinding({x}) failed: {}", .{ def.key, err });
+    const key = mappedKey(wm, def.key);
+    const binding = mgr.getXkbBinding(seat.obj, key, def.mods) catch |err| {
+        std.log.err("[SEAT] getXkbBinding({x}) failed: {}", .{ key, err });
         return;
     };
 

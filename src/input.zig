@@ -133,52 +133,10 @@ fn findWindowAtPoint(wm: *types.WindowManager, x: i32, y: i32) ?*types.Window {
     return null;
 }
 
-pub fn handleKeybinding(wm: *types.WindowManager, action: []const u8) void {
-    if (std.mem.eql(u8, action, "spawn_terminal")) {
-        wm.pending_spawn = wm.config.terminal_cmd;
-    } else if (std.mem.eql(u8, action, "spawn_launcher")) {
-        wm.pending_spawn = wm.config.launcher_cmd;
-    } else if (std.mem.eql(u8, action, "spawn_browser")) {
-        wm.pending_spawn = wm.config.browser_cmd;
-    } else if (std.mem.eql(u8, action, "focus_left")) {
-        if (wm.outputs.first()) |out| {
-            const ws = out.activeWorkspace();
-            if (ws.strip.active_column) |active| {
-                if (types.prevColumn(active)) |prev| {
-                    ws.strip.active_column = prev;
-                    wm.needs_layout = true;
-                }
-            }
-        }
-    } else if (std.mem.eql(u8, action, "focus_right")) {
-        if (wm.outputs.first()) |out| {
-            const ws = out.activeWorkspace();
-            if (ws.strip.active_column) |active| {
-                if (types.nextColumn(active)) |next| {
-                    ws.strip.active_column = next;
-                    wm.needs_layout = true;
-                }
-            }
-        }
-    } else if (std.mem.eql(u8, action, "focus_up")) {
-        if (wm.seats.first()) |s| {
-            if (s.focused) |f| {
-                if (types.prevWindowInColumn(f)) |prev| {
-                    s.focused = prev;
-                    wm.needs_layout = true;
-                }
-            }
-        }
-    } else if (std.mem.eql(u8, action, "focus_down")) {
-        if (wm.seats.first()) |s| {
-            if (s.focused) |f| {
-                if (types.nextWindowInColumn(f)) |next| {
-                    s.focused = next;
-                    wm.needs_layout = true;
-                }
-            }
-        }
-    } else {
-        std.log.debug("unknown action: {s}", .{action});
-    }
-}
+// NOTE: keybinding dispatch is NOT done here. It lives in seat.zig
+// (river_xkb_binding "pressed" -> wm.pending_actions) and action.zig
+// (action.run, executed from manage_start), which is the only dispatcher
+// that is actually wired up and covers the full types.Action set. An
+// earlier, unreachable, string-keyed duplicate of that logic (covering
+// only a handful of actions) used to live here; it was removed to avoid
+// two dispatchers drifting apart.
