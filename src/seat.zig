@@ -79,11 +79,6 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
         },
 
         .op_delta => |ev| {
-            std.log.info(
-                "[POINTER] op_delta dx={d} dy={d}",
-                .{ ev.dx, ev.dy },
-            );
-
             @import("window.zig").pointerDelta(
                 wm,
                 seat,
@@ -93,14 +88,14 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
         },
 
         .op_release => {
-            std.log.info("[POINTER] op_release", .{});
-
             seat.pointer_operation = .none;
             seat.pointer_operation_window = null;
             seat.pointer_drag_dx = 0;
             seat.pointer_drag_dy = 0;
             seat.pointer_last_reorder_x = 0;
             seat.pointer_last_reorder_y = 0;
+
+            seat.obj.opEnd();
         },
 
         else => {},

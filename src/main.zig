@@ -339,7 +339,7 @@ fn renderWindow(
     win: *types.Window,
     workspace_active: bool,
     is_focused: bool,
-    usable: types.Rectangle,
+    _: types.Rectangle,
     cfg: config.Config,
 ) void {
     if (workspace_active and win.hidden) {
@@ -351,8 +351,6 @@ fn renderWindow(
     }
 
     if (!workspace_active) return;
-
-    if (layout.isOffscreen(win, usable)) return;
 
     if (win.node) |node| {
         node.setPosition(win.x, win.y);

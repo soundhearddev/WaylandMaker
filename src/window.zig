@@ -184,22 +184,6 @@ fn markClosed(wm: *WindowManager, win: *Window) void {
         if (s.focused == win) s.focused = null;
     }
 
-    if (win.floating) {
-        if (win.saved_column) |col| {
-            if (col.windows.empty()) {
-                const strip = col.strip;
-
-                if (strip.active_column == col) {
-                    strip.active_column =
-                        types.nextColumn(col) orelse types.prevColumn(col);
-                }
-
-                col.link.remove();
-                wm.gpa.destroy(col);
-            }
-        }
-    }
-
     win.link.remove();
     wm.gpa.destroy(win);
     wm.needs_layout = true;
@@ -261,25 +245,15 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     if (floating) {
         const col = win.column orelse return;
 
-        // Save exact tiled placement.
-        win.saved_column = col;
+        // Remember the exact tiled location.
+        win.saved_column_index = columnIndex(&ws.strip, col);
         win.saved_window_index = windowIndex(col, win);
         win.saved_column_width = col.width;
 
-        // The current tiled geometry becomes the initial floating geometry.
-        // Do not destroy the column: it is our restoration anchor.
-        win.column_link.remove();
-        win.column = null;
+        // Actually remove the window from tiling.
+        detach(wm, win);
 
-        if (col.focused == win) {
-            col.focused = col.windows.first();
-        }
-
-        if (col.strip.active_column == col) {
-            col.strip.active_column =
-                types.nextColumn(col) orelse types.prevColumn(col);
-        }
-
+        // Put it into the independent floating layout.
         win.floating = true;
         ws.floating.append(win);
 
@@ -298,6 +272,18 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     wm.needs_layout = true;
 }
 
+fn columnIndex(strip: *Strip, target: *Column) usize {
+    var index: usize = 0;
+    var it = strip.columns.first();
+
+    while (it) |col| : (it = types.nextColumn(col)) {
+        if (col == target) return index;
+        index += 1;
+    }
+
+    return index;
+}
+
 fn windowIndex(col: *Column, target: *Window) usize {
     var index: usize = 0;
     var it = col.windows.first();
@@ -311,34 +297,63 @@ fn windowIndex(col: *Column, target: *Window) usize {
 }
 
 fn restoreTiled(wm: *WindowManager, win: *Window) void {
-    const col = win.saved_column orelse {
-        const ws = win.workspace orelse return;
+    const ws = win.workspace orelse return;
+    const strip = &ws.strip;
 
-        insertNewColumn(
-            &ws.strip,
-            win,
-            wm.gpa,
-            ws.output.rect(),
-        );
+    // Try to restore the original column.
+    var col: ?*Column = null;
+    var index: usize = 0;
+    var it = strip.columns.first();
 
-        return;
-    };
+    while (it) |candidate| : (it = types.nextColumn(candidate)) {
+        if (index == win.saved_column_index) {
+            col = candidate;
+            break;
+        }
 
-    col.width = win.saved_column_width;
-
-    col.windows.append(win);
-    win.column = col;
-    win.workspace = col.strip.workspace;
-
-    var i: usize = 0;
-    while (i < win.saved_window_index) : (i += 1) {
-        moveWindowUp(win);
+        index += 1;
     }
 
-    col.focused = win;
-    col.strip.active_column = col;
+    if (col == null) {
+        // The original column disappeared while the window was floating.
+        const new_col = wm.gpa.create(Column) catch return;
 
-    win.saved_column = null;
+        new_col.* = .{
+            .strip = strip,
+            .link = undefined,
+            .width = win.saved_column_width,
+            .windows = undefined,
+        };
+
+        new_col.windows.init();
+        new_col.windows.append(win);
+        new_col.focused = win;
+        win.column = new_col;
+
+        insertColumnAtIndex(
+            strip,
+            new_col,
+            win.saved_column_index,
+        );
+
+        strip.active_column = new_col;
+    } else {
+        const existing = col.?;
+
+        existing.width = win.saved_column_width;
+
+        insertWindowAtIndex(
+            existing,
+            win,
+            win.saved_window_index,
+        );
+
+        win.column = existing;
+        existing.focused = win;
+        strip.active_column = existing;
+    }
+
+    win.saved_column_index = 0;
     win.saved_window_index = 0;
     win.saved_column_width = 0;
 }
@@ -548,67 +563,25 @@ pub fn pointerDelta(
 ) void {
     const win = seat.pointer_operation_window orelse return;
 
-    std.log.info(
-        "[POINTER] delta: win={*} floating={} dx={d} dy={d}",
-        .{ win, win.floating, dx, dy },
-    );
-
     switch (seat.pointer_operation) {
-        .none => return,
+        .none => {},
 
         .move => {
-            if (win.floating) {
-                win.x = seat.pointer_initial_x + dx;
-                win.y = seat.pointer_initial_y + dy;
-                wm.needs_layout = true;
-                return;
+            if (!win.floating) {
+                setFloating(wm, win, true);
             }
 
-            const threshold: i32 = 32;
+            win.x = seat.pointer_initial_x + dx;
+            win.y = seat.pointer_initial_y + dy;
 
-            // Horizontal tiled drag.
-            if (@abs(dx) >= threshold and @abs(dx) > @abs(dy)) {
-                const distance = dx - seat.pointer_last_reorder_x;
-
-                if (@abs(distance) >= threshold) {
-                    const col = win.column orelse return;
-
-                    if (distance < 0) {
-                        moveColumnLeft(col.strip);
-                    } else {
-                        moveColumnRight(col.strip);
-                    }
-
-                    col.strip.active_column = col;
-
-                    seat.pointer_last_reorder_x = dx;
-                    wm.pending_focus = win;
-                    wm.needs_layout = true;
-                }
-
-                return;
-            }
-
-            // Vertical tiled drag.
-            if (@abs(dy) >= threshold and @abs(dy) > @abs(dx)) {
-                const distance = dy - seat.pointer_last_reorder_y;
-
-                if (@abs(distance) >= threshold) {
-                    if (distance < 0) {
-                        moveWindowUp(win);
-                    } else {
-                        moveWindowDown(win);
-                    }
-
-                    seat.pointer_last_reorder_y = dy;
-                    wm.pending_focus = win;
-                    wm.needs_layout = true;
-                }
-            }
+            wm.pending_focus = win;
+            wm.needs_layout = true;
         },
 
         .resize => {
-            if (!win.floating) return;
+            if (!win.floating) {
+                setFloating(wm, win, true);
+            }
 
             win.width = @max(
                 Config.min_column_width,
@@ -620,6 +593,7 @@ pub fn pointerDelta(
                 seat.pointer_initial_height + dy,
             );
 
+            wm.pending_focus = win;
             wm.needs_layout = true;
         },
     }

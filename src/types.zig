@@ -227,6 +227,11 @@ pub const Window = struct {
     /// Link used while the window is in Workspace.floating.
     floating_link: wl.list.Link = undefined,
 
+    // Saved tiled placement while floating.
+    saved_column_index: usize = 0,
+    saved_window_index: usize = 0,
+    saved_column_width: i32 = 0,
+
     /// WindowMaker "Omnipresent" state.
     sticky: bool = false,
 
@@ -249,11 +254,6 @@ pub const Window = struct {
 
     /// Set while the window is being dragged/resized interactively.
     floating: bool = false,
-
-    // Saved tiled placement while floating.
-    saved_column: ?*Column = null,
-    saved_window_index: usize = 0,
-    saved_column_width: i32 = 0,
 };
 
 // ============================================================================
