@@ -370,7 +370,7 @@ pub fn pointerDelta(
     dx: i32,
     dy: i32,
 ) void {
-    const win = seat.pointer_window orelse return;
+    const win = seat.pointer_operation_window orelse return;
 
     switch (seat.pointer_operation) {
         .none => return,
@@ -397,6 +397,8 @@ pub fn pointerDelta(
                     } else {
                         moveColumnRight(col.strip);
                     }
+
+                    col.strip.active_column = col;
 
                     seat.pointer_last_reorder_x = dx;
                     wm.pending_focus = win;

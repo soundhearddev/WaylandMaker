@@ -89,8 +89,11 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
 
         .op_release => {
             seat.pointer_operation = .none;
+            seat.pointer_operation_window = null;
             seat.pointer_drag_dx = 0;
             seat.pointer_drag_dy = 0;
+            seat.pointer_last_reorder_x = 0;
+            seat.pointer_last_reorder_y = 0;
         },
 
         else => {},
@@ -243,14 +246,18 @@ fn pointerBindingListener(
         .pressed => {
             const win = seat.pointer_window orelse return;
 
+            seat.pointer_operation_window = win;
             seat.pointer_operation = binding.operation;
 
             seat.pointer_initial_x = win.x;
             seat.pointer_initial_y = win.y;
             seat.pointer_initial_width = win.width;
             seat.pointer_initial_height = win.height;
+
             seat.pointer_drag_dx = 0;
             seat.pointer_drag_dy = 0;
+            seat.pointer_last_reorder_x = 0;
+            seat.pointer_last_reorder_y = 0;
 
             seat.obj.opStartPointer();
 

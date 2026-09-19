@@ -332,6 +332,7 @@ pub const Seat = struct {
 
     pointer_window: ?*Window = null,
     pointer_operation: PointerOperation = .none,
+    pointer_operation_window: ?*Window = null,
 
     pointer_initial_x: i32 = 0,
     pointer_initial_y: i32 = 0,
