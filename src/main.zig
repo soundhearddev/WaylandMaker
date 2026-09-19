@@ -231,6 +231,7 @@ fn handleManageStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
 
 fn applyLayout(wm: *WindowManager) void {
     var oit = wm.outputs.first();
+
     while (oit) |out| : (oit = types.nextOutput(out, wm)) {
         if (!out.isReady()) continue;
 
@@ -241,8 +242,10 @@ fn applyLayout(wm: *WindowManager) void {
         layout.recomputeGeometry(strip, usable);
 
         var cit = strip.columns.first();
+
         while (cit) |col| : (cit = types.nextColumn(col)) {
             var wit = col.windows.first();
+
             while (wit) |win| : (wit = types.nextWindowInColumn(win)) {
                 if (win.proposed_w != win.width or win.proposed_h != win.height) {
                     win.obj.proposeDimensions(win.width, win.height);
@@ -257,6 +260,23 @@ fn applyLayout(wm: *WindowManager) void {
                     .right = true,
                 });
             }
+        }
+
+        var fit = ws.floating.first();
+
+        while (fit) |win| : (fit = if (win.floating_link.next) |next| blk: {
+            break :blk @fieldParentPtr("floating_link", next);
+        } else null) {
+            win.obj.proposeDimensions(win.width, win.height);
+            win.proposed_w = win.width;
+            win.proposed_h = win.height;
+
+            win.obj.setTiled(.{
+                .top = false,
+                .bottom = false,
+                .left = false,
+                .right = false,
+            });
         }
     }
 }
@@ -303,7 +323,13 @@ fn handleRenderStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
     river_wm.renderFinish();
 }
 
-fn renderWindow(win: *types.Window, workspace_active: bool, is_focused: bool, usable: types.Rectangle, cfg: config.Config) void {
+fn renderWindow(
+    win: *types.Window,
+    workspace_active: bool,
+    is_focused: bool,
+    usable: types.Rectangle,
+    cfg: config.Config,
+) void {
     if (workspace_active and win.hidden) {
         win.obj.show();
         win.hidden = false;
@@ -311,17 +337,17 @@ fn renderWindow(win: *types.Window, workspace_active: bool, is_focused: bool, us
         win.obj.hide();
         win.hidden = true;
     }
-    if (!workspace_active) return;
 
-    if (win.node) |node| {
-        node.setPosition(win.x, win.y);
-        if (is_focused) node.placeTop();
-    }
+    if (!workspace_active) return;
 
     if (layout.isOffscreen(win, usable)) return;
 
     if (win.border_focused != is_focused) {
-        const c = if (is_focused) cfg.border_focused else cfg.border_unfocused;
+        const c = if (is_focused)
+            cfg.border_focused
+        else
+            cfg.border_unfocused;
+
         win.obj.setBorders(
             .{ .top = true, .bottom = true, .left = true, .right = true },
             cfg.border_width,
@@ -330,6 +356,7 @@ fn renderWindow(win: *types.Window, workspace_active: bool, is_focused: bool, us
             channel(c & 0xff),
             0xffffffff,
         );
+
         win.border_focused = is_focused;
     }
 }

@@ -249,6 +249,11 @@ pub const Window = struct {
 
     /// Set while the window is being dragged/resized interactively.
     floating: bool = false,
+
+    /// Previous tiled position, preserved while the window is floating.
+    saved_column_index: usize = 0,
+    saved_window_index: usize = 0,
+    saved_column_width: i32 = 0,
 };
 
 // ============================================================================

@@ -240,19 +240,219 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     const ws = win.workspace orelse return;
 
     if (floating) {
-        if (win.column != null) {
-            detach(wm, win);
-        }
+        const col = win.column orelse return;
+
+        // Save the exact tiled position before removing the window.
+        win.saved_column_index = columnIndex(col);
+        win.saved_window_index = windowIndex(col, win);
+        win.saved_column_width = col.width;
+
+        // The geometry produced by the tiled layout becomes the initial
+        // floating position/size.
+        //
+        // Remove from the tiled layer. detach() also handles the case
+        // where this was the only window in the column.
+        detach(wm, win);
 
         win.floating = true;
         ws.floating.append(win);
-    } else {
-        win.floating_link.remove();
-        win.floating = false;
-        insertNewColumn(&ws.strip, win, wm.gpa, ws.output.rect());
+
+        wm.pending_focus = win;
+        wm.needs_layout = true;
+        return;
     }
 
+    // Floating -> tiled.
+    win.floating_link.remove();
+    win.floating = false;
+
+    restoreTiled(wm, win, ws);
+
+    wm.pending_focus = win;
     wm.needs_layout = true;
+}
+
+fn columnIndex(target: *Column) usize {
+    var index: usize = 0;
+    var it = target.strip.columns.first();
+
+    while (it) |col| : (it = types.nextColumn(col)) {
+        if (col == target) return index;
+        index += 1;
+    }
+
+    return index;
+}
+
+fn windowIndex(target: *Column, target_win: *Window) usize {
+    var index: usize = 0;
+    var it = target.windows.first();
+
+    while (it) |win| : (it = types.nextWindowInColumn(win)) {
+        if (win == target_win) return index;
+        index += 1;
+    }
+
+    return index;
+}
+
+fn restoreTiled(
+    wm: *WindowManager,
+    win: *Window,
+    ws: *types.Workspace,
+) void {
+    const strip = &ws.strip;
+
+    // Try to find the original column.
+    var target_col: ?*Column = null;
+    var index: usize = 0;
+    var it = strip.columns.first();
+
+    while (it) |col| : (it = types.nextColumn(col)) {
+        if (index == win.saved_column_index) {
+            target_col = col;
+            break;
+        }
+
+        index += 1;
+    }
+
+    if (target_col) |col| {
+        col.width = if (win.saved_column_width > 0)
+            win.saved_column_width
+        else
+            col.width;
+
+        insertWindowAtIndex(col, win, win.saved_window_index);
+
+        win.column = col;
+        col.focused = win;
+        strip.active_column = col;
+        return;
+    }
+
+    // The original column no longer exists. Recreate it at the original
+    // column position.
+    const col = wm.gpa.create(Column) catch {
+        insertNewColumn(
+            strip,
+            win,
+            wm.gpa,
+            ws.output.rect(),
+        );
+        return;
+    };
+
+    col.* = .{
+        .strip = strip,
+        .link = undefined,
+        .width = @max(
+            Config.min_column_width,
+            win.saved_column_width,
+        ),
+        .windows = undefined,
+    };
+
+    col.windows.init();
+
+    insertColumnAtIndex(
+        strip,
+        col,
+        win.saved_column_index,
+    );
+
+    col.windows.append(win);
+    col.focused = win;
+    win.column = col;
+    strip.active_column = col;
+}
+
+fn insertWindowAtIndex(
+    col: *Column,
+    win: *Window,
+    index: usize,
+) void {
+    // Empty column.
+    if (col.windows.first() == null) {
+        col.windows.append(win);
+        return;
+    }
+
+    // Append first so the link is initialized by wl.list.
+    col.windows.append(win);
+
+    // Find the window currently occupying the requested position.
+    var target: ?*Window = null;
+    var current = col.windows.first();
+    var i: usize = 0;
+
+    while (current) |existing| {
+        if (existing == win) break;
+
+        if (i == index) {
+            target = existing;
+            break;
+        }
+
+        i += 1;
+        current = types.nextWindowInColumn(existing);
+    }
+
+    if (target == null) return;
+
+    // Remove the just-appended window and insert it before target.
+    win.column_link.remove();
+
+    const before = target.?.column_link.prev orelse return;
+
+    win.column_link.prev = before;
+    win.column_link.next = &target.?.column_link;
+
+    before.next = &win.column_link;
+    target.?.column_link.prev = &win.column_link;
+}
+
+fn insertColumnAtIndex(
+    strip: *Strip,
+    col: *Column,
+    index: usize,
+) void {
+    // Empty strip.
+    if (strip.columns.first() == null) {
+        strip.columns.append(col);
+        return;
+    }
+
+    // Append first so the link is initialized.
+    strip.columns.append(col);
+
+    var target: ?*Column = null;
+    var current = strip.columns.first();
+    var i: usize = 0;
+
+    while (current) |existing| {
+        if (existing == col) break;
+
+        if (i == index) {
+            target = existing;
+            break;
+        }
+
+        i += 1;
+        current = types.nextColumn(existing);
+    }
+
+    if (target == null) return;
+
+    col.link.remove();
+
+    const before = target.?.link.prev orelse return;
+
+    col.link.prev = before;
+    col.link.next = &target.?.link;
+
+    before.next = &col.link;
+    target.?.link.prev = &col.link;
 }
 
 // ----------------------------------------------------------------------------
@@ -387,12 +587,7 @@ pub fn pointerDelta(
             if (win.floating) {
                 win.x = seat.pointer_initial_x + dx;
                 win.y = seat.pointer_initial_y + dy;
-
-                if (win.node) |node| {
-                    node.setPosition(win.x, win.y);
-                    node.placeTop();
-                }
-
+                wm.needs_layout = true;
                 return;
             }
 
