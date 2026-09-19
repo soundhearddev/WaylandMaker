@@ -387,7 +387,12 @@ pub fn pointerDelta(
             if (win.floating) {
                 win.x = seat.pointer_initial_x + dx;
                 win.y = seat.pointer_initial_y + dy;
-                wm.needs_layout = true;
+
+                if (win.node) |node| {
+                    node.setPosition(win.x, win.y);
+                    node.placeTop();
+                }
+
                 return;
             }
 

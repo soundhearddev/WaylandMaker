@@ -238,14 +238,8 @@ fn applyLayout(wm: *WindowManager) void {
         const strip = &ws.strip;
         const usable = out.rect();
 
-        if (strip.active_column) |active| {
-            layout.recomputeGeometry(strip, usable);
-            layout.scrollToColumn(strip, active, usable.width);
-        }
-
         layout.recomputeGeometry(strip, usable);
 
-        // Tiled windows.
         var cit = strip.columns.first();
         while (cit) |col| : (cit = types.nextColumn(col)) {
             var wit = col.windows.first();
@@ -262,18 +256,6 @@ fn applyLayout(wm: *WindowManager) void {
                     .left = true,
                     .right = true,
                 });
-            }
-        }
-
-        // Floating windows.
-        var fit = ws.floating.first();
-        while (fit) |win| : (fit = if (win.floating_link.next) |next| blk: {
-            break :blk @fieldParentPtr("floating_link", next);
-        } else null) {
-            if (win.proposed_w != win.width or win.proposed_h != win.height) {
-                win.obj.proposeDimensions(win.width, win.height);
-                win.proposed_w = win.width;
-                win.proposed_h = win.height;
             }
         }
     }
