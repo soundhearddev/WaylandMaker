@@ -22,10 +22,12 @@ pub fn create(wm: *WindowManager, river_seat: *river.SeatV1) !*Seat {
         .obj = river_seat,
         .link = undefined,
         .xkb_bindings = undefined,
-        // Bindings are created + enabled from manage_start.
+        .pointer_bindings = undefined,
         .needs_binding_setup = true,
     };
+
     seat.xkb_bindings.init();
+    seat.pointer_bindings.init();
 
     wm.seats.append(seat);
     river_seat.setListener(*WindowManager, listener, wm);
@@ -46,9 +48,10 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
         .removed => {
             seat.removed = true;
         },
+
         .window_interaction => |ev| {
-            // Click-to-focus: an interaction moves focus to that window.
             var it = wm.windows.first();
+
             while (it) |w| : (it = types.nextWindow(w, wm)) {
                 if (w.obj == ev.window) {
                     @import("window.zig").setActive(w);
@@ -58,6 +61,38 @@ fn listener(river_seat: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowMan
                 }
             }
         },
+
+        .pointer_enter => |ev| {
+            seat.pointer_window = null;
+
+            var it = wm.windows.first();
+            while (it) |w| : (it = types.nextWindow(w, wm)) {
+                if (w.obj == ev.window) {
+                    seat.pointer_window = w;
+                    break;
+                }
+            }
+        },
+
+        .pointer_leave => {
+            seat.pointer_window = null;
+        },
+
+        .op_delta => |ev| {
+            @import("window.zig").pointerDelta(
+                wm,
+                seat,
+                ev.dx,
+                ev.dy,
+            );
+        },
+
+        .op_release => {
+            seat.pointer_operation = .none;
+            seat.pointer_drag_dx = 0;
+            seat.pointer_drag_dy = 0;
+        },
+
         else => {},
     }
 }
@@ -90,6 +125,8 @@ const KEY_equal: u32 = '=';
 
 const M = Config.mod;
 const MS = Config.mod_shift;
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 pub const default_bindings = [_]Def{
     // --- launching --------------------------------------------------------
@@ -146,7 +183,6 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     seat.needs_binding_setup = false;
 
     const mgr = wm.xkb_bindings orelse {
-        // river_xkb_bindings_v1 not available (yet): retry next manage.
         seat.needs_binding_setup = true;
         return;
     };
@@ -154,7 +190,77 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     for (default_bindings) |def| {
         bindOne(wm, mgr, seat, def);
     }
+
+    setupPointerBindings(wm, seat);
+
     std.log.info("[SEAT] registered {d} keybindings", .{default_bindings.len});
+}
+
+fn setupPointerBindings(wm: *WindowManager, seat: *Seat) void {
+    createPointerBinding(wm, seat, BTN_LEFT, .move);
+    createPointerBinding(wm, seat, BTN_RIGHT, .resize);
+}
+
+fn createPointerBinding(
+    wm: *WindowManager,
+    seat: *Seat,
+    button: u32,
+    operation: types.PointerOperation,
+) void {
+    const binding = seat.obj.getPointerBinding(button, Config.mod) catch |err| {
+        std.log.err(
+            "[SEAT] getPointerBinding({x}) failed: {}",
+            .{ button, err },
+        );
+        return;
+    };
+
+    const node = wm.gpa.create(types.PointerBinding) catch return;
+
+    node.* = .{
+        .obj = binding,
+        .seat = seat,
+        .button = button,
+        .operation = operation,
+        .link = undefined,
+    };
+
+    seat.pointer_bindings.append(node);
+
+    binding.setListener(*types.PointerBinding, pointerBindingListener, node);
+    binding.enable();
+}
+
+fn pointerBindingListener(
+    _: *river.PointerBindingV1,
+    event: river.PointerBindingV1.Event,
+    binding: *types.PointerBinding,
+) void {
+    const wm = @import("window.zig").global_wm orelse return;
+    const seat = binding.seat;
+
+    switch (event) {
+        .pressed => {
+            const win = seat.pointer_window orelse return;
+
+            seat.pointer_operation = binding.operation;
+
+            seat.pointer_initial_x = win.x;
+            seat.pointer_initial_y = win.y;
+            seat.pointer_initial_width = win.width;
+            seat.pointer_initial_height = win.height;
+            seat.pointer_drag_dx = 0;
+            seat.pointer_drag_dy = 0;
+
+            seat.obj.opStartPointer();
+
+            @import("window.zig").setActive(win);
+            wm.pending_focus = win;
+            wm.needs_layout = true;
+        },
+
+        .released => {},
+    }
 }
 
 /// def.key is expressed as a QWERTY physical-position keysym; remap it for

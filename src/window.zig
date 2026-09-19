@@ -364,6 +364,84 @@ pub fn expelRight(wm: *WindowManager, strip: *Strip, usable: types.Rectangle) vo
     strip.active_column = new_col;
 }
 
+pub fn pointerDelta(
+    wm: *WindowManager,
+    seat: *types.Seat,
+    dx: i32,
+    dy: i32,
+) void {
+    const win = seat.pointer_window orelse return;
+
+    switch (seat.pointer_operation) {
+        .none => return,
+
+        .move => {
+            if (win.floating) {
+                win.x = seat.pointer_initial_x + dx;
+                win.y = seat.pointer_initial_y + dy;
+                wm.needs_layout = true;
+                return;
+            }
+
+            const threshold: i32 = 32;
+
+            // Horizontal tiled drag.
+            if (@abs(dx) >= threshold and @abs(dx) > @abs(dy)) {
+                const distance = dx - seat.pointer_last_reorder_x;
+
+                if (@abs(distance) >= threshold) {
+                    const col = win.column orelse return;
+
+                    if (distance < 0) {
+                        moveColumnLeft(col.strip);
+                    } else {
+                        moveColumnRight(col.strip);
+                    }
+
+                    seat.pointer_last_reorder_x = dx;
+                    wm.pending_focus = win;
+                    wm.needs_layout = true;
+                }
+
+                return;
+            }
+
+            // Vertical tiled drag.
+            if (@abs(dy) >= threshold and @abs(dy) > @abs(dx)) {
+                const distance = dy - seat.pointer_last_reorder_y;
+
+                if (@abs(distance) >= threshold) {
+                    if (distance < 0) {
+                        moveWindowUp(win);
+                    } else {
+                        moveWindowDown(win);
+                    }
+
+                    seat.pointer_last_reorder_y = dy;
+                    wm.pending_focus = win;
+                    wm.needs_layout = true;
+                }
+            }
+        },
+
+        .resize => {
+            if (!win.floating) return;
+
+            win.width = @max(
+                Config.min_column_width,
+                seat.pointer_initial_width + dx,
+            );
+
+            win.height = @max(
+                100,
+                seat.pointer_initial_height + dy,
+            );
+
+            wm.needs_layout = true;
+        },
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Output removal
 // ----------------------------------------------------------------------------

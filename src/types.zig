@@ -301,6 +301,20 @@ pub const XkbBinding = struct {
     link: wl.list.Link,
 };
 
+pub const PointerOperation = enum {
+    none,
+    move,
+    resize,
+};
+
+pub const PointerBinding = struct {
+    obj: *river.PointerBindingV1,
+    seat: *Seat,
+    button: u32,
+    operation: PointerOperation,
+    link: wl.list.Link,
+};
+
 // ============================================================================
 // Seat
 // ============================================================================
@@ -308,15 +322,26 @@ pub const XkbBinding = struct {
 pub const Seat = struct {
     obj: *river.SeatV1,
     removed: bool = false,
-    /// True until setupBindings() ran inside a manage sequence.
     needs_binding_setup: bool = false,
     link: wl.list.Link,
 
     xkb_bindings: wl.list.Head(XkbBinding, .link),
+    pointer_bindings: wl.list.Head(PointerBinding, .link),
 
-    /// Window the compositor currently gives keyboard focus (as far as we
-    /// requested it); used to draw the focused border.
     focused: ?*Window = null,
+
+    pointer_window: ?*Window = null,
+    pointer_operation: PointerOperation = .none,
+
+    pointer_initial_x: i32 = 0,
+    pointer_initial_y: i32 = 0,
+    pointer_initial_width: i32 = 0,
+    pointer_initial_height: i32 = 0,
+
+    pointer_drag_dx: i32 = 0,
+    pointer_drag_dy: i32 = 0,
+    pointer_last_reorder_x: i32 = 0,
+    pointer_last_reorder_y: i32 = 0,
 };
 
 // ============================================================================
