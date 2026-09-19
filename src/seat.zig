@@ -334,6 +334,8 @@ pub fn reap(wm: *WindowManager) void {
 
 pub fn focus(seat: *Seat, win: ?*types.Window) void {
     if (win) |w| {
+        if (w.closed or !w.ready) return;
+
         seat.obj.focusWindow(w.obj);
         seat.focused = w;
     } else {

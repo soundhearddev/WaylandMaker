@@ -206,7 +206,11 @@ fn handleManageStart(river_wm: *river.WindowManagerV1, wm: *WindowManager) void 
     }
 
     if (wm.pending_focus) |w| {
-        if (wm.seats.first()) |s| seat.focus(s, w);
+        if (!w.closed and w.ready) {
+            if (wm.seats.first()) |s| {
+                seat.focus(s, w);
+            }
+        }
         wm.pending_focus = null;
     } else if (wm.seats.first()) |s| {
         if (s.focused == null) {
