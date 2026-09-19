@@ -110,7 +110,7 @@ pub fn insertNewColumn(strip: *Strip, win: *Window, gpa: std.mem.Allocator, usab
     col.focused = win;
 
     if (strip.active_column) |active| {
-        // Insert right after the active column (niri behaviour).
+        // Insert right after the active column.
         insertColumnAfter(active, col);
     } else {
         strip.columns.append(col);
@@ -186,7 +186,7 @@ pub fn setActive(win: *Window) void {
 }
 
 // ----------------------------------------------------------------------------
-// Column / window rearrangement (called from action.zig)
+// Column / window rearrangement
 // ----------------------------------------------------------------------------
 
 pub fn moveColumnLeft(strip: *Strip) void {

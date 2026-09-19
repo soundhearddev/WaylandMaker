@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: 0BSD
 //
 // river_seat_v1 lifecycle and keybindings.
-//
-// WHY KEYBINDS NEVER WORKED BEFORE (all three had to be fixed):
-//   1. river_xkb_bindings_v1 was never bound in main.zig and its protocol
-//      XML was never scanned in build.zig -> there was no object to create
-//      a binding with at all.
-//   2. get_xkb_binding takes an xkbcommon *keysym*, not a Linux evdev
-//      KEY_* code. Keysyms for letters/digits equal their ASCII value, but
-//      Return, arrows, Home/End, ... do not. The table below uses the real
-//      XKB_KEY_* values from xkbcommon-keysyms.h.
-//   3. `enable` may only be sent inside a manage sequence. Bindings are
-//      therefore created here but enabled from main.zig's manage_start.
 
 const std = @import("std");
 const wayland = @import("wayland");

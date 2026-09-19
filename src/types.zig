@@ -2,16 +2,11 @@
 //
 // Central data model: Output -> Workspace -> Strip -> Column -> Window,
 // plus Seat, keybinding actions and the global WindowManager root.
-//
-// Scrollable tiling model (niri-style):
-//   * A Strip is an infinitely long horizontal band of Columns.
-//   * Every Column has a FIXED width (it never shrinks because more
-//     windows are opened) and stacks its Windows vertically.
-//   * The output is only a *viewport* into the strip. `scroll_x` is the
-//     strip coordinate of the viewport's left edge and follows the focus.
 
 const std = @import("std");
 const wayland = @import("wayland");
+const config = @import("config.zig");
+const wmaker = @import("compatibility.zig");
 const river = wayland.client.river;
 const wl = wayland.client.wl;
 
@@ -47,10 +42,10 @@ pub const Config = struct {
 
     pub const workspace_count: u32 = 4;
 
-    // Default programs for the spawn keybinds.
+    // Default Parameter
     pub const terminal_cmd = [_][]const u8{"alacritty"};
     pub const launcher_cmd = [_][]const u8{"fuzzel"};
-    pub const browser_cmd = [_][]const u8{"firefox"};
+    pub const browser_cmd = [_][]const u8{"librewolf"};
 };
 
 pub const Rectangle = struct {
@@ -316,6 +311,8 @@ pub const Seat = struct {
 pub const WindowManager = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    config: config.Config,
+    wmaker_ctx: wmaker.WMakerContext,
 
     obj: ?*river.WindowManagerV1 = null,
     /// Version we bound river_window_manager_v1 with (see main.zig).
