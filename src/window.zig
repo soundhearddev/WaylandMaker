@@ -370,7 +370,15 @@ pub fn pointerDelta(
     dx: i32,
     dy: i32,
 ) void {
-    const win = seat.pointer_operation_window orelse return;
+    const win = seat.pointer_window orelse {
+        std.log.info("[POINTER] delta: NO pointer_window dx={d} dy={d}", .{ dx, dy });
+        return;
+    };
+
+    std.log.info(
+        "[POINTER] delta: win={*} floating={} dx={d} dy={d}",
+        .{ win, win.floating, dx, dy },
+    );
 
     switch (seat.pointer_operation) {
         .none => return,
