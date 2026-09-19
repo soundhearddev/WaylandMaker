@@ -184,6 +184,22 @@ fn markClosed(wm: *WindowManager, win: *Window) void {
         if (s.focused == win) s.focused = null;
     }
 
+    if (win.floating) {
+        if (win.saved_column) |col| {
+            if (col.windows.empty()) {
+                const strip = col.strip;
+
+                if (strip.active_column == col) {
+                    strip.active_column =
+                        types.nextColumn(col) orelse types.prevColumn(col);
+                }
+
+                col.link.remove();
+                wm.gpa.destroy(col);
+            }
+        }
+    }
+
     win.link.remove();
     wm.gpa.destroy(win);
     wm.needs_layout = true;
@@ -232,8 +248,11 @@ fn detach(wm: *WindowManager, win: *Window) void {
 // Floating layer
 // ----------------------------------------------------------------------------
 
-/// Toggle a window between the tiled strip and the floating layer of its
-/// workspace.
+/// Toggle a window between the tiled strip and the floating layer.
+///
+/// When entering floating mode we keep the original Column alive. This is
+/// intentional: it gives us an exact, stable place to restore the window
+/// later without rebuilding the column list or manually manipulating links.
 pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     if (win.floating == floating) return;
 
@@ -242,17 +261,24 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     if (floating) {
         const col = win.column orelse return;
 
-        // Save the exact tiled position before removing the window.
-        win.saved_column_index = columnIndex(col);
+        // Remember the exact tiled position.
+        win.saved_column = col;
         win.saved_window_index = windowIndex(col, win);
         win.saved_column_width = col.width;
 
-        // The geometry produced by the tiled layout becomes the initial
-        // floating position/size.
-        //
-        // Remove from the tiled layer. detach() also handles the case
-        // where this was the only window in the column.
-        detach(wm, win);
+        // Remove the window from the column, but deliberately DO NOT
+        // destroy an empty column. The column is our restoration anchor.
+        win.column_link.remove();
+        win.column = null;
+
+        if (col.focused == win) {
+            col.focused = col.windows.first();
+        }
+
+        if (col.strip.active_column == col) {
+            col.strip.active_column =
+                types.nextColumn(col) orelse types.prevColumn(col);
+        }
 
         win.floating = true;
         ws.floating.append(win);
@@ -266,76 +292,29 @@ pub fn setFloating(wm: *WindowManager, win: *Window, floating: bool) void {
     win.floating_link.remove();
     win.floating = false;
 
-    restoreTiled(wm, win, ws);
+    restoreTiled(wm, win);
 
     wm.pending_focus = win;
     wm.needs_layout = true;
 }
 
-fn columnIndex(target: *Column) usize {
+fn windowIndex(col: *Column, target: *Window) usize {
     var index: usize = 0;
-    var it = target.strip.columns.first();
-
-    while (it) |col| : (it = types.nextColumn(col)) {
-        if (col == target) return index;
-        index += 1;
-    }
-
-    return index;
-}
-
-fn windowIndex(target: *Column, target_win: *Window) usize {
-    var index: usize = 0;
-    var it = target.windows.first();
+    var it = col.windows.first();
 
     while (it) |win| : (it = types.nextWindowInColumn(win)) {
-        if (win == target_win) return index;
+        if (win == target) return index;
         index += 1;
     }
 
     return index;
 }
 
-fn restoreTiled(
-    wm: *WindowManager,
-    win: *Window,
-    ws: *types.Workspace,
-) void {
-    const strip = &ws.strip;
-
-    // Try to find the original column.
-    var target_col: ?*Column = null;
-    var index: usize = 0;
-    var it = strip.columns.first();
-
-    while (it) |col| : (it = types.nextColumn(col)) {
-        if (index == win.saved_column_index) {
-            target_col = col;
-            break;
-        }
-
-        index += 1;
-    }
-
-    if (target_col) |col| {
-        col.width = if (win.saved_column_width > 0)
-            win.saved_column_width
-        else
-            col.width;
-
-        insertWindowAtIndex(col, win, win.saved_window_index);
-
-        win.column = col;
-        col.focused = win;
-        strip.active_column = col;
-        return;
-    }
-
-    // The original column no longer exists. Recreate it at the original
-    // column position.
-    const col = wm.gpa.create(Column) catch {
+fn restoreTiled(wm: *WindowManager, win: *Window) void {
+    const col = win.saved_column orelse {
+        const ws = win.workspace orelse return;
         insertNewColumn(
-            strip,
+            &ws.strip,
             win,
             wm.gpa,
             ws.output.rect(),
@@ -343,28 +322,23 @@ fn restoreTiled(
         return;
     };
 
-    col.* = .{
-        .strip = strip,
-        .link = undefined,
-        .width = @max(
-            Config.min_column_width,
-            win.saved_column_width,
-        ),
-        .windows = undefined,
-    };
-
-    col.windows.init();
-
-    insertColumnAtIndex(
-        strip,
-        col,
-        win.saved_column_index,
-    );
+    col.width = win.saved_column_width;
 
     col.windows.append(win);
-    col.focused = win;
     win.column = col;
-    strip.active_column = col;
+    win.workspace = col.strip.workspace;
+
+    var i: usize = 0;
+    while (i < win.saved_window_index) : (i += 1) {
+        moveWindowUp(win);
+    }
+
+    col.focused = win;
+    col.strip.active_column = col;
+
+    win.saved_column = null;
+    win.saved_window_index = 0;
+    win.saved_column_width = 0;
 }
 
 fn insertWindowAtIndex(

@@ -342,6 +342,14 @@ fn renderWindow(
 
     if (layout.isOffscreen(win, usable)) return;
 
+    if (win.node) |node| {
+        node.setPosition(win.x, win.y);
+
+        if (is_focused) {
+            node.placeTop();
+        }
+    }
+
     if (win.border_focused != is_focused) {
         const c = if (is_focused)
             cfg.border_focused

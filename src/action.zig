@@ -40,9 +40,15 @@ pub fn run(wm: *WindowManager, act: Action) void {
 
         .toggle_floating => {
             const s = strip orelse return;
-            const win = s.focusedWindow() orelse return;
+            const seat = wm.seats.first() orelse return;
+            const win = seat.focused orelse return;
 
             window.setFloating(wm, win, !win.floating);
+
+            if (!win.floating) {
+                s.active_column = win.column;
+            }
+
             wm.pending_focus = win;
             wm.needs_layout = true;
         },
