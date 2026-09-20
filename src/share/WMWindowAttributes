@@ -1,0 +1,18 @@
+// Per-application rules. Copy to ~/.config/wmaker-wl/WMWindowAttributes
+// (or ~/GNUstep/Defaults/WMWindowAttributes).
+//
+// Key = app_id. "instance.class" keys from Window Maker files work too, and
+// matching ignores upper/lower case.
+//
+// Acted on today:   StartWorkspace (1-based)  Omnipresent  KeepOnTop
+//                   StartMaximized  NoBorder  Unfocusable
+//                   Floating (wmaker-wl extension: Yes = float, No = tile)
+// Read, no effect yet (they need title bars / dock): NoTitlebar NoResizebar
+//                   NoCloseButton NoMiniaturizeButton Icon ... all others
+{
+  "*"            = { NoBorder = No; };
+  "foot"         = { StartWorkspace = 1; };
+  "org.pwmt.zathura" = { StartMaximized = Yes; };
+  "mpv"          = { Floating = Yes; KeepOnTop = Yes; };
+  "xclock"       = { Omnipresent = Yes; NoBorder = Yes; Unfocusable = Yes; };
+}

@@ -1,0 +1,13 @@
+// Root menu. Copy to ~/.config/wmaker-wl/RootMenu  (or ~/GNUstep/Defaults/WMRootMenu).
+// Window Maker's property-list syntax; wlmaker's spelling (Execute, ShellExecute,
+// Quit, WorkspaceNext, ...) works as well.
+("Applications",
+  ("Terminal",  EXEC,   "foot"),
+  ("Launcher",  EXEC,   "fuzzel"),
+  ("Firefox",   EXEC,   "firefox"),
+  ("Editors",
+    ("Vim",     SHEXEC, "foot -e vim"),
+    ("Emacs",   EXEC,   "emacs")),
+  ("Windows",    WINDOWS_MENU),
+  ("Workspaces", WORKSPACE_MENU),
+  ("Exit",       EXIT))
