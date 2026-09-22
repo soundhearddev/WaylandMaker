@@ -25,6 +25,12 @@ pub fn build(b: *std.Build) void {
     scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-layer-shell-v1.xml"));
 
+    scanner.generate("wl_compositor", 6);
+    scanner.generate("wl_shm", 1);
+    scanner.generate("wl_seat", 7);
+    scanner.generate("wl_output", 4);
+    scanner.generate("wl_subcompositor", 1);
+
     scanner.generate("river_window_manager_v1", 6);
     scanner.generate("river_xkb_bindings_v1", 3);
     scanner.generate("river_layer_shell_v1", 1);
@@ -52,6 +58,10 @@ pub fn build(b: *std.Build) void {
     });
     exe_module.linkSystemLibrary("wayland-client", .{});
     exe_module.linkSystemLibrary("xkbcommon", .{});
+    exe_module.linkSystemLibrary("cairo", .{});
+    exe_module.linkSystemLibrary("pango", .{});
+    exe_module.linkSystemLibrary("pangocairo", .{});
+    exe_module.linkSystemLibrary("glib-2.0", .{});
 
     const exe = b.addExecutable(.{
         .name = "wmaker-wl",
@@ -79,6 +89,10 @@ pub fn build(b: *std.Build) void {
     });
     test_module.linkSystemLibrary("wayland-client", .{});
     test_module.linkSystemLibrary("xkbcommon", .{});
+    test_module.linkSystemLibrary("cairo", .{});
+    test_module.linkSystemLibrary("pango", .{});
+    test_module.linkSystemLibrary("pangocairo", .{});
+    test_module.linkSystemLibrary("glib-2.0", .{});
 
     const tests = b.addTest(.{
         .root_module = test_module,

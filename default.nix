@@ -3,13 +3,18 @@
 pkgs.mkShell {
   packages = with pkgs; [
     zig
-    llvmPackages.clang
+    pkg-config
 
     wayland
+    wayland-scanner
+    wayland-protocols
     libxkbcommon
 
+    cairo
+    pango
+    glib
+
     river
-    pkg-config
   ];
 
   shellHook = ''
