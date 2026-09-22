@@ -4,9 +4,15 @@
 
 const std = @import("std");
 const c = @cImport({
-    @cInclude("cairo.h");
+    // Verhindert, dass GLib Autoptr-Makros und Pragmas generiert:
+    @cDefine("__G_AUTOPTR_FUNCS_H__", "1");
+    @cDefine("G_DEFINE_AUTOPTR_CLEANUP_FUNC(TypeName, func)", "");
+    @cDefine("_Pragma(x)", "");
+
+    @cInclude("glib.h");
     @cInclude("pango/pango.h");
     @cInclude("pango/pangocairo.h");
+    @cInclude("cairo.h");
 });
 
 pub const Color = struct {

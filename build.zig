@@ -2,10 +2,6 @@
 //
 // Build script for wmaker-wl: a scrollable-tiling / Window Maker flavoured
 // window manager client for river (river-window-management-v1).
-//
-//   zig build            build zig-out/bin/wmaker-wl
-//   zig build test       run the unit tests (no compositor needed)
-//   zig build run        start river with wmaker-wl as its window manager
 
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;

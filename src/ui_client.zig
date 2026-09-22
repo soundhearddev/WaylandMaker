@@ -118,7 +118,7 @@ fn allocShm(size: usize) !std.posix.fd_t {
 }
 
 test "ui_client basics" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
@@ -129,23 +129,25 @@ test "ui_client basics" {
 }
 
 test "setDisplayFd registers the fd for polling" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
     var ui = UiClient.create(alloc);
     defer ui.deinit();
 
-    const p = try std.posix.pipe();
-    defer std.posix.close(p[0]);
-    defer std.posix.close(p[1]);
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.pipe2(&fds, .{});
+    if (rc != 0) return error.PipeFailed;
 
-    try ui.setDisplayFd(p[0]);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    try ui.setDisplayFd(fds[0]);
     try std.testing.expectEqual(@as(usize, 1), ui.poll_fds.items.len);
-    try std.testing.expectEqual(p[0], ui.display_fd);
+    try std.testing.expectEqual(fds[0], ui.display_fd);
 
-    // Writing to the pipe should make it immediately pollable.
-    _ = try std.posix.write(p[1], "x");
+    _ = try std.posix.write(fds[1], "x");
     const ready = try ui.pollOnce(0);
     try std.testing.expectEqual(@as(usize, 1), ready);
 }
