@@ -383,6 +383,9 @@ pub const WindowManager = struct {
     xkb_bindings: ?*river.XkbBindingsV1 = null,
     layer_shell: ?*river.LayerShellV1 = null,
 
+    ui: ?*@import("ui.zig").Ui = null,
+    pending_ui: ?UiAction = null,
+
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),
     seats: wl.list.Head(Seat, .link),
@@ -458,6 +461,14 @@ pub const Command = union(enum) {
     move_to_workspace: u32,
 };
 
+/// What a root-menu click asks for. Executed in manage (focus and
+/// workspace changes are management state).
+pub const UiAction = union(enum) {
+    focus: *Window,
+    workspace: u32,
+    workspace_next,
+    workspace_prev,
+};
 // ============================================================================
 // Safe intrusive-list helpers
 // ============================================================================

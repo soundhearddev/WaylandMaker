@@ -1,0 +1,17 @@
+pub const workspace = @import("workspace.zig");
+pub const action = @import("action.zig");
+pub const compatibility = @import("compatibility.zig");
+pub const config = @import("config.zig");
+pub const gfx = @import("gfx.zig");
+pub const main = @import("main.zig");
+pub const output = @import("output.zig");
+pub const types = @import("types.zig");
+pub const layout = @import("layout.zig");
+pub const window = @import("window.zig");
+pub const seat_mod = @import("seat.zig");
+pub const wm_files = @import("wm_files.zig");
+pub const proc = @import("process.zig");
+pub const ui_client = @import("ui_client.zig");
+pub const ui_render = @import("ui_render.zig");
+pub const ui = @import("ui.zig");
+pub const plist = @import("plist.zig");

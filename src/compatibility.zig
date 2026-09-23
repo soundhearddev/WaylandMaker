@@ -1,3 +1,5 @@
+// TODO: INTEGRATE INTO MAINLINE
+
 // SPDX-License-Identifier: 0BSD
 //
 // WindowMaker Compatibility Layer

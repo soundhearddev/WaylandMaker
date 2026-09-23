@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: 0BSD
 //
-// Graphics abstraction: cairo + pango for text rendering.
+// Cairo/Pango drawing into a wl_shm-backed ARGB32 buffer.
+// No Wayland types here, so it can be unit-tested without a compositor.
 
 const std = @import("std");
-const c = @cImport({
-    // Verhindert, dass GLib Autoptr-Makros und Pragmas generiert:
-    @cDefine("__G_AUTOPTR_FUNCS_H__", "1");
-    @cDefine("G_DEFINE_AUTOPTR_CLEANUP_FUNC(TypeName, func)", "");
-    @cDefine("_Pragma(x)", "");
 
-    @cInclude("glib.h");
-    @cInclude("pango/pango.h");
-    @cInclude("pango/pangocairo.h");
+pub const c = @cImport({
     @cInclude("cairo.h");
+    @cInclude("wm_text.h");
 });
 
 pub const Color = struct {
@@ -21,119 +16,105 @@ pub const Color = struct {
     b: f64,
     a: f64 = 1.0,
 
-    pub fn fromArgb32(argb: u32) Color {
-        const a: f64 = @floatFromInt((argb >> 24) & 0xFF);
-        const r: f64 = @floatFromInt((argb >> 16) & 0xFF);
-        const g: f64 = @floatFromInt((argb >> 8) & 0xFF);
-        const b: f64 = @floatFromInt(argb & 0xFF);
+    pub fn rgb(hex: u32) Color {
         return .{
-            .r = r / 255.0,
-            .g = g / 255.0,
-            .b = b / 255.0,
-            .a = a / 255.0,
+            .r = @as(f64, @floatFromInt((hex >> 16) & 0xff)) / 255.0,
+            .g = @as(f64, @floatFromInt((hex >> 8) & 0xff)) / 255.0,
+            .b = @as(f64, @floatFromInt(hex & 0xff)) / 255.0,
         };
     }
 };
 
-pub const Rect = struct {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-};
+pub const Canvas = struct {
+    surface: *c.cairo_surface_t,
+    cr: *c.cairo_t,
+    width: i32,
+    height: i32,
 
-pub const Surface = struct {
-    cairo: *c.cairo_t,
-    pango_layout: *c.PangoLayout,
-    buffer: []align(@alignOf(u32)) u8,
-
-    pub fn create(
-        alloc: std.mem.Allocator,
-        width: i32,
-        height: i32,
-    ) !Surface {
-        if (width <= 0 or height <= 0) return error.InvalidDimensions;
-
-        const stride = c.cairo_format_stride_for_width(c.CAIRO_FORMAT_ARGB32, width);
-        if (stride < 0) return error.CairoInvalidStride;
-
-        const buffer_size: usize = @intCast(stride * height);
-        // Cairo ARGB32 benötigt 4-Byte (u32) Alignment
-        const buffer = try alloc.alignedAlloc(u8, @alignOf(u32), buffer_size);
-        errdefer alloc.free(buffer);
-
-        const cairo_surf = c.cairo_image_surface_create_for_data(
-            buffer.ptr,
-            c.CAIRO_FORMAT_ARGB32,
-            width,
-            height,
-            stride,
-        );
-        if (c.cairo_surface_status(cairo_surf) != c.CAIRO_STATUS_SUCCESS) {
-            return error.CairoSurfaceCreationFailed;
+    /// Wrap existing pixel memory (e.g. an mmap'd wl_shm pool).
+    /// `stride` must be width*4 for ARGB32.
+    pub fn initForData(data: [*]u8, width: i32, height: i32, stride: i32) !Canvas {
+        const s = c.cairo_image_surface_create_for_data(data, c.CAIRO_FORMAT_ARGB32, width, height, stride) orelse
+            return error.CairoSurface;
+        if (c.cairo_surface_status(s) != c.CAIRO_STATUS_SUCCESS) {
+            c.cairo_surface_destroy(s);
+            return error.CairoSurface;
         }
-        defer c.cairo_surface_destroy(cairo_surf);
-
-        const cairo_ctx = c.cairo_create(cairo_surf) orelse return error.CairoContextCreationFailed;
-        if (c.cairo_status(cairo_ctx) != c.CAIRO_STATUS_SUCCESS) {
-            return error.CairoContextCreationFailed;
-        }
-        errdefer c.cairo_destroy(cairo_ctx);
-
-        const pango_context = c.pango_cairo_create_context(cairo_ctx) orelse return error.PangoContextCreationFailed;
-        defer c.g_object_unref(pango_context);
-
-        const pango_layout = c.pango_layout_new(pango_context) orelse return error.PangoLayoutCreationFailed;
-
-        return .{
-            .cairo = cairo_ctx,
-            .pango_layout = pango_layout,
-            .buffer = buffer,
+        const cr = c.cairo_create(s) orelse {
+            c.cairo_surface_destroy(s);
+            return error.CairoContext;
         };
+        return .{ .surface = s, .cr = cr, .width = width, .height = height };
     }
 
-    pub fn destroy(self: *Surface, alloc: std.mem.Allocator) void {
-        c.g_object_unref(self.pango_layout);
-
-        const surf = c.cairo_get_target(self.cairo);
-        c.cairo_destroy(self.cairo);
-        c.cairo_surface_destroy(surf);
-
-        alloc.free(self.buffer);
-        self.* = undefined;
+    pub fn deinit(cv: *Canvas) void {
+        c.cairo_destroy(cv.cr);
+        c.cairo_surface_destroy(cv.surface);
     }
 
-    pub fn clear(self: Surface, color: Color) void {
-        c.cairo_set_source_rgba(self.cairo, color.r, color.g, color.b, color.a);
-        c.cairo_paint(self.cairo);
+    fn setColor(cv: *Canvas, col: Color) void {
+        c.cairo_set_source_rgba(cv.cr, col.r, col.g, col.b, col.a);
     }
 
-    pub fn fillRect(self: Surface, rect: Rect, color: Color) void {
-        c.cairo_set_source_rgba(self.cairo, color.r, color.g, color.b, color.a);
-        c.cairo_rectangle(
-            self.cairo,
-            @floatFromInt(rect.x),
-            @floatFromInt(rect.y),
-            @floatFromInt(rect.w),
-            @floatFromInt(rect.h),
-        );
-        c.cairo_fill(self.cairo);
+    pub fn clear(cv: *Canvas, col: Color) void {
+        c.cairo_save(cv.cr);
+        c.cairo_set_operator(cv.cr, c.CAIRO_OPERATOR_SOURCE);
+        cv.setColor(col);
+        c.cairo_paint(cv.cr);
+        c.cairo_restore(cv.cr);
     }
 
-    pub fn drawText(self: Surface, x: i32, y: i32, text: [*:0]const u8, color: Color) void {
-        c.pango_layout_set_text(self.pango_layout, text, -1);
-
-        c.cairo_set_source_rgba(self.cairo, color.r, color.g, color.b, color.a);
-        c.cairo_move_to(self.cairo, @floatFromInt(x), @floatFromInt(y));
-        c.pango_cairo_show_layout(self.cairo, self.pango_layout);
+    pub fn fillRect(cv: *Canvas, x: i32, y: i32, w: i32, h: i32, col: Color) void {
+        cv.setColor(col);
+        c.cairo_rectangle(cv.cr, @floatFromInt(x), @floatFromInt(y), @floatFromInt(w), @floatFromInt(h));
+        c.cairo_fill(cv.cr);
     }
 
-    pub fn flush(self: Surface) void {
-        const surf = c.cairo_get_target(self.cairo);
-        c.cairo_surface_flush(surf);
+    /// Vertical gradient (Window Maker "vgradient").
+    pub fn vGradient(cv: *Canvas, x: i32, y: i32, w: i32, h: i32, top: Color, bottom: Color) void {
+        const pat = c.cairo_pattern_create_linear(0, @floatFromInt(y), 0, @floatFromInt(y + h)) orelse return;
+        defer c.cairo_pattern_destroy(pat);
+        c.cairo_pattern_add_color_stop_rgba(pat, 0, top.r, top.g, top.b, top.a);
+        c.cairo_pattern_add_color_stop_rgba(pat, 1, bottom.r, bottom.g, bottom.b, bottom.a);
+        c.cairo_set_source(cv.cr, pat);
+        c.cairo_rectangle(cv.cr, @floatFromInt(x), @floatFromInt(y), @floatFromInt(w), @floatFromInt(h));
+        c.cairo_fill(cv.cr);
     }
 
-    pub fn getData(self: Surface) []u8 {
-        return self.buffer;
+    /// Beveled frame: light on top/left, dark on bottom/right (NeXT look).
+    pub fn bevel(cv: *Canvas, x: i32, y: i32, w: i32, h: i32, light: Color, dark: Color) void {
+        cv.fillRect(x, y, w, 1, light);
+        cv.fillRect(x, y, 1, h, light);
+        cv.fillRect(x, y + h - 1, w, 1, dark);
+        cv.fillRect(x + w - 1, y, 1, h, dark);
+    }
+
+    pub fn drawText(cv: *Canvas, text: [:0]const u8, x: i32, y: i32, font: [:0]const u8, col: Color) void {
+        cv.setColor(col);
+        c.wm_draw_text(cv.cr, text.ptr, x, y, font.ptr);
+    }
+
+    pub fn flush(cv: *Canvas) void {
+        c.cairo_surface_flush(cv.surface);
     }
 };
+
+/// Pixel size of `text` in `font`, measured on a scratch surface.
+pub fn measureText(text: [:0]const u8, font: [:0]const u8) struct { w: i32, h: i32 } {
+    var w: c_int = 0;
+    var h: c_int = 0;
+    c.wm_measure_text(text.ptr, font.ptr, &w, &h);
+    return .{ .w = w, .h = h };
+}
+
+test "canvas draws into plain memory" {
+    var buf: [16 * 16 * 4]u8 = undefined;
+    @memset(&buf, 0);
+    var cv = try Canvas.initForData(&buf, 16, 16, 16 * 4);
+    defer cv.deinit();
+    cv.clear(Color.rgb(0xff0000));
+    cv.flush();
+    // ARGB32 little-endian: B, G, R, A
+    try std.testing.expectEqual(@as(u8, 0xff), buf[2]);
+    try std.testing.expectEqual(@as(u8, 0xff), buf[3]);
+}

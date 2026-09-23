@@ -23,19 +23,22 @@ const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const river = wayland.client.river;
 
-const types = @import("types.zig");
-const config = @import("config.zig");
-const layout = @import("layout.zig");
-const workspace = @import("workspace.zig");
-const window_mod = @import("window.zig");
-const output_mod = @import("output.zig");
-const seat_mod = @import("seat.zig");
-const action = @import("action.zig");
-const wm_files = @import("wm_files.zig");
-const proc = @import("process.zig");
-const ui_client = @import("ui_client.zig");
-const gfx = @import("gfx.zig");
-const ui_render = @import("ui_render.zig");
+const root = @import("root.zig");
+
+const types = root.types;
+const config = root.config;
+const layout = root.layout;
+const workspace = root.workspace;
+const window_mod = root.window;
+const output_mod = root.output;
+const seat_mod = root.seat_mod;
+const action = root.action;
+const wm_files = root.wm_files;
+const proc = root.proc;
+const ui_client = root.ui_client;
+const gfx = root.gfx;
+const ui_render = root.ui_render;
+const ui_mod = root.ui;
 
 const WindowManager = types.WindowManager;
 
@@ -56,6 +59,7 @@ test {
     _ = ui_client;
     _ = gfx;
     _ = ui_render;
+    _ = @import("gfx.zig");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -127,8 +131,18 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("UI client ready (compositor + shm)", .{});
     }
 
-    std.log.info("wmaker-wl running (config: {s})", .{wm.cfg.config_file});
+    var ui_state: ui_mod.Ui = undefined;
+    if (ctx.compositor != null and ctx.shm != null) {
+        ui_state = ui_mod.Ui.init(wm, ctx.compositor.?, ctx.shm.?);
+        if (ctx.seat) |s| ui_state.bindSeat(s);
+        wm.ui = &ui_state;
+        std.log.info("root menu ready (right click on the desktop)", .{});
+    } else {
+        std.log.warn("wl_compositor/wl_shm missing: root menu disabled", .{});
+    }
+    defer if (wm.ui) |u| u.deinit();
 
+    std.log.info("wmaker-wl running (config: {s})", .{wm.cfg.config_file});
     // Window Maker's autostart: one script, run once, detached. Run through
     // /bin/sh so it works whether or not the file is marked executable; a
     // shebang line is just a `#` comment to sh and is harmless either way.
@@ -182,9 +196,12 @@ fn ignoreSigchld() void {
 
 const RegistryCtx = struct {
     wm: *WindowManager,
-    ui: *ui_client.UiClient,
+    ui: *ui_client.UiClient, // <- neu
     bound_wm: *bool,
-    bound_compositor: *bool,
+    bound_compositor: *bool, // <- auch neu (wird in Zeile 118 benutzt)
+    compositor: ?*wl.Compositor = null,
+    shm: ?*wl.Shm = null,
+    seat: ?*wl.Seat = null,
 };
 
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *RegistryCtx) void {
@@ -235,6 +252,9 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                     return;
                 };
                 ctx.bound_compositor.* = true;
+            } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
+                // First seat only: one pointer/keyboard for the menu.
+                if (ctx.seat == null) ctx.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch null;
             }
         },
         else => {},
@@ -298,6 +318,15 @@ fn onManage(wm: *WindowManager) void {
         if (!s.bindings_ready and wm.xkb_bindings != null) seat_mod.setupBindings(wm, s);
     }
 
+    // 2b. Root menu: backgrounds, focus, restacking.
+    if (wm.ui) |u| u.onManage();
+
+    // 2c. A menu click asked for something.
+    if (wm.pending_ui) |req| {
+        wm.pending_ui = null;
+        runUiAction(wm, req);
+    }
+
     // 3. New windows.
     window_mod.placeNew(wm);
 
@@ -336,9 +365,12 @@ fn onManage(wm: *WindowManager) void {
         window_mod.applyRender(wm, w, w == focus_target);
     }
 
-    // 9. Keyboard focus.
-    sit = wm.seats.first();
-    while (sit) |s| : (sit = types.nextSeat(s, wm)) seat_mod.focus(s, focus_target);
+    // 9. Keyboard focus (an open menu keeps it).
+    const menu_open = if (wm.ui) |u| u.menuOpen() else false;
+    if (!menu_open) {
+        sit = wm.seats.first();
+        while (sit) |s| : (sit = types.nextSeat(s, wm)) seat_mod.focus(s, focus_target);
+    }
 
     // 10. End a finished pointer operation. After layout so that the last
     //     delta was applied to the final frame.
@@ -347,6 +379,21 @@ fn onManage(wm: *WindowManager) void {
     // 11. Consumed.
     wm.focus_request = null;
     wm.follow_request = false;
+}
+
+fn runUiAction(wm: *WindowManager, req: types.UiAction) void {
+    switch (req) {
+        .focus => |w| {
+            if (w.closed or w.workspace == null) return;
+            if (w.workspace) |ws| ws.output.active = ws.index;
+            workspace.activate(w);
+            wm.focus_request = w;
+            wm.follow_request = true;
+        },
+        .workspace => |i| action.run(wm, .{ .workspace = i }),
+        .workspace_next => action.run(wm, .workspace_next),
+        .workspace_prev => action.run(wm, .workspace_prev),
+    }
 }
 
 fn runPending(wm: *WindowManager) void {
@@ -412,7 +459,7 @@ fn layoutAll(wm: *WindowManager) void {
 /// position corrected; nothing here changes management state.
 fn onRender(wm: *WindowManager) void {
     defer wm.obj.renderFinish();
-
+    if (wm.ui) |u| u.onRender();
     const focus = if (wm.seats.first()) |s| s.focused else null;
     var it = wm.windows.first();
     while (it) |w| : (it = types.nextWindow(w, wm)) {

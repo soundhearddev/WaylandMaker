@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: 0BSD
-//
-// Build script for wmaker-wl: a scrollable-tiling / Window Maker flavoured
-// window manager client for river (river-window-management-v1).
-
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
 
@@ -13,13 +8,18 @@ pub fn build(b: *std.Build) void {
     const use_llvm = b.option(bool, "llvm", "Use LLVM backend + lld linker") orelse true;
 
     // ---- protocol bindings ----------------------------------------------
-    // river_xkb_bindings_v1 and river_layer_shell_v1 are separate protocol
-    // files; without them no key can be bound and layer surfaces are
-    // refused.
+
     const scanner = Scanner.create(b, .{});
-    scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
-    scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
-    scanner.addCustomProtocol(b.path("protocol/river-layer-shell-v1.xml"));
+
+    scanner.addCustomProtocol(
+        b.path("protocol/river-window-management-v1.xml"),
+    );
+    scanner.addCustomProtocol(
+        b.path("protocol/river-xkb-bindings-v1.xml"),
+    );
+    scanner.addCustomProtocol(
+        b.path("protocol/river-layer-shell-v1.xml"),
+    );
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
@@ -37,13 +37,70 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // xkbcommon resolves key *names* ("Return", "h") to keysyms.
-    const xkbcommon_module = b.dependency("xkbcommon", .{}).module("xkbcommon");
+    // ---- dependencies ---------------------------------------------------
+
+    const xkbcommon_module =
+        b.dependency("xkbcommon", .{}).module("xkbcommon");
+
+    // ---- helper: link graphics libs with include paths -------------------
+
+    const fn_link_graphics = struct {
+        fn call(bld: *std.Build, module: *std.Build.Module) void {
+            module.linkSystemLibrary("wayland-client", .{});
+            module.linkSystemLibrary("xkbcommon", .{});
+            module.linkSystemLibrary("cairo", .{});
+            module.linkSystemLibrary("pango-1.0", .{});
+            module.linkSystemLibrary("pangocairo-1.0", .{});
+            module.linkSystemLibrary("gobject-2.0", .{});
+            module.linkSystemLibrary("glib-2.0", .{});
+
+            // Projekteigene Header (wm_text.h)
+            module.addIncludePath(bld.path("src"));
+
+            module.addIncludePath(.{ .cwd_relative = "/usr/include/glib-2.0" });
+            module.addIncludePath(.{ .cwd_relative = "/usr/lib/glib-2.0/include" });
+            module.addIncludePath(.{ .cwd_relative = "/usr/include/cairo" });
+            module.addIncludePath(.{ .cwd_relative = "/usr/include/pango-1.0" });
+            module.addIncludePath(.{ .cwd_relative = "/usr/include/harfbuzz" });
+        }
+    }.call;
+
+    // ---- project root module --------------------------------------------
+
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    root_module.addImport("wayland", wayland_module);
+    root_module.addImport("xkbcommon", xkbcommon_module);
+
+    fn_link_graphics(b, root_module);
+
+    root_module.addCSourceFile(.{
+        .file = b.path("src/wm_text.c"),
+        .flags = &.{},
+    });
+    // ---- imports available to every project module ----------------------
 
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "wayland", .module = wayland_module },
-        .{ .name = "xkbcommon", .module = xkbcommon_module },
+        .{
+            .name = "wmaker",
+            .module = root_module,
+        },
+        .{
+            .name = "wayland",
+            .module = wayland_module,
+        },
+        .{
+            .name = "xkbcommon",
+            .module = xkbcommon_module,
+        },
     };
+
+    // ---- executable -----------------------------------------------------
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -52,12 +109,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = imports,
     });
-    exe_module.linkSystemLibrary("wayland-client", .{});
-    exe_module.linkSystemLibrary("xkbcommon", .{});
-    exe_module.linkSystemLibrary("cairo", .{});
-    exe_module.linkSystemLibrary("pango", .{});
-    exe_module.linkSystemLibrary("pangocairo", .{});
-    exe_module.linkSystemLibrary("glib-2.0", .{});
+
+    fn_link_graphics(b, exe_module);
 
     const exe = b.addExecutable(.{
         .name = "wmaker-wl",
@@ -65,17 +118,26 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
+
     b.installArtifact(exe);
 
-    // ---- run --------------------------------------------------------------
-    const run_cmd = b.addSystemCommand(&.{ "river", "-c", "zig-out/bin/wmaker-wl" });
+    // ---- run -------------------------------------------------------------
+
+    const run_cmd = b.addSystemCommand(
+        &.{ "river", "-c", "zig-out/bin/wmaker-wl" },
+    );
+
     run_cmd.step.dependOn(b.getInstallStep());
-    const run_step = b.step("run", "Run river with wmaker-wl as window manager");
+
+    const run_step = b.step(
+        "run",
+        "Run river with wmaker-wl as window manager",
+    );
+
     run_step.dependOn(&run_cmd.step);
 
-    // ---- tests --------------------------------------------------------------
-    // Same root as the executable, so every `test` block in every file
-    // reachable from main.zig runs.
+    // ---- tests -----------------------------------------------------------
+
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -83,19 +145,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = imports,
     });
-    test_module.linkSystemLibrary("wayland-client", .{});
-    test_module.linkSystemLibrary("xkbcommon", .{});
-    test_module.linkSystemLibrary("cairo", .{});
-    test_module.linkSystemLibrary("pango", .{});
-    test_module.linkSystemLibrary("pangocairo", .{});
-    test_module.linkSystemLibrary("glib-2.0", .{});
+
+    fn_link_graphics(b, test_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
+
     const run_tests = b.addRunArtifact(tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 }
