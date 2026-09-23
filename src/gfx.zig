@@ -99,6 +99,48 @@ pub const Canvas = struct {
     }
 };
 
+pub const Rect = struct {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+};
+
+/// Canvas mit eigenem Pixelspeicher (für Offscreen-Rendering).
+pub const Surface = struct {
+    pixels: []u32,
+    canvas: Canvas,
+
+    pub fn create(alloc: std.mem.Allocator, width: i32, height: i32) !Surface {
+        const w: usize = @intCast(width);
+        const h: usize = @intCast(height);
+        const pixels = try alloc.alloc(u32, w * h);
+        errdefer alloc.free(pixels);
+        @memset(pixels, 0);
+
+        const bytes = std.mem.sliceAsBytes(pixels);
+        const canvas = try Canvas.initForData(bytes.ptr, width, height, width * 4);
+        return .{ .pixels = pixels, .canvas = canvas };
+    }
+
+    pub fn destroy(s: *Surface, alloc: std.mem.Allocator) void {
+        s.canvas.deinit();
+        alloc.free(s.pixels);
+    }
+
+    pub fn clear(s: *Surface, col: Color) void {
+        s.canvas.clear(col);
+    }
+
+    pub fn fillRect(s: *Surface, r: Rect, col: Color) void {
+        s.canvas.fillRect(r.x, r.y, r.w, r.h, col);
+    }
+
+    pub fn flush(s: *Surface) void {
+        s.canvas.flush();
+    }
+};
+
 /// Pixel size of `text` in `font`, measured on a scratch surface.
 pub fn measureText(text: [:0]const u8, font: [:0]const u8) struct { w: i32, h: i32 } {
     var w: c_int = 0;

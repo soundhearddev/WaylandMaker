@@ -140,14 +140,14 @@ test "setDisplayFd registers the fd for polling" {
     const rc = std.os.linux.pipe2(&fds, .{});
     if (rc != 0) return error.PipeFailed;
 
-    defer std.posix.close(fds[0]);
-    defer std.posix.close(fds[1]);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
 
     try ui.setDisplayFd(fds[0]);
     try std.testing.expectEqual(@as(usize, 1), ui.poll_fds.items.len);
     try std.testing.expectEqual(fds[0], ui.display_fd);
 
-    _ = try std.posix.write(fds[1], "x");
+    _ = std.posix.system.write(fds[1], "x", 1);
     const ready = try ui.pollOnce(0);
     try std.testing.expectEqual(@as(usize, 1), ready);
 }
