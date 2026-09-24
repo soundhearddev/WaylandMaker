@@ -54,7 +54,6 @@ pub fn build(b: *std.Build) void {
             module.linkSystemLibrary("gobject-2.0", .{});
             module.linkSystemLibrary("glib-2.0", .{});
 
-            // Projekteigene Header (wm_text.h)
             module.addIncludePath(bld.path("src"));
 
             module.addIncludePath(.{ .cwd_relative = "/usr/include/glib-2.0" });

@@ -221,13 +221,33 @@ fn commandKind(name: []const u8) ?CommandKind {
 // Builder
 // ----------------------------------------------------------------------------
 
+/// Maximum nesting depth for menus (plist and text formats).
+/// Prevents stack exhaustion from deeply nested or circular menu structures.
+/// 32 levels allows deeply nested menus while protecting against pathological input.
+const MAX_MENU_DEPTH = 32;
+
+/// Maximum number of items in a single menu.
+/// Prevents excessive memory allocation from malformed input.
+const MAX_ITEMS_PER_MENU = 10000;
+
+/// Maximum number of warnings collected during parsing.
+/// Prevents memory exhaustion from spammy/malformed input.
+const MAX_WARNINGS = 1000;
+
 const Builder = struct {
     a: std.mem.Allocator,
     diag: ?*plist.Diag = null,
     warnings: std.ArrayList([]const u8) = .empty,
+    depth: u32 = 0,
 
     fn warn(b: *Builder, comptime fmt: []const u8, args: anytype) Error!void {
-        try b.warnings.append(b.a, try std.fmt.allocPrint(b.a, fmt, args));
+        if (b.warnings.items.len >= MAX_WARNINGS) {
+            // Silently drop warnings after limit to avoid memory exhaustion
+            return;
+        }
+        try b.warnings.append(b.a, try std.fmt.allocPrint(b.a, fmt, args)) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+        };
     }
 
     fn action(b: *Builder, kind: CommandKind, arg: ?[]const u8, label: []const u8) Error!?Action {
@@ -265,6 +285,14 @@ const Builder = struct {
 
     /// `(title, item, item, ...)`
     fn plistMenu(b: *Builder, arr: []const plist.Value, fallback_title: []const u8) Error!*const Menu {
+        if (b.depth >= MAX_MENU_DEPTH) {
+            try b.warn("menu nesting too deep (limit: {d}), stopping recursion", .{MAX_MENU_DEPTH});
+            return error.Syntax;
+        }
+
+        b.depth += 1;
+        defer b.depth -= 1;
+
         var title = fallback_title;
         var rest = arr;
         if (arr.len > 0) if (arr[0].str()) |t| {
@@ -274,11 +302,20 @@ const Builder = struct {
 
         var items: std.ArrayList(Item) = .empty;
         for (rest) |el| {
+            if (items.items.len >= MAX_ITEMS_PER_MENU) {
+                try b.warn("menu `{s}`: too many items (limit: {d}), stopping", .{ title, MAX_ITEMS_PER_MENU });
+                break;
+            }
             const tuple = el.items() orelse {
                 try b.warn("menu `{s}`: entry is not a list, skipped", .{title});
                 continue;
             };
-            if (try b.plistItem(tuple)) |it| try items.append(b.a, it);
+            if (try b.plistItem(tuple)) |it| try items.append(b.a, it) catch |err| {
+                if (err == error.OutOfMemory) {
+                    try b.warn("menu `{s}`: out of memory", .{title});
+                    return error.OutOfMemory;
+                }
+            };
         }
         const m = try b.a.create(Menu);
         m.* = .{ .title = title, .items = try items.toOwnedSlice(b.a) };
@@ -299,17 +336,29 @@ const Builder = struct {
         }
 
         // Submenu: the element after the label is a list.
-        if (t[1].items() != null) {
+        if (t.len > 1 and t[1].items() != null) {
             const sub = try b.plistMenu(t, label);
             return .{ .label = label, .action = .{ .submenu = sub } };
         }
 
         var idx: usize = 1;
         var shortcut: ?[]const u8 = null;
-        if (t[idx].str()) |s| if (std.mem.eql(u8, s, "SHORTCUT") and t.len > idx + 2) {
-            shortcut = t[idx + 1].str();
-            idx += 2;
-        };
+
+        // Sichere Bounds-Checks für SHORTCUT-Parsing
+        if (idx < t.len) {
+            if (t[idx].str()) |s| {
+                if (std.mem.eql(u8, s, "SHORTCUT") and t.len > idx + 2) {
+                    shortcut = t[idx + 1].str();
+                    idx += 2;
+                }
+            }
+        }
+
+        // Überprüfe, dass wir noch einen Command haben
+        if (idx >= t.len) {
+            try b.warn("`{s}`: entry has no command after SHORTCUT, skipped", .{label});
+            return null;
+        }
 
         const cmd_name = t[idx].str() orelse {
             try b.warn("`{s}`: command is not a word, skipped", .{label});
@@ -330,6 +379,13 @@ const Builder = struct {
     fn fromText(b: *Builder, text: []const u8) Error!*const Menu {
         const Frame = struct { title: []const u8, items: std.ArrayList(Item) = .empty };
         var stack: std.ArrayList(Frame) = .empty;
+        defer {
+            var it = stack.items;
+            while (it.len > 0) : (it = it[1..]) {
+                it[0].items.deinit();
+            }
+            stack.deinit();
+        }
         var root: ?*const Menu = null;
 
         var in_block_comment = false;
@@ -372,7 +428,16 @@ const Builder = struct {
             const params = unquoteWhole(std.mem.trim(u8, line, " \t"));
 
             if (std.mem.eql(u8, word, "MENU")) {
-                try stack.append(b.a, .{ .title = title });
+                if (stack.items.len >= MAX_MENU_DEPTH) {
+                    try b.warn("line {d}: menu nesting too deep (limit: {d}), ignored", .{ line_no, MAX_MENU_DEPTH });
+                    continue;
+                }
+                try stack.append(b.a, .{ .title = title }) catch |err| {
+                    if (err == error.OutOfMemory) {
+                        try b.warn("line {d}: out of memory", .{line_no});
+                        return error.OutOfMemory;
+                    }
+                };
             } else if (std.mem.eql(u8, word, "END")) {
                 var frame = stack.pop() orelse {
                     try b.warn("line {d}: END without a matching MENU, ignored", .{line_no});
@@ -386,16 +451,26 @@ const Builder = struct {
                     try stack.items[stack.items.len - 1].items.append(b.a, .{
                         .label = frame.title,
                         .action = .{ .submenu = m },
-                    });
+                    }) catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                    };
                 }
             } else {
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1].items.items.len >= MAX_ITEMS_PER_MENU) {
+                    try b.warn("line {d}: menu too many items (limit: {d}), stopping", .{ line_no, MAX_ITEMS_PER_MENU });
+                    continue;
+                }
                 const kind = commandKind(word) orelse {
                     try b.warn("line {d}: `{s}`: unknown command `{s}`", .{ line_no, title, word });
-                    if (stack.items.len > 0) try stack.items[stack.items.len - 1].items.append(b.a, .{
-                        .label = title,
-                        .shortcut = shortcut,
-                        .action = .{ .unknown = word },
-                    });
+                    if (stack.items.len > 0) {
+                        try stack.items[stack.items.len - 1].items.append(b.a, .{
+                            .label = title,
+                            .shortcut = shortcut,
+                            .action = .{ .unknown = word },
+                        }) catch |err| {
+                            if (err == error.OutOfMemory) return error.OutOfMemory;
+                        };
+                    }
                     continue;
                 };
                 if (stack.items.len == 0) {
@@ -408,7 +483,9 @@ const Builder = struct {
                         .label = title,
                         .shortcut = shortcut,
                         .action = act,
-                    });
+                    }) catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                    };
                 }
             }
         }
@@ -436,27 +513,32 @@ const Builder = struct {
 fn nextWord(line: *[]const u8) ?[]const u8 {
     const s = std.mem.trimStart(u8, line.*, " \t");
     if (s.len == 0) return null;
-    if (s[0] == '"') {
-        const end = std.mem.indexOfScalarPos(u8, s, 1, '"') orelse s.len;
-        const word = s[1..end];
-        line.* = if (end < s.len) s[end + 1 ..] else "";
+    if (s.len > 0 and s[0] == '"') {
+        // Sichere Suche nach schließendem Quote, beginne nach dem öffnenden
+        const end = if (s.len > 1) std.mem.indexOfScalarPos(u8, s, 1, '"') else null;
+        const close_pos = end orelse s.len;
+        const word = if (close_pos < s.len) s[1..close_pos] else s[1..];
+        // Positionierung: wenn Quote gefunden, dann hinter dem schließenden Quote
+        line.* = if (close_pos < s.len and close_pos + 1 < s.len) s[close_pos + 1 ..] else "";
         return word;
     }
     const end = std.mem.indexOfAny(u8, s, " \t") orelse s.len;
-    const word = s[0..end];
-    line.* = s[end..];
+    const word = if (end <= s.len) s[0..end] else s;
+    line.* = if (end < s.len) s[end..] else "";
     return word;
 }
 
 /// `"xterm -e vi"` -> `xterm -e vi` when the whole remainder is one quoted
 /// string; anything else is left as written (`gimp >/dev/null`).
 fn unquoteWhole(s: []const u8) []const u8 {
-    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"' and
-        std.mem.indexOfScalar(u8, s[1 .. s.len - 1], '"') == null)
-    {
-        return s[1 .. s.len - 1];
-    }
-    return s;
+    if (s.len < 2) return s;
+    if (s[0] != '"' or s[s.len - 1] != '"') return s;
+
+    const inner = s[1 .. s.len - 1];
+    // Prüfe auf zusätzliche unescapierte Quotes im inneren
+    if (std.mem.indexOfScalar(u8, inner, '"') != null) return s;
+
+    return inner;
 }
 
 // ----------------------------------------------------------------------------

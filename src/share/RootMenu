@@ -2,11 +2,11 @@
 // Window Maker's property-list syntax; wlmaker's spelling (Execute, ShellExecute,
 // Quit, WorkspaceNext, ...) works as well.
 ("Applications",
-  ("Terminal",  EXEC,   "foot"),
+  ("Terminal",  EXEC,   "alacritty"),
   ("Launcher",  EXEC,   "fuzzel"),
   ("Firefox",   EXEC,   "firefox"),
   ("Editors",
-    ("Vim",     SHEXEC, "foot -e vim"),
+    ("Vim",     SHEXEC, "alacritty -e vim"),
     ("Emacs",   EXEC,   "emacs")),
   ("Windows",    WINDOWS_MENU),
   ("Workspaces", WORKSPACE_MENU),

@@ -196,9 +196,9 @@ fn ignoreSigchld() void {
 
 const RegistryCtx = struct {
     wm: *WindowManager,
-    ui: *ui_client.UiClient, // <- neu
+    ui: *ui_client.UiClient,
     bound_wm: *bool,
-    bound_compositor: *bool, // <- auch neu (wird in Zeile 118 benutzt)
+    bound_compositor: *bool,
     compositor: ?*wl.Compositor = null,
     shm: ?*wl.Shm = null,
     seat: ?*wl.Seat = null,
