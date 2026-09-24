@@ -11,7 +11,5 @@ pub const window = @import("window.zig");
 pub const seat_mod = @import("seat.zig");
 pub const wm_files = @import("wm_files.zig");
 pub const proc = @import("process.zig");
-pub const ui_client = @import("ui_client.zig");
-pub const ui_render = @import("ui_render.zig");
 pub const ui = @import("ui.zig");
 pub const plist = @import("plist.zig");

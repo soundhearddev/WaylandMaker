@@ -35,9 +35,6 @@ const seat_mod = root.seat_mod;
 const action = root.action;
 const wm_files = root.wm_files;
 const proc = root.proc;
-const ui_client = root.ui_client;
-const gfx = root.gfx;
-const ui_render = root.ui_render;
 const ui_mod = root.ui;
 
 const WindowManager = types.WindowManager;
@@ -56,10 +53,9 @@ test {
     _ = @import("wm_attr.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
-    _ = ui_client;
-    _ = gfx;
-    _ = ui_render;
     _ = @import("gfx.zig");
+    _ = @import("shm.zig");
+    _ = ui_mod;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -101,21 +97,16 @@ pub fn main(init: std.process.Init) !void {
     wm.attrs = files.attributes;
     const autostart_path = files.autostart;
 
-    var ui = ui_client.UiClient.create(wm.gpa);
-    defer ui.deinit();
-
     const display = wl.Display.connect(null) catch {
         std.log.err("cannot connect to the wayland display. wmaker-wl is not started " ++
             "directly: run `river -c wmaker-wl`", .{});
         std.process.exit(1);
     };
     defer display.disconnect();
-    try ui.setDisplayFd(@intCast(display.getFd()));
 
     const registry = try display.getRegistry();
     var bound_wm = false;
-    var bound_compositor = false;
-    var ctx: RegistryCtx = .{ .wm = wm, .ui = &ui, .bound_wm = &bound_wm, .bound_compositor = &bound_compositor };
+    var ctx: RegistryCtx = .{ .wm = wm, .bound_wm = &bound_wm };
     registry.setListener(*RegistryCtx, registryListener, &ctx);
 
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
@@ -127,18 +118,18 @@ pub fn main(init: std.process.Init) !void {
     }
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    if (bound_compositor) {
-        std.log.info("UI client ready (compositor + shm)", .{});
-    }
-
     var ui_state: ui_mod.Ui = undefined;
     if (ctx.compositor != null and ctx.shm != null) {
         ui_state = ui_mod.Ui.init(wm, ctx.compositor.?, ctx.shm.?);
-        if (ctx.seat) |s| ui_state.bindSeat(s);
+        if (ctx.seat) |sd| {
+            ui_state.bindSeat(sd);
+        } else {
+            std.log.warn("no wl_seat: root menu cannot receive clicks", .{});
+        }
         wm.ui = &ui_state;
-        std.log.info("root menu ready (right click on the desktop)", .{});
+        std.log.info("root menu ready: right click on the empty desktop", .{});
     } else {
-        std.log.warn("wl_compositor/wl_shm missing: root menu disabled", .{});
+        std.log.warn("root menu disabled: wl_compositor={} wl_shm={}", .{ ctx.compositor != null, ctx.shm != null });
     }
     defer if (wm.ui) |u| u.deinit();
 
@@ -151,26 +142,8 @@ pub fn main(init: std.process.Init) !void {
         proc.spawn(wm, &.{ "/bin/sh", p });
     }
 
-    // poll()-driven event loop (Phase 2): rather than blocking in
-    // display.dispatch(), we prepare a read, flush outgoing requests, wait
-    // on all fds known to the UI client (currently just the Wayland display,
-    // later also menu/dock/titlebar surfaces), then read and dispatch. This
-    // is the standard libwayland pattern for integrating external fds; see
-    // wl_display_prepare_read(3).
-    event_loop: while (!wm.quit) {
-        while (!display.prepareRead()) {
-            if (display.dispatchPending() != .SUCCESS) break :event_loop;
-        }
-        if (display.flush() != .SUCCESS) {
-            display.cancelRead();
-            break :event_loop;
-        }
-        _ = ui.pollOnce(-1) catch {
-            display.cancelRead();
-            break :event_loop;
-        };
-        if (display.readEvents() != .SUCCESS) break :event_loop;
-        if (display.dispatchPending() != .SUCCESS) break :event_loop;
+    while (!wm.quit) {
+        if (display.dispatch() != .SUCCESS) break;
     }
 
     if (wm.quit) {
@@ -196,9 +169,7 @@ fn ignoreSigchld() void {
 
 const RegistryCtx = struct {
     wm: *WindowManager,
-    ui: *ui_client.UiClient, // <- neu
     bound_wm: *bool,
-    bound_compositor: *bool, // <- auch neu (wird in Zeile 118 benutzt)
     compositor: ?*wl.Compositor = null,
     shm: ?*wl.Shm = null,
     seat: ?*wl.Seat = null,
@@ -206,7 +177,6 @@ const RegistryCtx = struct {
 
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *RegistryCtx) void {
     const wm = ctx.wm;
-    const ui = ctx.ui;
     switch (event) {
         .global => |g| {
             const name = std.mem.span(g.interface);
@@ -237,24 +207,22 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                 var it = wm.outputs.first();
                 while (it) |o| : (it = types.nextOutput(o, wm)) output_mod.bindLayerShell(wm, ls, o);
             } else if (eql(u8, name, std.mem.span(wl.Compositor.interface.name))) {
-                const comp = registry.bind(g.name, wl.Compositor, 6) catch |err| {
+                // createSurface exists since version 1; 4 adds damage_buffer.
+                ctx.compositor = registry.bind(g.name, wl.Compositor, @min(g.version, 4)) catch |err| {
                     std.log.err("bind wl_compositor: {t}", .{err});
                     return;
                 };
-                ui.bindCompositor(comp);
             } else if (eql(u8, name, std.mem.span(wl.Shm.interface.name))) {
-                const shm = registry.bind(g.name, wl.Shm, 1) catch |err| {
+                ctx.shm = registry.bind(g.name, wl.Shm, 1) catch |err| {
                     std.log.err("bind wl_shm: {t}", .{err});
                     return;
                 };
-                ui.bindShm(shm) catch |err| {
-                    std.log.err("setup wl_shm: {t}", .{err});
-                    return;
-                };
-                ctx.bound_compositor.* = true;
             } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
                 // First seat only: one pointer/keyboard for the menu.
-                if (ctx.seat == null) ctx.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch null;
+                if (ctx.seat == null) ctx.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
+                    std.log.err("bind wl_seat: {t}", .{err});
+                    return;
+                };
             }
         },
         else => {},
@@ -319,7 +287,7 @@ fn onManage(wm: *WindowManager) void {
     }
 
     // 2b. Root menu: backgrounds, focus, restacking.
-    if (wm.ui) |u| u.onManage();
+    if (wm.ui) |u| u.sync();
 
     // 2c. A menu click asked for something.
     if (wm.pending_ui) |req| {

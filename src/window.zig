@@ -246,6 +246,14 @@ fn destroy(wm: *WindowManager, win: *Window) void {
     if (wm.pending_fullscreen) |pf| if (pf.win == win) {
         wm.pending_fullscreen = null;
     };
+    // The root menu may hold this window (window list, focus to return).
+    if (wm.pending_ui) |req| switch (req) {
+        .focus => |w| if (w == win) {
+            wm.pending_ui = null;
+        },
+        else => {},
+    };
+    if (wm.ui) |u| u.forgetWindow(win);
 
     types.unlink(&win.link);
     win.node.destroy();
