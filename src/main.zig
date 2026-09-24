@@ -122,7 +122,10 @@ pub fn main(init: std.process.Init) !void {
     if (ctx.compositor != null and ctx.shm != null) {
         ui_state = ui_mod.Ui.init(wm, ctx.compositor.?, ctx.shm.?);
         if (ctx.seat) |sd| {
-            ui_state.bindSeat(sd);
+            ui_state.setSeat(sd);
+            ctx.ui = &ui_state;
+            // Capabilities that arrived before the Ui existed.
+            ui_state.onCapabilities(ctx.seat_pointer, ctx.seat_keyboard);
         } else {
             std.log.warn("no wl_seat: root menu cannot receive clicks", .{});
         }
@@ -173,7 +176,24 @@ const RegistryCtx = struct {
     compositor: ?*wl.Compositor = null,
     shm: ?*wl.Shm = null,
     seat: ?*wl.Seat = null,
+    /// Set once the Ui exists; capability changes are forwarded to it.
+    ui: ?*ui_mod.Ui = null,
+    seat_pointer: bool = false,
+    seat_keyboard: bool = false,
 };
+
+/// Listens from the moment the seat is bound: the `capabilities` event is
+/// sent immediately and would be lost with a listener set after roundtrip().
+fn seatListener(_: *wl.Seat, event: wl.Seat.Event, ctx: *RegistryCtx) void {
+    switch (event) {
+        .capabilities => |c| {
+            ctx.seat_pointer = c.capabilities.pointer;
+            ctx.seat_keyboard = c.capabilities.keyboard;
+            if (ctx.ui) |u| u.onCapabilities(ctx.seat_pointer, ctx.seat_keyboard);
+        },
+        else => {},
+    }
+}
 
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *RegistryCtx) void {
     const wm = ctx.wm;
@@ -219,10 +239,14 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                 };
             } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
                 // First seat only: one pointer/keyboard for the menu.
-                if (ctx.seat == null) ctx.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
-                    std.log.err("bind wl_seat: {t}", .{err});
-                    return;
-                };
+                if (ctx.seat == null) {
+                    const seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
+                        std.log.err("bind wl_seat: {t}", .{err});
+                        return;
+                    };
+                    seat.setListener(*RegistryCtx, seatListener, ctx);
+                    ctx.seat = seat;
+                }
             }
         },
         else => {},

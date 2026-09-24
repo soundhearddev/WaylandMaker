@@ -307,28 +307,28 @@ pub const Ui = struct {
     // wl_seat: pointer and keyboard (callbacks only record intent)
     // ========================================================================
 
-    pub fn bindSeat(ui: *Ui, seat: *wl.Seat) void {
+    /// The seat's `capabilities` event arrives right when it is bound, so
+    /// main.zig listens from the very moment of binding and hands the result
+    /// over here. A listener set later would never see it (libwayland drops
+    /// events for proxies without a listener) and no wl_pointer would exist.
+    pub fn setSeat(ui: *Ui, seat: *wl.Seat) void {
         ui.seat = seat;
-        seat.setListener(*Ui, seatListener, ui);
     }
 
-    fn seatListener(seat: *wl.Seat, event: wl.Seat.Event, ui: *Ui) void {
-        switch (event) {
-            .capabilities => |c| {
-                if (c.capabilities.pointer and ui.pointer == null) {
-                    if (seat.getPointer()) |p| {
-                        ui.pointer = p;
-                        p.setListener(*Ui, pointerListener, ui);
-                    } else |_| {}
-                }
-                if (c.capabilities.keyboard and ui.keyboard == null) {
-                    if (seat.getKeyboard()) |k| {
-                        ui.keyboard = k;
-                        k.setListener(*Ui, keyboardListener, ui);
-                    } else |_| {}
-                }
-            },
-            else => {},
+    pub fn onCapabilities(ui: *Ui, has_pointer: bool, has_keyboard: bool) void {
+        const seat = ui.seat orelse return;
+        std.log.info("seat capabilities: pointer={} keyboard={}", .{ has_pointer, has_keyboard });
+        if (has_pointer and ui.pointer == null) {
+            if (seat.getPointer()) |p| {
+                ui.pointer = p;
+                p.setListener(*Ui, pointerListener, ui);
+            } else |err| std.log.err("wl_seat.get_pointer: {t}", .{err});
+        }
+        if (has_keyboard and ui.keyboard == null) {
+            if (seat.getKeyboard()) |k| {
+                ui.keyboard = k;
+                k.setListener(*Ui, keyboardListener, ui);
+            } else |err| std.log.err("wl_seat.get_keyboard: {t}", .{err});
         }
     }
 
@@ -338,6 +338,7 @@ pub const Ui = struct {
                 ui.pointer_surface = e.surface;
                 ui.px = @intCast(e.surface_x.toInt());
                 ui.py = @intCast(e.surface_y.toInt());
+                std.log.debug("pointer enter: {s} at {d},{d}", .{ ui.describe(e.surface), ui.px, ui.py });
                 ui.onMotion();
             },
             .leave => ui.pointer_surface = null,
@@ -347,10 +348,20 @@ pub const Ui = struct {
                 ui.onMotion();
             },
             .button => |e| {
-                if (e.state == .pressed) ui.onButton(e.button);
+                if (e.state == .pressed) {
+                    std.log.info("pointer button 0x{x} on {s}", .{ e.button, ui.describe(ui.pointer_surface) });
+                    ui.onButton(e.button);
+                }
             },
             else => {},
         }
+    }
+
+    fn describe(ui: *Ui, s: ?*wl.Surface) []const u8 {
+        const surf = s orelse return "nothing";
+        if (ui.desktopAt(surf) != null) return "desktop";
+        if (ui.levelFor(surf) != null) return "menu";
+        return "unknown surface";
     }
 
     fn keyboardListener(_: *wl.Keyboard, event: wl.Keyboard.Event, ui: *Ui) void {
