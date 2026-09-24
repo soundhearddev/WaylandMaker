@@ -5,7 +5,7 @@
 //  1. Property-list form (WMRootMenu, plmenu):
 //
 //       ("Applications",
-//         ("XTerm", EXEC, "xterm -sb"),
+//         ("XTerm", EXEC, "xterm -sb"),#
 //         ("Editors", ("Vim", SHEXEC, "xterm -e vim"), ("Emacs", EXEC, emacs)),
 //         ("Workspaces", WORKSPACE_MENU),
 //         ("Exit", EXIT))
@@ -242,12 +242,11 @@ const Builder = struct {
 
     fn warn(b: *Builder, comptime fmt: []const u8, args: anytype) Error!void {
         if (b.warnings.items.len >= MAX_WARNINGS) {
-            // Silently drop warnings after limit to avoid memory exhaustion
             return;
         }
-        try b.warnings.append(b.a, try std.fmt.allocPrint(b.a, fmt, args)) catch |err| {
-            if (err == error.OutOfMemory) return error.OutOfMemory;
-        };
+
+        const message = try std.fmt.allocPrint(b.a, fmt, args);
+        try b.warnings.append(b.a, message);
     }
 
     fn action(b: *Builder, kind: CommandKind, arg: ?[]const u8, label: []const u8) Error!?Action {
@@ -310,12 +309,9 @@ const Builder = struct {
                 try b.warn("menu `{s}`: entry is not a list, skipped", .{title});
                 continue;
             };
-            if (try b.plistItem(tuple)) |it| try items.append(b.a, it) catch |err| {
-                if (err == error.OutOfMemory) {
-                    try b.warn("menu `{s}`: out of memory", .{title});
-                    return error.OutOfMemory;
-                }
-            };
+            if (try b.plistItem(tuple)) |it| {
+                try items.append(b.a, it);
+            }
         }
         const m = try b.a.create(Menu);
         m.* = .{ .title = title, .items = try items.toOwnedSlice(b.a) };
@@ -382,9 +378,9 @@ const Builder = struct {
         defer {
             var it = stack.items;
             while (it.len > 0) : (it = it[1..]) {
-                it[0].items.deinit();
+                it[0].items.deinit(b.a);
             }
-            stack.deinit();
+            stack.deinit(b.a);
         }
         var root: ?*const Menu = null;
 
@@ -432,7 +428,7 @@ const Builder = struct {
                     try b.warn("line {d}: menu nesting too deep (limit: {d}), ignored", .{ line_no, MAX_MENU_DEPTH });
                     continue;
                 }
-                try stack.append(b.a, .{ .title = title }) catch |err| {
+                stack.append(b.a, .{ .title = title }) catch |err| {
                     if (err == error.OutOfMemory) {
                         try b.warn("line {d}: out of memory", .{line_no});
                         return error.OutOfMemory;
@@ -448,7 +444,7 @@ const Builder = struct {
                 if (stack.items.len == 0) {
                     root = m;
                 } else {
-                    try stack.items[stack.items.len - 1].items.append(b.a, .{
+                    stack.items[stack.items.len - 1].items.append(b.a, .{
                         .label = frame.title,
                         .action = .{ .submenu = m },
                     }) catch |err| {
@@ -463,7 +459,7 @@ const Builder = struct {
                 const kind = commandKind(word) orelse {
                     try b.warn("line {d}: `{s}`: unknown command `{s}`", .{ line_no, title, word });
                     if (stack.items.len > 0) {
-                        try stack.items[stack.items.len - 1].items.append(b.a, .{
+                        stack.items[stack.items.len - 1].items.append(b.a, .{
                             .label = title,
                             .shortcut = shortcut,
                             .action = .{ .unknown = word },
@@ -479,7 +475,7 @@ const Builder = struct {
                 }
                 const arg: ?[]const u8 = if (params.len > 0) params else null;
                 if (try b.action(kind, arg, title)) |act| {
-                    try stack.items[stack.items.len - 1].items.append(b.a, .{
+                    stack.items[stack.items.len - 1].items.append(b.a, .{
                         .label = title,
                         .shortcut = shortcut,
                         .action = act,
