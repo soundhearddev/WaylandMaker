@@ -10,6 +10,8 @@ Plan und Begründung: [`docs/WINDOWMAKER.md`](WINDOWMAKER.md).
 - [ ] **Phase 6**: Themes, `~/GNUstep/Defaults/WindowMaker`-Schlüssel
 - [ ] **Phase 7**: Minimieren/Shade/Verstecken, Session speichern, Workspace-Namen
 - [ ] Menüpunkte ohne Funktion: `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`
+- [ ] Dock apps framework und integration. am besten einen standart für alle kommenden dock apps
+
 
 ### Sonstiges
 - [ ] Mehrere Outputs: Fokus zwischen Monitoren, Fenster verschieben
