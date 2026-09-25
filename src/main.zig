@@ -22,6 +22,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const river = wayland.client.river;
+const wp = wayland.client.wp;
 
 const root = @import("root.zig");
 
@@ -121,6 +122,10 @@ pub fn main(init: std.process.Init) !void {
     var ui_state: ui_mod.Ui = undefined;
     if (ctx.compositor != null and ctx.shm != null) {
         ui_state = ui_mod.Ui.init(wm, ctx.compositor.?, ctx.shm.?);
+        ui_state.cursor_shape_manager = ctx.cursor_shape_manager;
+        if (ctx.cursor_shape_manager == null) {
+            std.log.warn("no wp_cursor_shape_manager_v1: the pointer will not switch to an arrow over the menu", .{});
+        }
         if (ctx.seat) |sd| {
             ui_state.setSeat(sd);
             ctx.ui = &ui_state;
@@ -176,6 +181,7 @@ const RegistryCtx = struct {
     compositor: ?*wl.Compositor = null,
     shm: ?*wl.Shm = null,
     seat: ?*wl.Seat = null,
+    cursor_shape_manager: ?*wp.CursorShapeManagerV1 = null,
     /// Set once the Ui exists; capability changes are forwarded to it.
     ui: ?*ui_mod.Ui = null,
     seat_pointer: bool = false,
@@ -247,6 +253,13 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                     seat.setListener(*RegistryCtx, seatListener, ctx);
                     ctx.seat = seat;
                 }
+            } else if (eql(u8, name, std.mem.span(wp.CursorShapeManagerV1.interface.name))) {
+                // Optional: without it the pointer keeps whatever image it
+                // last had (usually a plain arrow from the last window).
+                ctx.cursor_shape_manager = registry.bind(g.name, wp.CursorShapeManagerV1, @min(g.version, 1)) catch |err| blk: {
+                    std.log.warn("bind wp_cursor_shape_manager_v1: {t}", .{err});
+                    break :blk null;
+                };
             }
         },
         else => {},

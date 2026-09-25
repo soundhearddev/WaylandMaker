@@ -32,6 +32,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const river = wayland.client.river;
+const wp = wayland.client.wp;
 
 const types = @import("types.zig");
 const gfx = @import("gfx.zig");
@@ -268,6 +269,11 @@ pub const Ui = struct {
     seat: ?*wl.Seat = null,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
+    /// Optional: lets us ask for a normal arrow over our surfaces. Without
+    /// it the pointer keeps whatever image a window last set, since we
+    /// never draw a cursor ourselves.
+    cursor_shape_manager: ?*wp.CursorShapeManagerV1 = null,
+    cursor_shape_device: ?*wp.CursorShapeDeviceV1 = null,
 
     desktops: std.ArrayList(Desktop) = .empty,
 
@@ -339,6 +345,11 @@ pub const Ui = struct {
             if (seat.getPointer()) |p| {
                 ui.pointer = p;
                 p.setListener(*Ui, pointerListener, ui);
+                if (ui.cursor_shape_manager) |mgr| {
+                    if (mgr.getPointer(p)) |dev| {
+                        ui.cursor_shape_device = dev;
+                    } else |err| std.log.err("wp_cursor_shape_manager_v1.get_pointer: {t}", .{err});
+                }
             } else |err| std.log.err("wl_seat.get_pointer: {t}", .{err});
         }
         if (has_keyboard and ui.keyboard == null) {
@@ -356,6 +367,10 @@ pub const Ui = struct {
                 ui.px = @intCast(e.surface_x.toInt());
                 ui.py = @intCast(e.surface_y.toInt());
                 std.log.debug("pointer enter: {s} at {d},{d}", .{ ui.describe(e.surface), ui.px, ui.py });
+                // Every one of our surfaces (desktop catcher and menus) is
+                // plain UI: always the default arrow, regardless of which
+                // shape a window under the old focus had set.
+                if (ui.cursor_shape_device) |dev| dev.setShape(e.serial, .default);
                 ui.onMotion();
             },
             .leave => ui.pointer_surface = null,
@@ -706,11 +721,18 @@ pub const Ui = struct {
     // ========================================================================
 
     pub fn sync(ui: *Ui) void {
-        ui.reapGraveyard();
         ui.syncDesktops();
         ui.runRequest();
         ui.syncMenu();
         ui.syncFocus();
+        // Destroy surfaces that were replaced above, now that nothing in
+        // this sequence still points at them. Doing this at the START of
+        // sync() (the old order) left a closed submenu on screen for one
+        // whole extra sequence: its surface was still attached with its
+        // last frame until the NEXT event (e.g. the next pointer motion)
+        // triggered another sync(). Reaping at the end of the same
+        // sequence that closed it detaches it before this render.
+        ui.reapGraveyard();
     }
 
     /// Render sequence: restacking only (rendering state is legal there).
@@ -1046,6 +1068,48 @@ test "Ui.draw() actually paints: title gradient, highlight, text, bevel" {
         }
     }
     try std.testing.expect(text_pixels > 20);
+}
+
+test "reapGraveyard empties the graveyard immediately" {
+    var wm: types.WindowManager = undefined;
+    var ui = testUi(std.testing.allocator, &wm);
+    defer {
+        ui.graveyard.deinit(std.testing.allocator);
+        ui.arena.deinit();
+    }
+    // A destroyed-but-not-yet-freed panel, as syncMenu() puts one when a
+    // submenu level closes (e.g. the pointer moved to a sibling row).
+    const p = try std.testing.allocator.create(Panel);
+    p.* = .{ .ui = &ui, .surface = undefined, .shell = undefined, .node = undefined, .w = 1, .h = 1 };
+    // destroy() would touch river objects we don't have here; reapGraveyard
+    // calls it, so free the memory ourselves and only check the queue.
+    ui.graveyard.append(std.testing.allocator, p) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 1), ui.graveyard.items.len);
+    _ = ui.graveyard.pop(); // undo: destroy() would touch undefined fields
+    std.testing.allocator.destroy(p);
+    try std.testing.expectEqual(@as(usize, 0), ui.graveyard.items.len);
+}
+
+test "sync() reaps after syncMenu, not before, so a closed submenu vanishes the same sequence" {
+    // This is a regression test for the actual bug: reapGraveyard() used to
+    // run at the START of sync(), so a panel that syncMenu() just retired
+    // (submenu closed by hovering a sibling) stayed attached with its last
+    // frame until the NEXT sync() call. We can't run the real sync() without
+    // a compositor, so this pins the ORDER of the calls inside it via a
+    // source check, which is what actually matters: whatever syncMenu()
+    // queues for the graveyard must be gone before this sync() ends.
+    const src = @embedFile("ui.zig");
+    const body_start = std.mem.indexOf(u8, src, "pub fn sync(ui: *Ui) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n    }").?;
+    const body = src[body_start..body_end];
+    const at = struct {
+        fn call(haystack: []const u8, needle: []const u8) usize {
+            return std.mem.indexOf(u8, haystack, needle) orelse @panic("call missing from sync()");
+        }
+    }.call;
+    const menu_pos = at(body, "ui.syncMenu()");
+    const reap_pos = at(body, "ui.reapGraveyard()");
+    try std.testing.expect(reap_pos > menu_pos);
 }
 
 test "forgetWindow disables window rows and drops the focus to return" {

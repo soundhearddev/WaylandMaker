@@ -20,12 +20,18 @@ pub fn build(b: *std.Build) void {
     scanner.addCustomProtocol(
         b.path("protocol/river-layer-shell-v1.xml"),
     );
+    scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
+    // wp_cursor_shape_manager_v1.get_tablet_tool_v2 references
+    // zwp_tablet_tool_v2; the scanner needs its definition even though we
+    // never call that request (we only use get_pointer).
+    scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
     scanner.generate("wl_seat", 7);
     scanner.generate("wl_output", 4);
     scanner.generate("wl_subcompositor", 1);
+    scanner.generate("wp_cursor_shape_manager_v1", 2);
 
     scanner.generate("river_window_manager_v1", 6);
     scanner.generate("river_xkb_bindings_v1", 3);

@@ -1,27 +1,34 @@
 # wmaker-wl – Architecture
 
-`wmaker-wl` is a window-manager client for [river](https://codeberg.org/river/river) using `river_window_management_v1`. river handles compositing and input; wmaker-wl handles layout, focus, and interaction.
+`wmaker-wl` is a window-manager client for [river](https://codeberg.org/river/river) using `river_window_management_v1`. river handles compositing and input; wmaker-wl handles layout, focus, interaction, and the root menu.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `config.zig` + `default_config.conf` | Settings and keybindings, single source of truth |
-| `types.zig` | Data model and invariants |
-| `layout.zig` | Pure geometry (columns, scrolling, floating) |
-| `workspace.zig` | All window-tree mutations |
-| `action.zig` | Parse and execute commands |
-| `window.zig` | Window events, `applyManage`, `applyRender` |
-| `seat.zig` | Bindings, focus, mouse operations |
-| `output.zig` | Outputs, layer-shell work area |
-| `main.zig` | Startup, registry, manage/render loop |
-| `plist.zig` | Window Maker/GNUstep property-list parser |
-| `wm_menu.zig` | Root menu model, Plist and text format |
-| `wm_attr.zig` | `WMWindowAttributes`: per-`app_id` rules |
-| `wm_files.zig` | Search paths and loading Window Maker files |
-| `model_test.zig` | Invariant tests without a compositor |
+| File | Purpose | Sends Wayland requests? |
+|---|---|---|
+| `config.zig` + `default_config.conf` | Settings and keybindings, single source of truth | no |
+| `types.zig` | Data model and invariants | no |
+| `layout.zig` | Pure geometry (columns, scrolling, floating) | no |
+| `workspace.zig` | All window-tree mutations | no |
+| `action.zig` | Parse and execute commands | only `close` |
+| `window.zig` | Window events, `applyManage`, `applyRender` | yes |
+| `seat.zig` | Bindings, focus, mouse operations | yes |
+| `output.zig` | Outputs, layer-shell work area | yes |
+| `main.zig` | Startup, registry, manage/render loop | yes |
+| `plist.zig` | Window Maker/GNUstep property-list parser | no |
+| `wm_menu.zig` | Root menu model, Plist and text format, depth/item/warning limits | no |
+| `wm_attr.zig` | `WMWindowAttributes`: per-`app_id` rules | no |
+| `wm_files.zig` | Search paths and loading Window Maker files | no |
+| `process.zig` | Spawns commands (`EXEC`/`SHEXEC`, autostart) detached from the WM | no |
+| `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient, bevel, text, measure | no |
+| `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
+| `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling | yes |
+| `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |
+| `compatibility.zig` | Unused legacy stub, not imported anywhere except `root.zig` | no |
+| `root.zig` | Re-exports every module so `main.zig` and tests can reach them by name | no |
+| `model_test.zig` | Invariant tests without a compositor | – |
 
-Everything that modifies the model can be tested without a compositor with `zig build test`.
+Everything that modifies the model can be tested without a compositor with `zig build test` (102 tests as of this writing).
 
 ## Protocol Flow
 
