@@ -1,7 +1,5 @@
 ## Offen
 
-Plan und Begründung: [`docs/WINDOWMAKER.md`](WINDOWMAKER.md).
-
 ### Window-Maker-Integration
 - [ ] **Phase 2**: Zeichen-Infrastruktur (`wl_shm`, cairo/pango, Texturen, `wl_seat`, `poll()`-Loop)
 - [ ] **Phase 3**: Titelleisten im NeXTSTEP-Look (`river_decoration_v1`), `NoTitlebar` & Co. wirksam

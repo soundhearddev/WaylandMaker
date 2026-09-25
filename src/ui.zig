@@ -65,6 +65,12 @@ const item_h: i32 = 20;
 const pad_x: i32 = 10;
 const arrow_w: i32 = 14;
 const min_menu_w: i32 = 120;
+/// A menu level shows at most this many rows. 500 rows are 10 000 px tall,
+/// far beyond any screen; more only means a broken menu file, and the
+/// surface would exceed what shm.checkedSize allows.
+const max_rows: usize = 500;
+/// Cap for one label: keeps a single absurd string from making a huge surface.
+const max_label_bytes: usize = 256;
 
 const col_bg = gfx.Color.rgb(0xaeaaae);
 const col_light = gfx.Color.rgb(0xffffff);
@@ -243,6 +249,17 @@ const Request = union(enum) {
     open_windows: struct { output: *types.Output, x: i32, y: i32 },
     close,
 };
+
+/// `s` cut to at most `max` bytes without splitting a UTF-8 sequence, and
+/// without an embedded NUL (pango takes a C string; a NUL would silently
+/// end the label early).
+fn clipUtf8(s: []const u8, max: usize) []const u8 {
+    var end = @min(s.len, max);
+    if (std.mem.indexOfScalar(u8, s[0..end], 0)) |nul| end = nul;
+    // Step back to a character boundary.
+    while (end > 0 and end < s.len and (s[end] & 0xC0) == 0x80) end -= 1;
+    return s[0..end];
+}
 
 pub const Ui = struct {
     wm: *WindowManager,
@@ -561,7 +578,7 @@ pub const Ui = struct {
     }
 
     fn zdup(ui: *Ui, s: []const u8) ![:0]const u8 {
-        return ui.a().dupeZ(u8, s);
+        return ui.a().dupeZ(u8, clipUtf8(s, max_label_bytes));
     }
 
     fn resetMenu(ui: *Ui) void {
@@ -580,6 +597,10 @@ pub const Ui = struct {
 
         var rows: std.ArrayList(Row) = .empty;
         for (m.items) |it| {
+            if (rows.items.len >= max_rows) {
+                std.log.warn("menu `{s}`: more than {d} entries, the rest is not shown", .{ m.title, max_rows });
+                break;
+            }
             const label = try ui.zdup(it.label);
             const shortcut: ?[:0]const u8 = if (it.shortcut) |s| try ui.zdup(s) else null;
             switch (it.action) {
@@ -1057,4 +1078,133 @@ test "forgetWindow disables window rows and drops the focus to return" {
     // The other window is untouched.
     try std.testing.expect(rows[1].enabled);
     try std.testing.expect(rows[1].kind == .focus_window);
+}
+
+// ----------------------------------------------------------------------------
+// Robustness tests
+// ----------------------------------------------------------------------------
+
+fn testUi(gpa: Allocator, wm: *types.WindowManager) Ui {
+    return .{
+        .wm = wm,
+        .compositor = undefined,
+        .shm = undefined,
+        .arena = std.heap.ArenaAllocator.init(gpa),
+    };
+}
+
+test "menu with a very large number of rows: geometry stays in i32 and rowAt is safe" {
+    const rows = try std.testing.allocator.alloc(Row, 5000);
+    defer std.testing.allocator.free(rows);
+    for (rows) |*r| r.* = .{ .label = "row", .kind = .none };
+    const l = testLevel(rows);
+    try std.testing.expectEqual(title_h + 5000 * item_h + 2, l.h);
+    // Last row reachable, one past the end is not.
+    try std.testing.expectEqual(@as(?usize, 4999), Ui.rowAt(&l, title_h + 4999 * item_h + 1));
+    try std.testing.expectEqual(@as(?usize, null), Ui.rowAt(&l, title_h + 5000 * item_h + 1));
+    // Hostile pointer coordinates.
+    try std.testing.expectEqual(@as(?usize, null), Ui.rowAt(&l, -1));
+    try std.testing.expectEqual(@as(?usize, null), Ui.rowAt(&l, std.math.minInt(i32)));
+    try std.testing.expectEqual(@as(?usize, null), Ui.rowAt(&l, std.math.maxInt(i32)));
+}
+
+test "menu taller than the output is clamped to the top, never off-screen negative" {
+    const rows = try std.testing.allocator.alloc(Row, 100);
+    defer std.testing.allocator.free(rows);
+    for (rows) |*r| r.* = .{ .label = "row", .kind = .none };
+    var l = testLevel(rows);
+    var out: types.Output = .{ .obj = undefined };
+    out.rect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    l.x = 300;
+    l.y = 300;
+    Ui.clampToOutput(&l, &out);
+    try std.testing.expectEqual(@as(i32, 0), l.y); // starts at the top, title stays visible
+    try std.testing.expect(l.x >= 0);
+}
+
+test "buildLevel on OOM leaves no half-built level behind" {
+    // Fail the allocator at every possible point while building a menu and
+    // check nothing leaks and nothing crashes.
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const parsed = try wm_menu.parse(arena_inst.allocator(),
+        \\("Applications",
+        \\  ("Terminal", EXEC, "foot"),
+        \\  ("Editors", ("Vim", SHEXEC, "vim"), ("Emacs", EXEC, "emacs")),
+        \\  ("Quit", EXIT))
+    );
+
+    var fail_at: usize = 0;
+    while (fail_at < 64) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        var wm: types.WindowManager = undefined;
+        wm.gpa = failing.allocator();
+        var ui = testUi(failing.allocator(), &wm);
+        defer {
+            ui.levels.deinit(failing.allocator());
+            ui.arena.deinit();
+        }
+        if (ui.buildLevel(parsed.menu)) |top| {
+            try std.testing.expect(top < ui.levels.items.len);
+        } else |err| {
+            try std.testing.expect(err == error.OutOfMemory);
+        }
+    }
+}
+
+test "clipUtf8 never splits a character and never keeps a NUL" {
+    try std.testing.expectEqualStrings("abc", clipUtf8("abcdef", 3));
+    try std.testing.expectEqualStrings("abcdef", clipUtf8("abcdef", 100));
+    // "é" is 2 bytes (0xC3 0xA9); cutting after the first byte must step back.
+    try std.testing.expectEqualStrings("a", clipUtf8("a\xC3\xA9", 2));
+    try std.testing.expectEqualStrings("a\xC3\xA9", clipUtf8("a\xC3\xA9", 3));
+    // 3-byte character cut in the middle.
+    try std.testing.expectEqualStrings("", clipUtf8("\xE2\x82\xAC", 2));
+    try std.testing.expectEqualStrings("ab", clipUtf8("ab\x00cd", 10));
+    try std.testing.expectEqualStrings("", clipUtf8("", 10));
+}
+
+test "a menu with more rows than max_rows is truncated, not refused" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    const n = max_rows + 50;
+    const items = try a.alloc(wm_menu.Item, n);
+    for (items) |*it| it.* = .{ .label = "x", .action = .{ .exec = "true" } };
+    const m: wm_menu.Menu = .{ .title = "Big", .items = items };
+
+    var wm: types.WindowManager = undefined;
+    wm.gpa = std.testing.allocator;
+    var ui = testUi(std.testing.allocator, &wm);
+    defer {
+        ui.levels.deinit(std.testing.allocator);
+        ui.arena.deinit();
+    }
+    const top = try ui.buildLevel(&m);
+    try std.testing.expectEqual(max_rows, ui.levels.items[top].rows.len);
+    // And its surface is small enough for shm.
+    const l = ui.levels.items[top];
+    _ = try shm.checkedSize(l.w, l.h);
+}
+
+test "buildLevel actually clips overlong labels, not just clipUtf8 in isolation" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const a = arena_inst.allocator();
+
+    const huge = try a.alloc(u8, max_label_bytes * 4);
+    @memset(huge, 'x');
+    var items = [_]wm_menu.Item{.{ .label = huge, .action = .{ .exec = "true" } }};
+    const m: wm_menu.Menu = .{ .title = "T", .items = &items };
+
+    var wm: types.WindowManager = undefined;
+    wm.gpa = std.testing.allocator;
+    var ui = testUi(std.testing.allocator, &wm);
+    defer {
+        ui.levels.deinit(std.testing.allocator);
+        ui.arena.deinit();
+    }
+    const top = try ui.buildLevel(&m);
+    try std.testing.expect(ui.levels.items[top].rows[0].label.len <= max_label_bytes);
 }

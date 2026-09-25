@@ -5,7 +5,7 @@
 //  1. Property-list form (WMRootMenu, plmenu):
 //
 //       ("Applications",
-//         ("XTerm", EXEC, "xterm -sb"),#
+//         ("XTerm", EXEC, "xterm -sb"),
 //         ("Editors", ("Vim", SHEXEC, "xterm -e vim"), ("Emacs", EXEC, emacs)),
 //         ("Workspaces", WORKSPACE_MENU),
 //         ("Exit", EXIT))
@@ -242,11 +242,10 @@ const Builder = struct {
 
     fn warn(b: *Builder, comptime fmt: []const u8, args: anytype) Error!void {
         if (b.warnings.items.len >= MAX_WARNINGS) {
+            // Silently drop warnings after limit to avoid memory exhaustion
             return;
         }
-
-        const message = try std.fmt.allocPrint(b.a, fmt, args);
-        try b.warnings.append(b.a, message);
+        try b.warnings.append(b.a, try std.fmt.allocPrint(b.a, fmt, args));
     }
 
     fn action(b: *Builder, kind: CommandKind, arg: ?[]const u8, label: []const u8) Error!?Action {
@@ -309,9 +308,7 @@ const Builder = struct {
                 try b.warn("menu `{s}`: entry is not a list, skipped", .{title});
                 continue;
             };
-            if (try b.plistItem(tuple)) |it| {
-                try items.append(b.a, it);
-            }
+            if (try b.plistItem(tuple)) |it| try items.append(b.a, it);
         }
         const m = try b.a.create(Menu);
         m.* = .{ .title = title, .items = try items.toOwnedSlice(b.a) };
@@ -374,14 +371,10 @@ const Builder = struct {
 
     fn fromText(b: *Builder, text: []const u8) Error!*const Menu {
         const Frame = struct { title: []const u8, items: std.ArrayList(Item) = .empty };
+        // Everything here is allocated from the builder's arena `b.a`, which
+        // the caller frees as a whole; no per-list deinit (that would be a
+        // double free).
         var stack: std.ArrayList(Frame) = .empty;
-        defer {
-            var it = stack.items;
-            while (it.len > 0) : (it = it[1..]) {
-                it[0].items.deinit(b.a);
-            }
-            stack.deinit(b.a);
-        }
         var root: ?*const Menu = null;
 
         var in_block_comment = false;
@@ -428,12 +421,7 @@ const Builder = struct {
                     try b.warn("line {d}: menu nesting too deep (limit: {d}), ignored", .{ line_no, MAX_MENU_DEPTH });
                     continue;
                 }
-                stack.append(b.a, .{ .title = title }) catch |err| {
-                    if (err == error.OutOfMemory) {
-                        try b.warn("line {d}: out of memory", .{line_no});
-                        return error.OutOfMemory;
-                    }
-                };
+                try stack.append(b.a, .{ .title = title });
             } else if (std.mem.eql(u8, word, "END")) {
                 var frame = stack.pop() orelse {
                     try b.warn("line {d}: END without a matching MENU, ignored", .{line_no});
@@ -444,12 +432,10 @@ const Builder = struct {
                 if (stack.items.len == 0) {
                     root = m;
                 } else {
-                    stack.items[stack.items.len - 1].items.append(b.a, .{
+                    try stack.items[stack.items.len - 1].items.append(b.a, .{
                         .label = frame.title,
                         .action = .{ .submenu = m },
-                    }) catch |err| {
-                        if (err == error.OutOfMemory) return error.OutOfMemory;
-                    };
+                    });
                 }
             } else {
                 if (stack.items.len > 0 and stack.items[stack.items.len - 1].items.items.len >= MAX_ITEMS_PER_MENU) {
@@ -459,13 +445,11 @@ const Builder = struct {
                 const kind = commandKind(word) orelse {
                     try b.warn("line {d}: `{s}`: unknown command `{s}`", .{ line_no, title, word });
                     if (stack.items.len > 0) {
-                        stack.items[stack.items.len - 1].items.append(b.a, .{
+                        try stack.items[stack.items.len - 1].items.append(b.a, .{
                             .label = title,
                             .shortcut = shortcut,
                             .action = .{ .unknown = word },
-                        }) catch |err| {
-                            if (err == error.OutOfMemory) return error.OutOfMemory;
-                        };
+                        });
                     }
                     continue;
                 };
@@ -475,13 +459,11 @@ const Builder = struct {
                 }
                 const arg: ?[]const u8 = if (params.len > 0) params else null;
                 if (try b.action(kind, arg, title)) |act| {
-                    stack.items[stack.items.len - 1].items.append(b.a, .{
+                    try stack.items[stack.items.len - 1].items.append(b.a, .{
                         .label = title,
                         .shortcut = shortcut,
                         .action = act,
-                    }) catch |err| {
-                        if (err == error.OutOfMemory) return error.OutOfMemory;
-                    };
+                    });
                 }
             }
         }
@@ -689,4 +671,114 @@ test "parseDiag says where the menu is broken" {
     var diag: plist.Diag = .{};
     try std.testing.expectError(error.Syntax, parseDiag(arena.allocator(), "(\"M\",\n  (\"a\" EXEC x))", &diag));
     try std.testing.expectEqual(@as(u32, 2), diag.line);
+}
+
+// ----------------------------------------------------------------------------
+// Robustness: hostile or broken input must never crash or hang
+// ----------------------------------------------------------------------------
+
+test "plist form: nesting deeper than the limit is refused, not a stack overflow" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // ("a", ("b", ("c", ... ("z", EXEC, "x")))) nested 200 deep
+    var buf: std.ArrayList(u8) = .empty;
+    const depth = 200;
+    for (0..depth) |_| try buf.appendSlice(arena, "(\"m\", ");
+    try buf.appendSlice(arena, "(\"leaf\", EXEC, \"x\")");
+    for (0..depth) |_| try buf.appendSlice(arena, ")");
+
+    if (parse(arena, buf.items)) |p| {
+        // Also acceptable: parsed with a warning, as long as we got here.
+        try std.testing.expect(p.warnings.len > 0);
+    } else |err| {
+        try std.testing.expect(err == error.Syntax);
+    }
+}
+
+test "plist form: nesting within the limit still works" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    const depth = 10;
+    for (0..depth) |_| try buf.appendSlice(arena, "(\"m\", ");
+    try buf.appendSlice(arena, "(\"leaf\", EXEC, \"x\")");
+    for (0..depth) |_| try buf.appendSlice(arena, ")");
+
+    const p = try parse(arena, buf.items);
+    var m = p.menu;
+    var levels: usize = 1;
+    while (m.items.len > 0 and m.items[0].action == .submenu) : (levels += 1) m = m.items[0].action.submenu;
+    try std.testing.expectEqual(@as(usize, depth), levels);
+}
+
+test "text form: nesting deeper than the limit is refused with warnings" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..100) |_| try buf.appendSlice(arena, "\"m\" MENU\n");
+    try buf.appendSlice(arena, "\"leaf\" EXEC x\n");
+    for (0..100) |_| try buf.appendSlice(arena, "\"m\" END\n");
+
+    if (parse(arena, buf.items)) |p| {
+        try std.testing.expect(p.warnings.len > 0);
+    } else |_| {}
+}
+
+test "warnings are capped" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(arena, "\"top\" MENU\n");
+    for (0..(MAX_WARNINGS * 3)) |_| try buf.appendSlice(arena, "\"x\" NOSUCHCOMMAND\n");
+    try buf.appendSlice(arena, "\"top\" END\n");
+
+    const p = try parse(arena, buf.items);
+    try std.testing.expect(p.warnings.len <= MAX_WARNINGS);
+    try std.testing.expect(p.warnings.len > 0);
+}
+
+test "plist form: truncated entries do not index out of bounds" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const inputs = [_][]const u8{
+        "(\"Menu\", (\"only label\"))",
+        "(\"Menu\", (\"x\", SHORTCUT))",
+        "(\"Menu\", (\"x\", SHORTCUT, \"k\"))",
+        "(\"Menu\", ())",
+        "(\"Menu\", (\"x\", EXEC))",
+        "(\"Menu\", (\"x\",",
+        "(",
+        "(\"Menu\", \"not a list\")",
+    };
+    for (inputs) |in| {
+        // Any result is fine; the point is: no panic, no leak, no hang.
+        _ = parse(arena, in) catch {};
+    }
+}
+
+test "nextWord and unquoteWhole survive odd quoting" {
+    var line: []const u8 = "\"";
+    try std.testing.expectEqualStrings("", nextWord(&line).?);
+    line = "\"abc";
+    try std.testing.expectEqualStrings("abc", nextWord(&line).?);
+    line = "\"abc\" rest";
+    try std.testing.expectEqualStrings("abc", nextWord(&line).?);
+    try std.testing.expectEqualStrings(" rest", line);
+    line = "   ";
+    try std.testing.expect(nextWord(&line) == null);
+
+    try std.testing.expectEqualStrings("\"", unquoteWhole("\""));
+    try std.testing.expectEqualStrings("", unquoteWhole("\"\""));
+    try std.testing.expectEqualStrings("a b", unquoteWhole("\"a b\""));
+    try std.testing.expectEqualStrings("\"a\" \"b\"", unquoteWhole("\"a\" \"b\""));
 }
