@@ -1,0 +1,14 @@
+name: Update local checkout
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update:
+    runs-on: waylandmaker
+
+    steps:
+      - name: Update local repository
+        run: /usr/local/bin/update-waylandmaker
