@@ -93,7 +93,38 @@ Key names are xkbcommon keysyms and follow the **active keyboard layout**. The o
 - Attributes are resolved in `window.placeNew` (`Table.lookup(app_id)`): `StartWorkspace`, `Omnipresent`, `KeepOnTop`, `StartMaximized`, and `Floating` determine the initial placement; `NoBorder` and `Unfocusable` apply continuously (`Window.attrs`, updated when `app_id` arrives later).
 - Omnipresent windows (`Window.isOmnipresent`: `sticky` and floating) move with the user to the new workspace in `action.switchWorkspace`.
 
+## Root Menu (`ui.zig`)
+
+The root menu, window list, and the transparent desktop-catcher surfaces that receive right/middle clicks
+on the empty desktop are implemented in `ui.zig`, drawn with `gfx.zig` (cairo/pango) into `wl_shm` buffers
+managed by `shm.zig`. See `docs/INTEGRATION.md` for the Window Maker-specific menu format and behaviour;
+this section only covers the client-side protocol discipline:
+
+- Input callbacks (`wl_pointer`/`wl_keyboard` listeners) run **outside** a manage/render sequence, where
+  river forbids both rendering state (`node.set_position`, `place_top`/`place_bottom`) and management state
+  (`seat.focus_shell_surface`). Callbacks therefore only mutate plain data (hover index, which levels are
+  open, a pending `Request`) and call `manage_dirty()`.
+- Everything that actually talks to river — creating/destroying shell surfaces, positioning, stacking,
+  drawing, committing buffers, taking keyboard focus — happens in `Ui.sync()`, called once from
+  `main.onManage()`. This is the single place that is allowed to do so.
+- Shell surfaces that are no longer needed (a closed submenu, an output that disappeared) are queued in a
+  graveyard and only actually destroyed at the **end** of `sync()`, after drawing and positioning for that
+  sequence are done — not at the start of the *next* `sync()`, which previously left a closed submenu
+  visible with its last frame for one extra cycle.
+- Buffers are double-buffered per surface (`Panel.slots`): a `wl_buffer` river has not yet released is
+  never drawn into again.
+- `shm.checkedSize()` validates width/height before any `memfd`/`mmap`/Wayland call: rejects zero or
+  negative sizes, catches `i32` overflow in `width * 4`, and caps both the per-side size (16384 px) and the
+  total byte size (256 MiB). `wm_menu.zig` separately caps menu nesting depth, item count per menu, and the
+  number of parse warnings, so a broken or hostile `RootMenu` file cannot exhaust memory or the stack.
+
 ## Known Limitations
 
-- The root menu is loaded but not yet visible; title bars and the dock are missing.
+- Title bars and the dock are not implemented yet (see `docs/TODO.md`).
 - Drag-reordering windows within the strip is not implemented; dragging makes windows floating.
+- The root menu currently binds only the first `wl_seat` that appears; additional seats get no pointer or
+  keyboard for the menu.
+- Two small root-menu fixes (pointer cursor shape, a menu-overlap timing issue) are written and tested but
+  not yet merged into `main`; see `docs/TODO.md`.
+- Running against a real river has not been verified for the UI layer (`ui.zig`, `shm.zig`, `gfx.zig`);
+  only `zig build` and `zig build test` are confirmed so far.

@@ -21,7 +21,8 @@ Keybindings can be changed in `~/.config/wmaker-wl/config.conf` (template: `src/
 
 ## Build
 
-Requires Zig **0.16.0**, `libwayland-dev`, and `libxkbcommon-dev`.
+Requires Zig **0.16.0**, `libwayland-dev`, `libxkbcommon-dev`, and, for the root menu's cairo/pango
+rendering, `libcairo2-dev`, `libpango1.0-dev`, and `libglib2.0-dev` 
 
 ```sh
 zig build

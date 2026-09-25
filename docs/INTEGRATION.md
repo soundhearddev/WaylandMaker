@@ -43,7 +43,10 @@ Fertig, mit Unit-Tests (78) und Echtlauf gegen Beispieldateien:
 Brauchen Titelleisten oder Dock: `NoTitlebar`, `NoResizebar`,
 `NoCloseButton`, `NoMiniaturizeButton`, `Icon`, `NoAppIcon`, alle übrigen.
 
-Das Root-Menü ist **geladen, aber noch nicht sichtbar**: es gibt noch keine Anzeige (Phase 4).
+Das Root-Menü ist **geladen und sichtbar** (Phase 4, siehe unten): rechte Taste auf dem leeren Desktop
+öffnet es, mittlere Taste die Fensterliste. Zwei kleine Korrekturen (Cursor-Form über dem Menü, ein
+Überlapp-Fehler beim Hovern zwischen Untermenüs) sind als Patch bereit, aber noch nicht in `main` gemerged
+— siehe `docs/TODO.md`.
 
 ## 3. Was river bietet, und was noch fehlt
 
@@ -56,20 +59,24 @@ river-Protokoll (im Repo unter `protocol/`), geprüft:
   brauchen Dock und Menüs **keinen** Layer-Shell-Client.
 * Klicks auf eine Shell-Surface kommen als normale `wl_pointer`-Events direkt bei unserem Prozess an.
 
-Was dafür neu gebraucht wird: `wl_compositor`, `wl_shm`, `wl_seat` (Zeiger, Tastatur), eine Zeichenbibliothek
-und Schrift. **Empfehlung: cairo + pangocairo**, wie wlmaker. Beides ist installierbar (hier getestet:
-cairo 1.18, pango 1.52) und liefert Verläufe, Text, PNG-Icons.
+Dafür gebraucht und seit Phase 2/4 gebunden: `wl_compositor`, `wl_shm`, `wl_seat` (Zeiger, Tastatur), cairo +
+pangocairo als Zeichenbibliothek (wie wlmaker; getestet mit cairo 1.18, pango 1.52). Optional zusätzlich
+gebunden (Patch bereit, siehe `docs/TODO.md`): `wp_cursor_shape_manager_v1`, damit der Zeiger über
+Menü/Desktop zum normalen Pfeil wechselt statt das zuletzt von einem Fenster gesetzte Bild zu behalten.
 
 ## 4. Phasen
 
 Reihenfolge nach deinen Prioritäten (Root-Menü und Dock zuerst), mit Abhängigkeiten:
 
-**Phase 2: Zeichen-Infrastruktur** (Voraussetzung für alles Sichtbare)
-* `gfx.zig`: `wl_shm`-Puffer (memfd), cairo-Kontext, Text mit Pango, Texturen im Window-Maker-Format
-  (`solid`, `hgradient`, `vgradient`, `dgradient`), Bevel (Kante hell/dunkel).
-* `ui_client.zig`: Bindung von `wl_compositor`/`wl_shm`/`wl_seat`, Zeiger- und Tastaturereignisse,
-  Event-Loop von `dispatch()` auf `poll()` umstellen (nötig für Timer und Menü-Tastatur).
-* Testbar **ohne Compositor**: in ein cairo-Bild rendern und Pixel prüfen.
+**Phase 2: Zeichen-Infrastruktur** — erledigt
+* `gfx.zig`: `wl_shm`-Puffer (memfd, über `shm.zig` mit geprüfter, überlaufsicherer Größe), cairo-Kontext,
+  Text mit Pango (`wm_text.c`/`.h` als schmaler C-Helfer um die Pango-Font-Description-Makros), Bevel
+  (Kante hell/dunkel), Verläufe.
+* `ui.zig`: Bindung von `wl_compositor`/`wl_shm`/`wl_seat`, Zeiger- und Tastaturereignisse. Die Event-Loop
+  blieb bei `display.dispatch()`; ein Umstieg auf `poll()` war für Menü-Tastatur und -Zeiger nicht nötig.
+* Getestet **ohne Compositor**: cairo-Bild rendern und Pixel prüfen (Titelverlauf, Hover-Hervorhebung,
+  Bevel, dass Text tatsächlich Pixel setzt), plus Fuzz-/Grenzwerttests für `shm.checkedSize` und
+  Menü-Zeilenlimits.
 
 **Phase 3: Titelleisten** (`decoration_above`)
 * Maße aus wlmaker `Default.plist`: Höhe 22, Fase 1, Minimieren links, Schließen rechts, Titel zentriert;
@@ -79,15 +86,21 @@ Reihenfolge nach deinen Prioritäten (Root-Menü und Dock zuerst), mit Abhängig
 * Klick: Fokus; Ziehen: `op_start_pointer` (läuft schon über die vorhandene Maschine); Schließen: `close`.
 * Minimieren/Shade: eigenes Modell nötig (siehe Phase 7).
 
-**Phase 4: Root-Menü** (wichtig)
-* Hintergrund als Shell-Surface unten: **rechte Taste** öffnet das Root-Menü, **mittlere** die Fensterliste,
-  linke wählt Fenster (das ist die Standardbelegung in Window Maker, im Quelltext geprüft:
-  `MouseRightButtonAction = OpenApplicationsMenu`, `MouseMiddleButtonAction = OpenWindowListMenu`).
-  Damit entfällt der Umweg über Pointer-Bindings (deren `enable` wäre nur in der Manage-Phase möglich).
-* Kaskadierende Untermenüs, Hervorhebung, Tastatur (Pfeile, Enter, Esc), `SHORTCUT`-Anzeige.
+**Phase 4: Root-Menü** — erledigt, zwei Korrekturen bereit
+* Ein transparentes, output-großes Desktop-Catcher-Shell-Surface pro Output fängt Klicks auf dem freien
+  Desktop ab (Fenster liegen darüber, bekommen also weiterhin ihre eigenen Klicks): **rechte Taste** öffnet
+  das Root-Menü, **mittlere** die Fensterliste. Linksklick auf dem Desktop schließt ein offenes Menü.
+* Kaskadierende Untermenüs, Hervorhebung beim Hovern, Tastatur (Pfeile, Enter/Rechts öffnet oder
+  aktiviert, Links schließt eine Ebene, Esc schließt alles), `SHORTCUT`-Anzeige rechtsbündig.
 * `WORKSPACE_MENU` und `WINDOWS_MENU` werden zur Laufzeit aus dem Modell erzeugt; `EXEC`/`SHEXEC` über
   `process.spawn` (`SHEXEC` mit `/bin/sh -c`).
-* Notlösung bis dahin, falls gewünscht: ein Tastenkürzel, das das Menü in `fuzzel --dmenu` zeigt.
+* Alle Wayland-Requests laufen ausschließlich aus `Ui.sync()`, aufgerufen aus `main.onManage()`; Zeiger-
+  und Tastatur-Callbacks selbst ändern nur reine Daten und rufen `manage_dirty()` — river erlaubt
+  `node.set_position`/`place_*` und `focus_shell_surface` sonst nur innerhalb einer Manage-Sequenz.
+* Offen, als Patch bereitgestellt (siehe `docs/TODO.md`): der Zeiger-Cursor wechselt über dem Menü/Desktop
+  noch nicht zum normalen Pfeil (`wp_cursor_shape_manager_v1` fehlt bisher), und ein durch Hovern
+  geschlossenes Untermenü blieb bis zum nächsten Zyklus mit seinem letzten Frame sichtbar
+  (`reapGraveyard()`-Reihenfolge in `sync()`).
 
 **Phase 5: Dock und Clip** (wichtig)
 * Zustand laden: Window-Maker-`WMState` (`Dock.Applications` mit `Command`, `Name`, `AutoLaunch`,
@@ -116,4 +129,3 @@ Reihenfolge nach deinen Prioritäten (Root-Menü und Dock zuerst), mit Abhängig
   (`wlmclock`, `wlmbattery`) brauchen eine eigene Schnittstelle.
 * `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU` sind im Menü-Modell vorhanden, aber noch
   ohne Funktion und erscheinen deaktiviert.
-
