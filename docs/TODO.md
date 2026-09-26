@@ -11,11 +11,17 @@
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
 - [ ] **Phase 5**: Dock und Clip (`WMState`/wlmaker-State, 64-px-Kacheln, `app_id`-Zuordnung)
-- [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf` neu ein und ersetzt alle
-      Tastenkürzel im laufenden Betrieb, ohne Fenster oder Layout anzufassen. Signalhandler setzt nur ein
-      Flag (async-signal-sicher); die eigentliche Arbeit (Bindings zerstören/neu erzeugen) läuft in der
-      nächsten manage-Sequenz, dorthin geweckt durch `EINTR` in `display.dispatch()`. Ein fehlerhaftes
-      Reload (kaputte Datei, OOM beim Parsen der Commands) fällt sauber auf die vorherige Config zurück.
+- [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf`, `RootMenu` und
+      `WMWindowAttributes` neu ein und ersetzt alle Tastenkürzel im laufenden Betrieb, ohne Fenster oder
+      Layout anzufassen (Autostart läuft bewusst nicht erneut). Signalhandler setzt nur ein Flag
+      (async-signal-sicher); die eigentliche Arbeit (Bindings zerstören/neu erzeugen) läuft in der nächsten
+      manage-Sequenz, dorthin geweckt durch `EINTR` in `display.dispatch()`. `main()` und der Reload-Pfad
+      laden `wm.commands`/`wm.root_menu`/`wm.attrs` über dieselbe Funktion (`loadFromConfigImpl`), weil alle
+      drei aus derselben Config-Arena stammen — sonst würde eines davon nach dem Reload auf freigegebenen
+      Speicher zeigen. Bereits gequeute Tastenkürzel-Befehle (`wm.pending`) werden vor dem Freigeben der
+      alten Arena noch abgearbeitet, da `.spawn`-Befehle Zeiger in diese Arena halten. Ein fehlerhaftes
+      Reload (kaputte Datei, OOM) fällt sauber auf die vorherige Config zurück. Ein offenes Root-Menü ist
+      von alldem unberührt: es kopiert seine Daten beim Öffnen bereits in eine eigene Arena.
 - [ ] **`wmaker-wl --restart`/Root-Menü-Eintrag `RESTART`**: bewusst noch nicht umgesetzt. Ein echter
       Prozess-Neustart (`execve` auf sich selbst) würde die bestehende `river_window_manager_v1`-Verbindung
       kappen; ob/wie river danach einen neuen WM-Client akzeptiert, ohne dass alle verwalteten Fenster

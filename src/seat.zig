@@ -550,3 +550,18 @@ test "release before start cancels without needing op_end" {
     try std.testing.expect(s.op == .none);
     try std.testing.expect(s.op_window == null);
 }
+
+test "teardownBindings on a seat with no bindings just clears the ready flag" {
+    var wm: types.WindowManager = undefined;
+    wm.gpa = std.testing.allocator;
+    var s = testSeat();
+    s.xkb_bindings.init();
+    s.pointer_bindings.init();
+    s.bindings_ready = true;
+
+    teardownBindings(&wm, &s);
+
+    try std.testing.expect(!s.bindings_ready);
+    try std.testing.expect(s.xkb_bindings.first() == null);
+    try std.testing.expect(s.pointer_bindings.first() == null);
+}

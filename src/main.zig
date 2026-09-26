@@ -88,15 +88,10 @@ pub fn main(init: std.process.Init) !void {
     defer wm.pending.deinit(gpa);
     action.global = wm;
 
-    // Parse key-binding commands once. They live as long as the config.
-    const arena = wm.cfg.arena.allocator();
-    wm.commands = try action.parseAll(arena, &wm.cfg);
-
-    // Window Maker files: root menu, per-application rules and autostart.
-    const files = try wm_files.load(io, arena, &wm.cfg);
-    wm.root_menu = files.root_menu;
-    wm.attrs = files.attributes;
-    const autostart_path = files.autostart;
+    // Key-binding commands, root menu, and per-application rules: parsed
+    // together because they share wm.cfg's arena (see reloadConfig's
+    // loadFromConfig doc comment, which this also uses on SIGHUP).
+    const autostart_path = loadStartup(wm) catch return error.ConfigLoadFailed;
 
     const display = wl.Display.connect(null) catch {
         std.log.err("cannot connect to the wayland display. wmaker-wl is not started " ++
@@ -233,10 +228,10 @@ fn reloadConfig(wm: *WindowManager) void {
     // seat.xkbListener) before returning to onManage(), which runs THIS
     // function before it gets to runPending(). A `.spawn` command holds
     // `[]const []const u8` argv slices allocated from the CURRENT config's
-    // arena (action.parseAll(wm.cfg.arena.allocator(), ...)). Once that
-    // arena is freed below, those slices would dangle while still queued.
-    // Running the queue now, on the config that produced it, avoids that;
-    // runPending() later in onManage() then simply finds nothing left.
+    // arena. Once that arena is freed below, those slices would dangle
+    // while still queued. Running the queue now, on the config that
+    // produced it, avoids that; runPending() later in onManage() then
+    // simply finds nothing left.
     runPending(wm);
 
     var sit = wm.seats.first();
@@ -246,21 +241,58 @@ fn reloadConfig(wm: *WindowManager) void {
 
     var old_cfg = wm.cfg;
     wm.cfg = new_cfg;
-    const arena = wm.cfg.arena.allocator();
-    wm.commands = action.parseAll(arena, &wm.cfg) catch |err| {
-        // OOM: fall back to the config we just replaced rather than run
-        // with zero commands (every binding would silently do nothing).
-        std.log.err("config reload: {t} while parsing commands, reverting", .{err});
+    if (loadFromConfig(wm)) {
+        old_cfg.deinit();
+        rebind(wm);
+        std.log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
+    } else {
+        // Something under the new config's arena failed (OOM, most likely):
+        // revert wholesale rather than leave wm.commands/root_menu/attrs
+        // partially pointing into an arena we're about to free.
         wm.cfg.deinit();
         wm.cfg = old_cfg;
-        wm.commands = action.parseAll(wm.cfg.arena.allocator(), &wm.cfg) catch &.{};
+        _ = loadFromConfig(wm); // best effort; wm.commands defaults to &.{} below if even this fails
         rebind(wm);
-        return;
-    };
-    old_cfg.deinit();
+    }
+}
 
-    rebind(wm);
-    std.log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
+/// Everything derived from `wm.cfg` that must be (re)built together,
+/// because it all lives in `wm.cfg.arena` and `main()` and `reloadConfig()`
+/// both need the exact same steps. `wm.root_menu` and `wm.attrs` are
+/// included even though they come from separate files (`RootMenu`,
+/// `WMWindowAttributes`): `wm_files.load()` allocates them from the same
+/// arena as `wm.commands`, so leaving them behind on reload would turn them
+/// into dangling pointers the moment the old arena is freed. An already
+/// open menu is unaffected: opening a menu deep-copies it into `Ui`'s own
+/// arena (see ui.zig's buildLevel/zdup), it never keeps `wm.root_menu`
+/// itself around.
+///
+/// Returns false (leaving `wm.commands` as `&.{}`) on failure, so the
+/// caller can decide whether to revert instead of running with an empty or
+/// half-built config.
+fn loadFromConfig(wm: *WindowManager) bool {
+    _ = loadFromConfigImpl(wm) catch |err| {
+        std.log.err("config reload: {t}", .{err});
+        wm.commands = &.{};
+        return false;
+    };
+    return true;
+}
+
+/// Startup-only counterpart of `loadFromConfig`: same arena-sharing rule,
+/// plus the autostart file path, which only `main()` needs (a reload must
+/// not relaunch the terminal/panel/etc. a second time).
+fn loadStartup(wm: *WindowManager) !?[]const u8 {
+    return try loadFromConfigImpl(wm);
+}
+
+fn loadFromConfigImpl(wm: *WindowManager) !?[]const u8 {
+    const arena = wm.cfg.arena.allocator();
+    wm.commands = try action.parseAll(arena, &wm.cfg);
+    const files = try wm_files.load(wm.io, arena, &wm.cfg);
+    wm.root_menu = files.root_menu;
+    wm.attrs = files.attributes;
+    return files.autostart;
 }
 
 fn rebind(wm: *WindowManager) void {
@@ -579,6 +611,72 @@ fn onRender(wm: *WindowManager) void {
 // Tests: ordering guarantees that don't fit window_mod/ui.zig's own test
 // files because they concern onManage() itself.
 // ----------------------------------------------------------------------------
+
+test "wm.commands / root_menu / attrs are only ever assigned inside loadFromConfigImpl" {
+    // Regression test: all three are allocated from wm.cfg's arena (see
+    // loadFromConfigImpl's doc comment). If a future change assigns any of
+    // them somewhere else -- e.g. main() re-inlining the load instead of
+    // calling loadStartup(), or reloadConfig() special-casing just
+    // wm.commands -- that assignment and loadFromConfigImpl's arena
+    // lifetime silently fall out of sync: reloadConfig() frees the old
+    // arena believing it moved everything derived from it, while the
+    // out-of-band assignment still points into it. This does not crash at
+    // the reload site; it corrupts memory the next time something reads
+    // the stale field. Scanning for the assignment sites themselves (not
+    // just "is loadFromConfigImpl called twice", which a hand-inlined copy
+    // would also satisfy) is what actually catches that.
+    const src = @embedFile("main.zig");
+    const impl_start = std.mem.indexOf(u8, src, "fn loadFromConfigImpl(wm: *WindowManager)").?;
+    const impl_end = std.mem.indexOfPos(u8, src, impl_start, "\n}").?;
+    // loadFromConfig()'s own error path is the one legitimate assignment
+    // outside loadFromConfigImpl: on OOM it resets wm.commands to an empty
+    // slice rather than leave a half-parsed one, which does not touch (and
+    // so cannot dangle from) the arena being freed by its caller.
+    const wrap_start = std.mem.indexOf(u8, src, "fn loadFromConfig(wm: *WindowManager) bool {").?;
+    const wrap_end = std.mem.indexOfPos(u8, src, wrap_start, "\n}").?;
+
+    // Each needle is split across two literals so the source line below
+    // doesn't contain the contiguous text it searches for (which would
+    // make it match itself via @embedFile: this whole file, this line
+    // included, is what `src` holds).
+    const fields = [_][]const u8{
+        "wm." ++ "commands = ",
+        "wm." ++ "root_menu = ",
+        "wm." ++ "attrs = ",
+    };
+    for (fields) |field| {
+        var i: usize = 0;
+        var seen: usize = 0;
+        while (std.mem.indexOfPos(u8, src, i, field)) |pos| {
+            seen += 1;
+            const in_impl = pos >= impl_start and pos < impl_end;
+            const in_wrap_fallback = pos >= wrap_start and pos < wrap_end;
+            try std.testing.expect(in_impl or in_wrap_fallback);
+            i = pos + field.len;
+        }
+        try std.testing.expect(seen >= 1);
+    }
+}
+
+test "reloadConfig drains the pending queue before freeing the old config's arena" {
+    // Regression test: a key press queued just before SIGHUP arrives holds
+    // a `.spawn` Command whose argv slices live in the CURRENT config's
+    // arena (see reloadConfig's doc comment). If old_cfg.deinit() ran
+    // before that queue is drained, those slices would dangle while
+    // action.run(wm, .spawn) is still about to read them.
+    const src = @embedFile("main.zig");
+    const body_start = std.mem.indexOf(u8, src, "fn reloadConfig(wm: *WindowManager) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
+    const body = src[body_start..body_end];
+    const at = struct {
+        fn call(haystack: []const u8, needle: []const u8) usize {
+            return std.mem.indexOf(u8, haystack, needle) orelse @panic("call missing from reloadConfig()");
+        }
+    }.call;
+    const run_pos = at(body, "runPending(wm)");
+    const free_pos = at(body, "old_cfg.deinit()");
+    try std.testing.expect(run_pos < free_pos);
+}
 
 test "onManage reaps closed windows before syncing the menu, in the same sequence" {
     // Regression test for a TODO item ("the menu does not redraw itself
