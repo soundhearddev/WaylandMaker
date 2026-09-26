@@ -150,8 +150,20 @@ pub fn main(init: std.process.Init) !void {
         proc.spawn(wm, &.{ "/bin/sh", p });
     }
 
+    installSighupHandler();
     while (!wm.quit) {
-        if (display.dispatch() != .SUCCESS) break;
+        const err = display.dispatch();
+        if (err == .INTR) {
+            // A signal interrupted the blocking read. SIGCHLD is ignored
+            // and needs nothing; SIGHUP only set a flag (see
+            // installSighupHandler's doc comment) and needs a manage
+            // sequence to actually apply it. manage_dirty() is a normal
+            // Wayland request, so it must be sent from here, not from the
+            // signal handler itself.
+            if (reload_requested.load(.monotonic)) wm.obj.manageDirty();
+            continue;
+        }
+        if (err != .SUCCESS) break;
     }
 
     if (wm.quit) {
@@ -169,6 +181,93 @@ fn ignoreSigchld() void {
         .flags = 0,
     };
     std.posix.sigaction(.CHLD, &act, null);
+}
+
+// ----------------------------------------------------------------------------
+// Config reload (SIGHUP)
+// ----------------------------------------------------------------------------
+//
+// The handler itself must be async-signal-safe, so it only sets a flag; the
+// actual reload (re-parsing the file, replacing bindings) needs allocation
+// and river requests, neither of which is safe or legal inside a signal
+// handler (`enable`/`destroy` on a binding is management state: manage
+// sequence only, same rule as everywhere else in this file).
+//
+// Without `SA_RESTART`, the blocking syscall inside display.dispatch()
+// returns EINTR when the signal arrives, so the main loop wakes up on its
+// own; it just has to not treat EINTR as a fatal error (see the loop below).
+
+var reload_requested = std.atomic.Value(bool).init(false);
+
+fn onSighup(_: std.os.linux.SIG) callconv(.c) void {
+    reload_requested.store(true, .monotonic);
+}
+
+fn installSighupHandler() void {
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = onSighup },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0, // no SA_RESTART: dispatch() must see EINTR
+    };
+    std.posix.sigaction(.HUP, &act, null);
+}
+
+/// Re-read the config file and swap it into `wm`, replacing every seat's key
+/// bindings. Layout, running windows, and the root menu are untouched: this
+/// only affects what config.zig actually owns (see its doc comment) plus the
+/// bindings derived from it. Must run inside a manage sequence: it destroys
+/// and (re)creates `river_xkb_binding_v1` objects, which `enable`/`destroy`
+/// require.
+///
+/// A parse failure never touches the running config: config.load() itself
+/// only fails on OOM, and a broken user file already falls back to the
+/// built-in defaults with a warning (see config.zig), so there is nothing
+/// further to roll back here.
+fn reloadConfig(wm: *WindowManager) void {
+    const new_cfg = config.load(wm.io, wm.gpa) catch |err| {
+        std.log.err("config reload: {t}, keeping the current configuration", .{err});
+        return;
+    };
+
+    // A key press just before the SIGHUP arrived queues a Command (see
+    // seat.xkbListener) before returning to onManage(), which runs THIS
+    // function before it gets to runPending(). A `.spawn` command holds
+    // `[]const []const u8` argv slices allocated from the CURRENT config's
+    // arena (action.parseAll(wm.cfg.arena.allocator(), ...)). Once that
+    // arena is freed below, those slices would dangle while still queued.
+    // Running the queue now, on the config that produced it, avoids that;
+    // runPending() later in onManage() then simply finds nothing left.
+    runPending(wm);
+
+    var sit = wm.seats.first();
+    while (sit) |s| : (sit = types.nextSeat(s, wm)) {
+        seat_mod.teardownBindings(wm, s);
+    }
+
+    var old_cfg = wm.cfg;
+    wm.cfg = new_cfg;
+    const arena = wm.cfg.arena.allocator();
+    wm.commands = action.parseAll(arena, &wm.cfg) catch |err| {
+        // OOM: fall back to the config we just replaced rather than run
+        // with zero commands (every binding would silently do nothing).
+        std.log.err("config reload: {t} while parsing commands, reverting", .{err});
+        wm.cfg.deinit();
+        wm.cfg = old_cfg;
+        wm.commands = action.parseAll(wm.cfg.arena.allocator(), &wm.cfg) catch &.{};
+        rebind(wm);
+        return;
+    };
+    old_cfg.deinit();
+
+    rebind(wm);
+    std.log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
+}
+
+fn rebind(wm: *WindowManager) void {
+    var sit = wm.seats.first();
+    while (sit) |s| : (sit = types.nextSeat(s, wm)) {
+        if (wm.xkb_bindings != null) seat_mod.setupBindings(wm, s);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -316,6 +415,10 @@ fn onManage(wm: *WindowManager) void {
     window_mod.reap(wm);
     output_mod.reap(wm);
     seat_mod.reap(wm);
+
+    // 1b. SIGHUP asked for a config reload (destroys/creates bindings,
+    // legal only here, same as step 2 below).
+    if (reload_requested.swap(false, .monotonic)) reloadConfig(wm);
 
     // 2. Seats that just appeared need their bindings (legal only here).
     var sit = wm.seats.first();
@@ -470,4 +573,32 @@ fn onRender(wm: *WindowManager) void {
     while (it) |w| : (it = types.nextWindow(w, wm)) {
         window_mod.applyRender(wm, w, w == focus);
     }
+}
+
+// ----------------------------------------------------------------------------
+// Tests: ordering guarantees that don't fit window_mod/ui.zig's own test
+// files because they concern onManage() itself.
+// ----------------------------------------------------------------------------
+
+test "onManage reaps closed windows before syncing the menu, in the same sequence" {
+    // Regression test for a TODO item ("the menu does not redraw itself
+    // after a window closes while it's open, only on the next hover").
+    // window_mod.destroy() -> seat.forgetWindow() -> ui.forgetWindow()
+    // already marks the affected menu level dirty (see ui.zig); what makes
+    // that take effect in the SAME manage sequence, rather than the next
+    // one, is that window_mod.reap() (which calls destroy()) runs before
+    // `if (wm.ui) |u| u.sync()` inside onManage(). Pin that order here so a
+    // future reordering doesn't silently reintroduce the stale-row bug.
+    const src = @embedFile("main.zig");
+    const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
+    const body = src[body_start..body_end];
+    const at = struct {
+        fn call(haystack: []const u8, needle: []const u8) usize {
+            return std.mem.indexOf(u8, haystack, needle) orelse @panic("call missing from onManage()");
+        }
+    }.call;
+    const reap_pos = at(body, "window_mod.reap(wm)");
+    const sync_pos = at(body, "u.sync()");
+    try std.testing.expect(sync_pos > reap_pos);
 }

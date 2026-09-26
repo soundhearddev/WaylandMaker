@@ -402,22 +402,32 @@ pub fn focus(seat: *Seat, win: ?*Window) void {
 // Removal
 // ----------------------------------------------------------------------------
 
+/// Destroy every key/pointer binding of `seat` and mark it as needing
+/// `setupBindings` again. Used both when a seat disappears (`reap`, below)
+/// and to swap in a freshly reloaded config (`main.reloadConfig`); both are
+/// manage-sequence-only, same as `setupBindings` (`destroy` on a binding is
+/// management state).
+pub fn teardownBindings(wm: *WindowManager, seat: *Seat) void {
+    while (seat.xkb_bindings.first()) |b| {
+        types.unlink(&b.link);
+        b.obj.destroy();
+        wm.gpa.destroy(b);
+    }
+    while (seat.pointer_bindings.first()) |b| {
+        types.unlink(&b.link);
+        b.obj.destroy();
+        wm.gpa.destroy(b);
+    }
+    seat.bindings_ready = false;
+}
+
 /// Destroy seats river told us are gone. Manage sequence only.
 pub fn reap(wm: *WindowManager) void {
     var it = wm.seats.first();
     while (it) |s| {
         const next = types.nextSeat(s, wm);
         if (s.removed) {
-            while (s.xkb_bindings.first()) |b| {
-                types.unlink(&b.link);
-                b.obj.destroy();
-                wm.gpa.destroy(b);
-            }
-            while (s.pointer_bindings.first()) |b| {
-                types.unlink(&b.link);
-                b.obj.destroy();
-                wm.gpa.destroy(b);
-            }
+            teardownBindings(wm, s);
             types.unlink(&s.link);
             s.obj.destroy();
             wm.gpa.destroy(s);

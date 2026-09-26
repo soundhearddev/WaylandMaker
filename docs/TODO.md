@@ -11,6 +11,16 @@
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
 - [ ] **Phase 5**: Dock und Clip (`WMState`/wlmaker-State, 64-px-Kacheln, `app_id`-Zuordnung)
+- [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf` neu ein und ersetzt alle
+      Tastenkürzel im laufenden Betrieb, ohne Fenster oder Layout anzufassen. Signalhandler setzt nur ein
+      Flag (async-signal-sicher); die eigentliche Arbeit (Bindings zerstören/neu erzeugen) läuft in der
+      nächsten manage-Sequenz, dorthin geweckt durch `EINTR` in `display.dispatch()`. Ein fehlerhaftes
+      Reload (kaputte Datei, OOM beim Parsen der Commands) fällt sauber auf die vorherige Config zurück.
+- [ ] **`wmaker-wl --restart`/Root-Menü-Eintrag `RESTART`**: bewusst noch nicht umgesetzt. Ein echter
+      Prozess-Neustart (`execve` auf sich selbst) würde die bestehende `river_window_manager_v1`-Verbindung
+      kappen; ob/wie river danach einen neuen WM-Client akzeptiert, ohne dass alle verwalteten Fenster
+      unverwaltet zurückbleiben, ist ungeklärt (siehe Phase 7 unten) — SIGHUP-Reload deckt den eigentlichen
+      Bedarf ("neue Config ohne Sitzung neu zu starten") inzwischen ab.
 - [ ] **Phase 6**: Themes, `~/GNUstep/Defaults/WindowMaker`-Schlüssel
 - [ ] **Phase 7**: Minimieren/Shade/Verstecken, Session speichern, Workspace-Namen
 - [ ] Menüpunkte ohne Funktion: `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`
@@ -21,8 +31,9 @@
       keinen Zeiger/keine Tastatur fürs Menü.
 - [ ] Kein Scrollen bei einem Menü, das höher als der Output ist (wird an den oberen Rand geklemmt, der
       untere Teil ragt ggf. heraus).
-- [ ] Fenster, die während offenem Menü geschlossen werden, entfernen ihre Zeile korrekt (`forgetWindow`),
-      aber das Menü redrawt sich dafür nicht von selbst neu, sondern erst beim nächsten Hover/Klick.
+- [x] Fenster, die während offenem Menü geschlossen werden, entfernen ihre Zeile korrekt (`forgetWindow`)
+      und das Menü redrawt sich noch in derselben manage-Sequenz (`window_mod.reap()` läuft vor `u.sync()`
+      in `onManage()`, mit Reihenfolge-Regressionstest abgesichert). War bereits so, nur nicht verifiziert.
 
 ### Sonstiges
 - [ ] Mehrere Outputs: Fokus zwischen Monitoren, Fenster verschieben
