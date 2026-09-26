@@ -30,4 +30,4 @@ zig build test
 river -c ./zig-out/bin/wmaker-wl
 ```
 
-See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture.
+See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how to define DockApps (`~/.config/wmaker-wl/dockapps.conf`).

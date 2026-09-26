@@ -35,6 +35,7 @@ const output_mod = root.output;
 const seat_mod = root.seat_mod;
 const action = root.action;
 const wm_files = root.wm_files;
+const dockapp = root.dockapp;
 const proc = root.proc;
 const ui_mod = root.ui;
 
@@ -52,6 +53,7 @@ test {
     _ = @import("plist.zig");
     _ = @import("wm_menu.zig");
     _ = @import("wm_attr.zig");
+    _ = @import("dockapp.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
     _ = @import("gfx.zig");
@@ -91,7 +93,8 @@ pub fn main(init: std.process.Init) !void {
     // Key-binding commands, root menu, and per-application rules: parsed
     // together because they share wm.cfg's arena (see reloadConfig's
     // loadFromConfig doc comment, which this also uses on SIGHUP).
-    const autostart_path = loadStartup(wm) catch return error.ConfigLoadFailed;
+    const startup = loadStartup(wm) catch return error.ConfigLoadFailed;
+    const autostart_path = startup.autostart;
 
     const display = wl.Display.connect(null) catch {
         std.log.err("cannot connect to the wayland display. wmaker-wl is not started " ++
@@ -144,6 +147,11 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("autostart: running {s}", .{p});
         proc.spawn(wm, &.{ "/bin/sh", p });
     }
+    // DockApps marked `autolaunch = yes` (see dockapp.zig): started once
+    // here, exactly like the autostart script above. A SIGHUP reload must
+    // NOT repeat this -- reloadConfig() never touches `startup.dockapps`,
+    // only this one call to loadStartup() does.
+    dockapp.runAutoLaunch(startup.dockapps, dockappSpawn);
 
     installSighupHandler();
     while (!wm.quit) {
@@ -167,6 +175,16 @@ pub fn main(init: std.process.Init) !void {
         if (wm.obj_version >= 4) wm.obj.exitSession() else wm.obj.stop();
         _ = display.flush();
     }
+}
+
+/// Adapter for dockapp.runAutoLaunch, which takes a plain function pointer
+/// (it doesn't know about WindowManager) but still needs to reach
+/// proc.spawn. Valid from the point action.global is set in main() until
+/// the process exits; runAutoLaunch is only ever called from within that
+/// window (once, at startup).
+fn dockappSpawn(argv: []const []const u8) void {
+    const wm = action.global orelse return;
+    proc.spawn(wm, argv);
 }
 
 fn ignoreSigchld() void {
@@ -280,19 +298,26 @@ fn loadFromConfig(wm: *WindowManager) bool {
 }
 
 /// Startup-only counterpart of `loadFromConfig`: same arena-sharing rule,
-/// plus the autostart file path, which only `main()` needs (a reload must
-/// not relaunch the terminal/panel/etc. a second time).
-fn loadStartup(wm: *WindowManager) !?[]const u8 {
-    return try loadFromConfigImpl(wm);
+/// plus the autostart file path and DockApp list, which only `main()`
+/// needs (a reload must not relaunch the terminal/panel/DockApps/etc. a
+/// second time).
+const Startup = struct {
+    autostart: ?[]const u8,
+    dockapps: dockapp.List,
+};
+
+fn loadStartup(wm: *WindowManager) !Startup {
+    const files = try loadFromConfigImpl(wm);
+    return .{ .autostart = files.autostart, .dockapps = files.dockapps };
 }
 
-fn loadFromConfigImpl(wm: *WindowManager) !?[]const u8 {
+fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     const arena = wm.cfg.arena.allocator();
     wm.commands = try action.parseAll(arena, &wm.cfg);
     const files = try wm_files.load(wm.io, arena, &wm.cfg);
     wm.root_menu = files.root_menu;
     wm.attrs = files.attributes;
-    return files.autostart;
+    return files;
 }
 
 fn rebind(wm: *WindowManager) void {

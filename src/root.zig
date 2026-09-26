@@ -1,6 +1,7 @@
 pub const workspace = @import("workspace.zig");
 pub const action = @import("action.zig");
 pub const compatibility = @import("compatibility.zig");
+pub const dockapp = @import("dockapp.zig");
 pub const config = @import("config.zig");
 pub const gfx = @import("gfx.zig");
 pub const main = @import("main.zig");

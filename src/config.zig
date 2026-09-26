@@ -107,6 +107,14 @@ pub const Config = struct {
     /// allows it. Neither needs to exist; a missing script is a no-op.
     enable_autostart: bool = true,
 
+    // ---- dock apps ----------------------------------------------------------
+    /// Run every `autolaunch = yes` DockApp once when the session comes up
+    /// (see dockapp.zig). Looked up first as
+    /// ~/.config/wmaker-wl/dockapps.conf, then (if enable_wmaker_compat
+    /// allows it) parsed out of Window Maker's own
+    /// ~/GNUstep/Defaults/WMState. Neither needs to exist.
+    enable_dockapps: bool = true,
+
     pub fn deinit(cfg: *Config) void {
         cfg.arena.deinit();
     }
@@ -291,6 +299,8 @@ fn applyOption(
         cfg.enable_wmaker_compat = try parseBool(value);
     } else if (eql(u8, key, "enable_autostart")) {
         cfg.enable_autostart = try parseBool(value);
+    } else if (eql(u8, key, "enable_dockapps")) {
+        cfg.enable_dockapps = try parseBool(value);
     } else if (eql(u8, key, "mouse_mod")) {
         cfg.mouse_mod = parseMods(value) orelse return error.Invalid;
     } else if (eql(u8, key, "terminal")) {

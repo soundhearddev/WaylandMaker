@@ -69,9 +69,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, cfg: *const config.Config)
 
     std.log.info("Initializing WindowMaker compatibility layer", .{});
 
-    if (cfg.wmaker_docksapp_dir) |dir| {
-        ctx.docksapp_dir = try allocator.dupe(u8, dir);
-    }
+    // NOTE: config.Config has no `wmaker_docksapp_dir` field (yet); this
+    // context field is populated by callers that have their own notion of
+    // a DockApp directory. See dockapp.zig for the actual DockApp entry
+    // format/parser now used for Dock/Clip integration.
+    _ = &ctx.docksapp_dir;
 
     ctx.rules = loadAttributes(io, allocator) catch |err| blk: {
         std.log.info("no WMaker attributes file loaded ({}), using defaults", .{err});
@@ -135,12 +137,21 @@ pub fn createDockApp(ctx: *WMakerContext, app_info: DockAppInfo) !void {
 
     std.log.info("Creating DockApp: {s} at ({}, {})", .{ app_info.name, app_info.x, app_info.y });
 
-    // TODO: Create an unmanaged layer-shell surface for the dock app.
-    // `main.zig` already binds river_layer_shell_v1 (wm.layer_shell) for
-    // exactly this, it just isn't used yet -- the actual surface/request
-    // shapes for river_layer_shell_v1 aren't in scope of the files
-    // reviewed for this change, so wiring this up safely needs that
-    // protocol definition (protocol/river-layer-shell-*.xml) at hand.
+    // TODO: Draw the actual dock tile for this app (Phase 5, docs/TODO.md).
+    //
+    // `river_layer_shell_v1` (protocol/river-layer-shell-v1.xml) is NOT a
+    // way for wmaker-wl to create its own layer-shell surface -- it only
+    // lets the *window manager* learn how much space layer-shell clients
+    // (bars, docks) have reserved (`non_exclusive_area`, see output.zig)
+    // and set focus rules for them. A real dock tile is therefore either:
+    //   (a) drawn by wmaker-wl itself using the existing wl_shm/cairo path
+    //       (shm.zig, gfx.zig, ui.zig -- the same infrastructure the root
+    //       menu already uses), or
+    //   (b) a separate layer-shell client process wmaker-wl spawns.
+    // Either way, the *data* for what to draw/spawn -- name, command,
+    // icon, grid position, autolaunch -- comes from dockapp.zig, which
+    // already parses both Window Maker's WMState Dock/Clip format and
+    // wmaker-wl's own dockapps.conf into DockApp values.
 }
 
 // ----------------------------------------------------------------------------

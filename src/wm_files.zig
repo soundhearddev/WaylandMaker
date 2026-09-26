@@ -28,6 +28,7 @@ const std = @import("std");
 const plist = @import("plist.zig");
 const wm_menu = @import("wm_menu.zig");
 const wm_attr = @import("wm_attr.zig");
+const dockapp = @import("dockapp.zig");
 const config = @import("config.zig");
 
 const max_file = 1 << 20;
@@ -57,7 +58,7 @@ pub fn ownDir(a: std.mem.Allocator) !?[]const u8 {
 }
 
 /// Candidate files, best first, for one kind of configuration.
-pub const Kind = enum { root_menu, window_attributes, autostart };
+pub const Kind = enum { root_menu, window_attributes, autostart, dockapps };
 
 pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]const u8) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
@@ -78,6 +79,10 @@ pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]c
             if (own) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/autostart", .{d}));
             if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Library/WindowMaker/autostart", .{d}));
         },
+        .dockapps => {
+            if (own) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/dockapps.conf", .{d}));
+            if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Defaults/WMState", .{d}));
+        },
     }
     return list.toOwnedSlice(a);
 }
@@ -97,6 +102,9 @@ pub const Loaded = struct {
     /// and if `enable_autostart` allows it. Not parsed here; `main.zig`
     /// spawns it through the shell, exactly like Window Maker does.
     autostart: ?[]const u8,
+    /// DockApps to auto-launch once at session start (see dockapp.zig),
+    /// empty if `enable_dockapps` disallows it or nothing was found.
+    dockapps: dockapp.List,
 };
 
 /// Load the root menu, the window attributes and the autostart path.
@@ -110,6 +118,7 @@ pub fn load(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config) !Loaded
         .root_menu = try loadMenu(io, a, cfg, own, root),
         .attributes = try loadAttributes(io, a, own, root),
         .autostart = if (cfg.enable_autostart) try findAutostart(io, a, own, root) else null,
+        .dockapps = if (cfg.enable_dockapps) try loadDockApps(io, a, own, root) else .{},
     };
 }
 
@@ -169,6 +178,38 @@ fn findAutostart(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]co
     return found.path;
 }
 
+/// DockApps to auto-launch (see dockapp.zig). The own-directory file
+/// (dockapps.conf) is wmaker-wl's plain block format; Window Maker's
+/// WMState is a GNUstep property list, so the two need different parsers
+/// even though `candidates(.dockapps, ...)` treats them as one ordered
+/// list of "the first one that exists wins". A broken file is reported
+/// and the next candidate is tried, same policy as loadMenu.
+fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !dockapp.List {
+    const paths = try candidates(a, .dockapps, own, root);
+    for (paths) |p| {
+        const text = std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch continue;
+        const is_wmstate = std.mem.endsWith(u8, p, "/WMState");
+
+        var diag: plist.Diag = .{};
+        const list = if (is_wmstate)
+            dockapp.parseWMStateDiag(a, text, &diag)
+        else
+            dockapp.parseOwn(a, text);
+
+        if (list) |l| {
+            std.log.info("dockapps: {d} entries from {s}", .{ l.apps.len, p });
+            return l;
+        } else |err| {
+            switch (err) {
+                error.Syntax => std.log.warn("dockapps {s}, {f}; trying the next file", .{ p, diag }),
+                else => std.log.warn("dockapps {s} is unusable ({t}); trying the next file", .{ p, err }),
+            }
+        }
+    }
+    std.log.info("dockapps: no file found, nothing to auto-launch", .{});
+    return .{};
+}
+
 /// argv -> one command line, for the menu's `exec` entries.
 fn join(a: std.mem.Allocator, argv: []const []const u8) []const u8 {
     return std.mem.join(a, " ", argv) catch "";
@@ -198,6 +239,11 @@ test "candidate order: wmaker-wl first, then Window Maker's files" {
     try std.testing.expectEqual(@as(usize, 2), auto.len);
     try std.testing.expectEqualStrings("/h/.config/wmaker-wl/autostart", auto[0]);
     try std.testing.expectEqualStrings("/h/GNUstep/Library/WindowMaker/autostart", auto[1]);
+
+    const dock = try candidates(a, .dockapps, "/h/.config/wmaker-wl", "/h/GNUstep");
+    try std.testing.expectEqual(@as(usize, 2), dock.len);
+    try std.testing.expectEqualStrings("/h/.config/wmaker-wl/dockapps.conf", dock[0]);
+    try std.testing.expectEqualStrings("/h/GNUstep/Defaults/WMState", dock[1]);
 }
 
 test "autostart candidates respect wmaker compat toggle (root omitted)" {
