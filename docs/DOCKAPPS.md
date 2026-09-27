@@ -1,174 +1,152 @@
-# DockApps: eigene Einträge anlegen
+# DockApps
 
-Dieses Dokument beschreibt das DockApp-Format von wmaker-wl (`src/dockapp.zig`): was eine
-DockApp ist, wie man eine eigene definiert, und worauf man dabei achten muss. Es richtet sich
-an Nutzer, die `~/.config/wmaker-wl/dockapps.conf` von Hand schreiben, nicht an eine grafische
-Oberfläche -- die gibt es noch nicht (siehe „Was noch fehlt" unten).
+Dieses Dokument beschreibt, wie ein Programm sich wmaker-wl gegenüber als DockApp zu erkennen
+gibt, und die optionale Zusatzschicht für Autostart-Listen. Es gibt zwei unabhängige Dinge, die
+oft verwechselt werden:
 
-## Was eine DockApp ist
+1. **„Ist dieses Fenster eine DockApp?"** -- beantwortet das Programm selbst, ganz ohne
+   Konfigurationsdatei (siehe unten). Das ist der normale, empfohlene Weg.
+2. **„Welche Programme sollen beim Sessionstart automatisch laufen?"** -- dafür reicht in den
+   allermeisten Fällen das ohnehin vorhandene `autostart`-Skript (siehe „Autostart" unten), exakt
+   wie bei X11 Window Maker. Eine eigene `dockapps.conf` ist nur nötig, wenn zusätzliche
+   Dock-Metadaten (Icon, Grid-Position) außerhalb des Programms selbst hinterlegt werden sollen.
 
-Window Maker kennt DockApps als kleine, eigenständige Programme mit genau einer 64×64-px-Kachel
-im Dock oder im Clip: ein Icon, ein Klick startet den zugehörigen Befehl. wmaker-wl übernimmt
-diese Idee als reines Datenformat -- ein `DockApp`-Eintrag ist:
+## Der empfohlene Weg: das Programm erkennt sich selbst
 
-| Feld | Bedeutung | Pflicht |
+wmaker-wl braucht **keine Liste, keine Konfigurationsdatei**, um ein Fenster als DockApp zu
+behandeln. Ein Programm muss dafür nur zwei Dinge selbst tun:
+
+1. Seine Wayland-`app_id` auf `dockapp:<name>` oder `dockapp-<name>` setzen (z. B.
+   `dockapp:clock`). Genau das ist die Wayland-Entsprechung dessen, was X11-Window-Maker-DockApps
+   schon immer über `WM_CLASS`/`WM_HINTS` gemacht haben -- das Programm deklariert sich selbst,
+   der Fenstermanager muss es nicht in einer Datei nachschlagen.
+2. Optional eine feste Fenstergröße anfragen (gleiche Minimal- und Maximalgröße, klassisch
+   64×64 px) -- wmaker-wl behandelt jedes Fenster mit fester Größe ohnehin automatisch als
+   freischwebende Kachel statt es in die Tiling-Spalten einzureihen (siehe `window.zig`,
+   `wantsFloating`).
+
+Sobald wmaker-wl eine `app_id` mit einem der beiden Präfixe sieht (`src/dockapp.zig`,
+`isSelfDeclared`), bekommt das Fenster automatisch:
+
+| Attribut | Wert | Bedeutung |
 |---|---|---|
-| Name | Anzeigename | ja |
-| Command | Befehlszeile, die beim Start ausgeführt wird | ja |
-| Icon | Pfad/Name eines Icons | nein |
-| Position | Grid-Position (Kachel-Koordinaten, nicht Pixel) | nein, Default `0,0` |
-| AutoLaunch | beim Sessionstart einmal automatisch starten | nein, Default `No` |
-| Lowered | Kachel liegt unter statt über normalen Fenstern | nein, Default `No` |
+| `NoTitlebar` | an | keine Titelleiste -- eine Kachel, kein normales Fenster |
+| `NoBorder` | an | kein Rahmen |
+| `Floating` | an | schwimmt frei, reiht sich nie in die Tiling-Spalten ein |
+| `SkipWindowList` | an | taucht nicht in der Fensterliste auf |
 
-Wichtig: **`Command` ist die einzige Pflichtangabe.** Ein Eintrag ohne `Command` wird beim
-Parsen stillschweigend übersprungen -- kein Fehler, kein Absturz, er taucht einfach nicht in
-der geladenen Liste auf. Das ist Absicht (siehe „Fehlerverhalten" unten), aber leicht zu
-übersehen, wenn man sich fragt, warum eine DockApp nicht startet.
+Keine Datei anlegen, keinen Eintrag pflegen -- das Programm bringt seine Absicht selbst mit.
 
-## Zwei Wege, eine DockApp zu definieren
+### Eigene Attribute trotzdem übersteuern
 
-wmaker-wl liest **eine** der beiden folgenden Dateien -- die erste, die existiert und sich
-parsen lässt, gewinnt. Es werden nicht beide gemischt.
+Diese vier Defaults sind genau das: Defaults. Eine ganz normale `attributes.conf`-Regel für den
+jeweiligen `app_id` gewinnt pro Option, exakt wie bei jeder anderen Anwendung auch:
+
+```
+{ "dockapp:clock" = { NoBorder = No; StartWorkspace = 2; }; }
+```
+
+`NoBorder` bekommt hier explizit `No`, alles andere (`NoTitlebar`, `Floating`,
+`SkipWindowList`) bleibt bei den DockApp-Defaults, weil die Datei dazu nichts sagt.
+
+### Wie man eine `app_id` setzt
+
+Wie genau, hängt vom Toolkit ab:
+
+- **Roher Wayland-Client** (wie `wmaker-dockapp-clock`, siehe unten): `xdg_toplevel`s
+  `set_app_id`-Request mit dem gewünschten String.
+- **GTK**: `Gio.Application`'s `application-id`, oder `gtk_window_set_wmclass`/
+  `g_set_prgname`, je nach GTK-Version.
+- **Qt**: `QGuiApplication::setDesktopFileName("dockapp:clock")`.
+- **Ein Terminal-Programm** (kein eigenes Wayland-Fenster): der Terminal-Emulator setzt seine
+  `app_id`, nicht das Programm darin. Mit `--class`/`--app-id` (je nach Emulator) lässt sich das
+  von außen erzwingen, z. B. `alacritty --class dockapp:clock -e mein-programm`.
+
+## Autostart: wie in X11 Window Maker
+
+Für „dieses Programm soll beim Sessionstart laufen" gibt es bereits den identischen Mechanismus
+wie bei X11 Window Maker: ein einziges Shell-Skript, `~/.config/wmaker-wl/autostart`
+(`enable_autostart = true`, Default an), läuft einmal beim Start, komplett unabhängig von
+DockApps. Für die allermeisten Fälle reicht das:
+
+```sh
+#!/bin/sh
+wmaker-dockapp-clock &
+nm-applet &
+```
+
+Kein neues Format, keine zusätzliche Datei -- exakt der Weg, den es unter X11 auch schon gab.
+
+## Optionale Zusatzschicht: `dockapps.conf` für Metadaten
+
+Nur relevant, wenn zusätzlich zum reinen Start auch **Metadaten** hinterlegt werden sollen, die
+das Programm selbst nicht über seine `app_id` transportieren kann -- ein Icon-Pfad, eine feste
+Grid-Position für eine künftige Dock-UI (siehe „Was noch fehlt" unten), oder eine bestehende
+Window-Maker-`WMState`-Datei mit vorhandenen Dock-Einträgen übernehmen. Für alles andere ist
+diese Datei **nicht nötig** -- Selbst-Erkennung plus Autostart deckt den Normalfall vollständig
+ab.
+
+`src/dockapp.zig` liest dafür zwei Formate, die erste existierende Datei gewinnt:
 
 ### 1. Eigenes Format: `~/.config/wmaker-wl/dockapps.conf`
 
-Der empfohlene Weg, wenn kein bestehendes Window-Maker-Setup übernommen werden soll. Syntax wie
-`attributes.conf`: ein `[name]`-Block pro DockApp, darin `key = value`-Zeilen.
-
 ```ini
-# ~/.config/wmaker-wl/dockapps.conf
-
 [htop]
-command = alacritty -e htop
+command = alacritty --class dockapp:htop -e htop
 icon = /usr/share/icons/hicolor/48x48/apps/utilities-system-monitor.png
 position = 0,1
 autolaunch = yes
-
-[nm-applet]
-command = nm-applet
-autolaunch = yes
-
-[galculator]
-command = "galculator"
-autolaunch = no
-lowered = true
 ```
 
-Regeln für dieses Format:
+| Feld | Bedeutung | Pflicht |
+|---|---|---|
+| `command` | Befehlszeile, die beim Start ausgeführt wird | ja |
+| `icon` | Pfad/Name eines Icons | nein |
+| `position` | Grid-Position `x,y` (Kachel-Koordinaten, nicht Pixel) | nein, Default `0,0` |
+| `autolaunch` | beim Sessionstart einmal automatisch starten | nein, Default `no` |
+| `lowered` | Kachel liegt unter statt über normalen Fenstern | nein, Default `no` |
 
-- Ein `[name]`-Header **beendet** den vorherigen Block und startet einen neuen. Alles davor, was
-  nicht in einem Block steht, wird ignoriert.
-- `#` leitet einen Kommentar ein, wenn es am Zeilenanfang steht oder auf Leerraum folgt -- exakt
-  wie in `config.conf`/`attributes.conf`.
-- `command = ...` wird wie eine normale Befehlszeile in Argumente zerlegt (`" "`-getrennt, mit
-  Unterstützung für `"doppelte Anführungszeichen"` bei Argumenten mit Leerzeichen). Es gibt
-  **keine Shell** dazwischen -- `command = foo | bar` startet ein Programm namens `foo` mit den
-  Argumenten `|` und `bar`, keine Pipe. Braucht ein Befehl tatsächlich eine Shell (Pipes,
-  Umleitungen, Variablen), muss man das explizit machen: `command = /bin/sh -c "foo | bar"`.
-- Unbekannte Schlüssel innerhalb eines Blocks werden ignoriert, nicht als Fehler gemeldet -- das
-  Format darf wachsen, ohne ältere Dateien zu brechen. Ein Tippfehler in einem Schlüssel (z. B.
-  `autolauch` statt `autolaunch`) führt also **nicht** zu einer Warnung, sondern einfach dazu,
-  dass die Option ihren Default behält. Bei Problemen: Schlüsselnamen genau mit der Tabelle oben
-  vergleichen.
-- `position = x,y` sind vorzeichenbehaftete Ganzzahlen (auch negativ, z. B. `position = -1,0`),
-  keine Pixel -- siehe „Was Position bedeutet" unten.
-- `autolaunch` und `lowered` akzeptieren `yes`/`no`, `true`/`false`, `on`/`off`, `1`/`0`.
+Wichtig: **`command` ist die einzige Pflichtangabe.** Ein Eintrag ohne `command` wird beim Parsen
+stillschweigend übersprungen -- kein Fehler, kein Absturz. Unbekannte Schlüssel werden ebenfalls
+stillschweigend ignoriert, nicht gemeldet (das Format darf wachsen, ohne ältere Dateien zu
+brechen) -- ein Tippfehler in einem Schlüsselnamen fällt also nicht auf. `command` wird ohne
+Shell in Argumente zerlegt (`" "`-getrennt, `"Anführungszeichen"` für Argumente mit
+Leerzeichen); für Pipes/Umleitungen explizit `/bin/sh -c "..."` verwenden. `#` leitet einen
+Kommentar ein wie in `config.conf`.
 
 ### 2. Window Makers eigenes Format: `~/GNUstep/Defaults/WMState`
 
-Nur relevant, wenn `enable_wmaker_compat = true` gesetzt ist (Default: aus) **und** keine eigene
-`dockapps.conf` existiert. Liest den `Dock`- (oder ersatzweise `Clip`-)Abschnitt einer
-bestehenden Window-Maker-`WMState`-Datei, ohne dass man dafür irgendetwas umschreiben muss:
+Nur wenn `enable_wmaker_compat = true` gesetzt ist **und** keine eigene `dockapps.conf`
+existiert. Liest den `Dock`- (ersatzweise `Clip`-)Abschnitt einer bestehenden
+Window-Maker-`WMState`-Datei unverändert:
 
 ```
-{
-  Dock = {
-    Applications = (
-      { Command = xterm; Name = "xterm.XTerm"; AutoLaunch = No; Position = "0,1"; },
-      { Command = "nm-applet"; Name = nm-applet; AutoLaunch = Yes; Position = "0,2"; }
-    );
-    Position = "-64,0";
-    Lowered = No;
-  };
-}
+{ Dock = { Applications = ( { Command = xterm; Name = "xterm.XTerm"; AutoLaunch = No; }, ... ); }; }
 ```
 
-Das ist eine GNUstep-Property-List (dieselbe Syntax wie `WMRootMenu`/`WMWindowAttributes`,
-siehe `plist.zig`). Dieser Weg ist gedacht, um ein bestehendes Window-Maker-Dock-Setup
-weiterzuverwenden, nicht um neue Einträge von Hand zu schreiben -- dafür ist Format 1 einfacher.
+Gedacht, um ein bestehendes Window-Maker-Dock-Setup weiterzuverwenden, nicht um neue Einträge von
+Hand zu schreiben.
 
-## Wie eine DockApp geladen wird
+### Autostart-Verhalten dieser Liste
 
-Die Kandidaten-Reihenfolge (implementiert in `wm_files.zig`, `candidates(.dockapps, ...)`):
+`enable_dockapps = true` (Default) lädt diese Liste beim Sessionstart; jede Zeile mit
+`autolaunch = yes` (bzw. `AutoLaunch = Yes`) wird einmal gestartet, in Dateireihenfolge, genau
+wie das `autostart`-Skript -- und läuft bei einem SIGHUP-Reload bewusst nicht erneut. Eine
+kaputte Datei wird übersprungen (mit Warnung), die Session startet trotzdem.
 
-1. `~/.config/wmaker-wl/dockapps.conf` (bzw. `$XDG_CONFIG_HOME/wmaker-wl/dockapps.conf`)
-2. `~/GNUstep/Defaults/WMState` (bzw. `$WMAKER_USER_ROOT/Defaults/WMState`), nur wenn
-   `enable_wmaker_compat = true`
+## Referenz-Implementierung: `wmaker-dockapp-clock`
 
-Die **erste Datei, die existiert UND sich fehlerfrei parsen lässt**, gewinnt. Eine
-existierende, aber kaputte Datei wird mit einer Warnung übersprungen, der nächste Kandidat wird
-versucht -- die Session startet immer, auch mit einer fehlerhaften `dockapps.conf`.
+Ein komplett eigenständiges Beispielprojekt (kein Teil von wmaker-wl, keine Abhängigkeit
+darauf) zeigt beide Wege: Selbst-Erkennung per `app_id`-Präfix und Einbindung über Autostart
+oder `dockapps.conf`. Siehe dessen eigene README für Details.
 
-`enable_dockapps = true` (Default) steuert, ob überhaupt geladen wird -- siehe
-`src/share/default_config.conf`. `enable_dockapps = false` deaktiviert das komplett, unabhängig
-davon, welche Dateien existieren.
+## Was noch fehlt
 
-## Autostart-Verhalten
-
-Jede DockApp mit `autolaunch = yes` wird **einmal** beim Sessionstart gestartet, genau wie das
-bestehende `autostart`-Skript (`dockapp.runAutoLaunch()`, aufgerufen aus `main()`). Wichtig:
-
-- Die Reihenfolge im Dokument wird eingehalten -- Einträge werden in der Reihenfolge gestartet,
-  in der sie in der Datei stehen.
-- Ein **SIGHUP-Reload** (`kill -HUP <pid>`, siehe `docs/TODO.md`) startet DockApps **nicht**
-  erneut -- genau wie das Autostart-Skript auch nicht erneut läuft. Nur Tastenkürzel, Root-Menü
-  und Fenster-Attribute werden neu geladen.
-- Ein Prozess wird detached gestartet (kein Elternprozess-Zombie, `SIGCHLD` wird ignoriert) --
-  siehe `process.zig`.
-- Scheitert `spawn` (z. B. Befehl nicht gefunden), wird das geloggt, die übrigen DockApps in der
-  Liste starten trotzdem weiter.
-
-## Was Position bedeutet
-
-`x`/`y` sind Window Makers **Grid-Koordinaten** (Kachel-Einheiten relativ zur Dock-Ecke), keine
-Pixel. Eine künftige Dock-UI entscheidet die tatsächliche Kachelgröße (Window Makers Standard
-ist 64 px). Bis es eine solche UI gibt (siehe unten), hat `position` **keine sichtbare
-Wirkung** -- der Wert wird nur mitgeladen und steht bereit.
-
-## Fehlerverhalten -- worauf achten
-
-- **Kein `Command`/`command` → Eintrag wird stillschweigend übersprungen.** Kein Log, kein
-  Fehler. Wenn eine erwartete DockApp fehlt, zuerst prüfen, ob `command` tatsächlich gesetzt ist.
-- **Unbekannte Schlüssel werden ignoriert, nicht gemeldet.** Ein Tippfehler in einem Schlüssel
-  fällt nicht auf, weil er weder einen Fehler noch eine Warnung erzeugt -- die Option bleibt
-  einfach beim Default.
-- **Eine kaputte Datei blockiert nicht die Session**, aber auch nicht automatisch den nächsten
-  Kandidaten, wenn die kaputte Datei die einzige mit höherer Priorität ist, die existiert: Ist
-  z. B. `dockapps.conf` vorhanden, aber mit einem Syntaxfehler (nur bei der WMState-Variante
-  überhaupt als „Syntax" erkennbar, das eigene Format hat keinen harten Fehlzustand), wird das
-  geloggt und `~/GNUstep/Defaults/WMState` als nächster Kandidat versucht.
-- **`command` ohne Shell:** siehe oben -- Pipes, Umleitungen, Globbing (`*`) funktionieren nicht
-  ohne ein explizites `/bin/sh -c "..."`.
-- **`enable_wmaker_compat = false` (Default) blendet `WMState` komplett aus.** Wer eine
-  bestehende Window-Maker-Dock-Konfiguration übernehmen will, muss `enable_wmaker_compat = true`
-  in `config.conf` setzen.
-
-## Was noch fehlt (bewusst nicht Teil dieses Frameworks)
-
-Dieses Format lädt und startet DockApps -- es **zeichnet noch keine Dock-Kacheln**. Das ist
-Phase 5 in `docs/TODO.md` und braucht mehr als dieses Dokument abdeckt:
-
-- Eine tatsächliche 64-px-Kachel-UI (`wl_shm`/cairo, wie beim Root-Menü in `ui.zig`/`gfx.zig`).
-- Eine wichtige Einschränkung dabei: `river_layer_shell_v1`
-  (`protocol/river-layer-shell-v1.xml`) erlaubt wmaker-wl **nicht**, selbst eine
-  Layer-Shell-Surface zu erzeugen -- das Protokoll lässt den Fenstermanager nur erfahren, wie
-  viel Platz *externe* Layer-Shell-Clients (Bars, Docks) reserviert haben
-  (`non_exclusive_area`, siehe `output.zig`). Eine echte Dock-Kachel-Leiste ist deshalb entweder
-  (a) eigenes Zeichnen über die vorhandene `wl_shm`/cairo-Infrastruktur, genau wie das
-  Root-Menü, oder (b) ein separater Client-Prozess, den wmaker-wl startet.
-- „Läuft"-Anzeige über `app_id`-Vergleich, Rechtsklick-Menü, Icon-Laden (insbesondere klassische
-  XPM-Icons brauchen einen eigenen Lader, siehe `docs/INTEGRATION.md`).
-
-Bis dahin ist der Nutzen dieses Formats: ein einheitlicher, geprüfter Weg, DockApp-Definitionen
-zu laden und `autolaunch`-Einträge beim Sessionstart zu starten -- unabhängig davon, ob sie aus
-einer neuen `dockapps.conf` oder einer bestehenden Window-Maker-`WMState` kommen.
+Weder Selbst-Erkennung noch `dockapps.conf` zeichnen eine grafische Dock-Kachel-Leiste -- das
+ist Phase 5 in `docs/TODO.md`. `river_layer_shell_v1` (`protocol/river-layer-shell-v1.xml`)
+erlaubt wmaker-wl außerdem nicht, selbst eine Layer-Shell-Surface zu erzeugen (es lässt den
+Fenstermanager nur wissen, wie viel Platz *externe* Layer-Shell-Clients belegen, siehe
+`output.zig`s `non_exclusive_area`). Bis dahin ist eine DockApp ein normales, freischwebendes
+Fenster mit den oben beschriebenen Attributen -- funktional bereits nützlich (kein Rahmen, kein
+Titel, taucht nicht in der Fensterliste auf), aber noch keine feste Kachel-Position im
+Bildschirmrand.

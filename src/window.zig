@@ -24,6 +24,7 @@ const config = @import("config.zig");
 const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const seatmod = @import("seat.zig");
+const dockapp = @import("dockapp.zig");
 
 const Window = types.Window;
 const WindowManager = types.WindowManager;
@@ -89,8 +90,16 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
         .app_id => |a| {
             setString(wm, &win.app_id, a.app_id);
             // Decoration attributes follow the real app_id; where the window
-            // lives was decided when it was placed.
+            // lives was decided when it was placed. A self-declared DockApp
+            // (app_id "dockapp:..."/"dockapp-...", see dockapp.zig) gets
+            // sensible tile defaults with NO config file needed; an explicit
+            // attributes.conf rule for this app_id still wins per option
+            // (Table.lookup already applies most-specific-first, and
+            // withDefaults only fills what the file left unset).
             win.attrs = wm.attrs.lookup(win.app_id);
+            if (dockapp.isSelfDeclared(win.app_id)) {
+                win.attrs = win.attrs.withDefaults(dockapp.defaultAttrs());
+            }
             wm.obj.manageDirty();
         },
         .title => |t| setString(wm, &win.title, t.title),
@@ -159,7 +168,11 @@ pub fn placeNew(wm: *WindowManager) void {
         if (!win.new or win.closed) continue;
         const out = targetOutput(wm) orelse continue;
 
-        const attrs = wm.attrs.lookup(win.app_id);
+        const attrs_looked_up = wm.attrs.lookup(win.app_id);
+        const attrs = if (dockapp.isSelfDeclared(win.app_id))
+            attrs_looked_up.withDefaults(dockapp.defaultAttrs())
+        else
+            attrs_looked_up;
         win.attrs = attrs;
 
         var ws = out.ws();

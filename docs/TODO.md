@@ -30,17 +30,24 @@
 - [ ] **Phase 6**: Themes, `~/GNUstep/Defaults/WindowMaker`-Schlüssel
 - [ ] **Phase 7**: Minimieren/Shade/Verstecken, Session speichern, Workspace-Namen
 - [ ] Menüpunkte ohne Funktion: `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`
-- [x] **DockApp-Format/Framework** (`dockapp.zig`): gemeinsamer `DockApp`-Typ (Name, Command als
-      argv, Icon, Grid-Position, `AutoLaunch`, `Lowered`) für alle künftigen Dock-Integrationen.
-      Zwei Parser auf dieselbe Liste: Window Makers `WMState`-Format (`Dock.Applications` bzw.
-      `Clip.Applications`, GNUstep-Plist, siehe `plist.zig`-Test) für bestehende Window-Maker-Setups,
-      und ein eigenes `[name]`-Block-Format (`~/.config/wmaker-wl/dockapps.conf`) im Stil von
-      `attributes.conf`. In `wm_files.zig`/`main.zig` eingehängt (analog zu `loadMenu`/`findAutostart`):
-      `enable_dockapps` (Default an) lädt die Liste beim Sessionstart, `runAutoLaunch()` spawnt die
-      `autolaunch = yes`-Einträge einmalig, genau wie der bestehende Autostart-Mechanismus, und läuft
-      bei einem SIGHUP-Reload bewusst nicht erneut. Siehe `docs/DOCKAPPS.md` für das Format und wie man
-      eine eigene DockApp anlegt. Zeichnet noch keine Kacheln (das ist weiterhin Phase 5, siehe unten) --
-      liefert aber die Datenbasis (inkl. Grid-Position/Icon/Lowered), die Phase 5 direkt übernehmen kann.
+- [x] **DockApp-Erkennung & -Format** (`dockapp.zig`): zwei unabhängige Wege.
+      **Primär, ohne jede Konfigurationsdatei:** ein Fenster mit `app_id` `dockapp:<name>` oder
+      `dockapp-<name>` wird automatisch erkannt (`isSelfDeclared`, eingehängt in `window.zig`s
+      `app_id`-Event und `placeNew`) und bekommt `NoTitlebar`/`NoBorder`/`Floating`/
+      `SkipWindowList` als Default-Attribute (`defaultAttrs`) -- eine `attributes.conf`-Regel für
+      denselben `app_id` gewinnt weiterhin pro Option. Das ist die Wayland-Entsprechung von X11
+      Window Makers `WM_CLASS`/`WM_HINTS`-Selbstdeklaration. **Optional, für Metadaten** (Icon,
+      Grid-Position) und Autostart-Listen: gemeinsamer `DockApp`-Typ (Name, Command als argv,
+      Icon, Grid-Position, `AutoLaunch`, `Lowered`), zwei Parser auf dieselbe Liste -- Window
+      Makers `WMState`-Format (`Dock.Applications`/`Clip.Applications`, GNUstep-Plist) für
+      bestehende Setups, und ein eigenes `[name]`-Block-Format (`~/.config/wmaker-wl/dockapps.conf`)
+      im Stil von `attributes.conf`. In `wm_files.zig`/`main.zig` eingehängt (analog zu
+      `loadMenu`/`findAutostart`): `enable_dockapps` (Default an) lädt die Liste beim
+      Sessionstart, `runAutoLaunch()` spawnt `autolaunch = yes`-Einträge einmalig, genau wie der
+      bestehende Autostart-Mechanismus (der für den Normalfall "beim Start starten" ohnehin
+      bereits ausreicht, siehe `docs/DOCKAPPS.md`), und läuft bei einem SIGHUP-Reload bewusst
+      nicht erneut. Zeichnet noch keine Kacheln (das ist weiterhin Phase 5, siehe unten) --
+      liefert aber die Datenbasis, die Phase 5 direkt übernehmen kann.
 
 ### Root-Menü: bekannte Lücken
 - [ ] Menü läuft ausschließlich über den ersten gebundenen `wl_seat`; bei mehreren Seats bekommen weitere

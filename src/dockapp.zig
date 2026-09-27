@@ -40,6 +40,61 @@
 const std = @import("std");
 const plist = @import("plist.zig");
 const config = @import("config.zig");
+const wm_attr = @import("wm_attr.zig");
+
+// ----------------------------------------------------------------------------
+// Self-declaring DockApps: no config file at all
+// ----------------------------------------------------------------------------
+//
+// A DockApp does not have to be listed anywhere. If its own app_id starts
+// with one of the prefixes below, wmaker-wl treats it as a DockApp
+// automatically -- the same idea as X11 Window Maker recognising a
+// DockApp through its WM_CLASS/WM_HINTS, just expressed the Wayland way,
+// through app_id. This is the ONLY thing a DockApp author has to do:
+//
+//   * set the app_id to "dockapp:<name>" or "dockapp-<name>"
+//     (e.g. via GTK's Gio.Application id, or Wayland's xdg_toplevel
+//     set_app_id request directly), and
+//   * ask for a fixed size (equal min/max size hints) -- wmaker-wl already
+//     floats any window that does that (see window.zig's wantsFloating),
+//     which is exactly the "one fixed-size tile" shape a DockApp needs.
+//
+// No dockapps.conf, no attributes.conf, nothing to register. A user who
+// wants to override the look for one specific DockApp can still add a
+// normal attributes.conf rule keyed on its app_id -- explicit file rules
+// win over these defaults, see window.zig's app_id handling.
+//
+// Naming the app_id is the standalone author's job (see
+// wmaker-dockapp-clock's README for a worked example); parsing it is
+// wmaker-wl's.
+
+const self_declaring_prefixes = [_][]const u8{ "dockapp:", "dockapp-" };
+
+/// True if this app_id follows wmaker-wl's self-declaring DockApp
+/// convention (see the section header above). Case-sensitive on purpose:
+/// app_ids are conventionally lowercase, and an accidental "DockApp:" from
+/// a differently-cased toolkit should not silently match.
+pub fn isSelfDeclared(app_id: ?[]const u8) bool {
+    const id = app_id orelse return false;
+    for (self_declaring_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, id, prefix)) return true;
+    }
+    return false;
+}
+
+/// Sensible defaults for a self-declared DockApp: no title bar or border
+/// (it's a small tile, not a normal window) and floating (a fixed-size
+/// tile should never join the tiling layout). Returned as `Attributes`
+/// with everything else left `null`, so `withDefaults` lets an explicit
+/// attributes.conf rule for this app_id override any part of this.
+pub fn defaultAttrs() wm_attr.Attributes {
+    return .{
+        .no_titlebar = true,
+        .no_border = true,
+        .floating = true,
+        .skip_window_list = true,
+    };
+}
 
 /// One dock slot. `x`/`y` are Window Maker's grid coordinates (in tiles,
 /// relative to the dock's corner), not pixels -- a future dock UI decides
@@ -428,4 +483,44 @@ test "runAutoLaunch spawns only autolaunch entries, in order" {
     try std.testing.expectEqual(@as(usize, 2), Recorder.count);
     try std.testing.expectEqualStrings("cmd-a", Recorder.seen[0]);
     try std.testing.expectEqualStrings("cmd-c", Recorder.seen[1]);
+}
+
+test "isSelfDeclared recognises both prefixes, case-sensitively" {
+    try std.testing.expect(isSelfDeclared("dockapp:clock"));
+    try std.testing.expect(isSelfDeclared("dockapp-clock"));
+    try std.testing.expect(isSelfDeclared("dockapp:"));
+    try std.testing.expect(!isSelfDeclared("dockapp"));
+    try std.testing.expect(!isSelfDeclared("DockApp:clock"));
+    try std.testing.expect(!isSelfDeclared("firefox"));
+    try std.testing.expect(!isSelfDeclared(null));
+}
+
+test "defaultAttrs: no title bar, no border, floating, hidden from the window list" {
+    const a = defaultAttrs();
+    try std.testing.expect(a.is("no_titlebar"));
+    try std.testing.expect(a.is("no_border"));
+    try std.testing.expect(a.is("floating"));
+    try std.testing.expect(a.is("skip_window_list"));
+    // Everything else is left null, so an attributes.conf rule can still
+    // set e.g. StartWorkspace for this app_id without a conflict.
+    try std.testing.expect(a.start_workspace == null);
+}
+
+test "self-declared defaults lose to an explicit attributes.conf rule, per option" {
+    // Mirrors window.zig's app_id handling: wm.attrs.lookup() first, then
+    // withDefaults(dockapp.defaultAttrs()) fills in only what the file
+    // left unset.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const r = try wm_attr.parse(arena.allocator(),
+        \\{ "dockapp:clock" = { NoBorder = No; }; }
+    );
+    const looked_up = r.table.lookup("dockapp:clock");
+    const final = looked_up.withDefaults(defaultAttrs());
+
+    // The file said NoBorder = No: that wins over defaultAttrs()'s true.
+    try std.testing.expectEqual(false, final.no_border.?);
+    // NoTitlebar wasn't mentioned in the file, so the self-declared
+    // default (true) still applies.
+    try std.testing.expect(final.is("no_titlebar"));
 }
