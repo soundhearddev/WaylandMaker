@@ -71,6 +71,8 @@
 - [ ] Optional: Animationen beim Scrollen
 - [ ] Lauf gegen ein echtes river ist weiterhin unbestätigt für die UI-Schicht (`ui.zig`, `shm.zig`,
       `gfx.zig`); nur `zig build`/`zig build test` sind bisher verifiziert.
+- [ ] de layout integration!!
+- [ ] config keybind exec shell / apps custom
 
 ## Erledigt
 
