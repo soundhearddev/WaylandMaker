@@ -60,7 +60,13 @@
 
 ### Sonstiges
 - [ ] Mehrere Outputs: Fokus zwischen Monitoren, Fenster verschieben
-- [ ] Attribute mit später eintreffender `app_id`: Ort (Workspace, floating) wird nur beim ersten Platzieren entschieden
+- [x] Attribute mit später eintreffender `app_id`/Größen-Hint/Parent: `floating`/`Omnipresent` werden jetzt
+      bei jedem dieser Events neu geprüft (`window.zig`s `recheckFloating`), nicht mehr nur beim allerersten
+      Platzieren -- genau der Fall, der eine DockApp sonst dauerhaft gekachelt mit vollem Rahmen stehen
+      lässt, wenn ihr `app_id`/fixe Größe erst nach `manage_start` eintrifft. `StartWorkspace` bleibt bewusst
+      eine reine Erstplatzierungs-Entscheidung -- ein bereits gekacheltes Fenster nachträglich auf einen
+      anderen Workspace zu verschieben ist ein größerer, selteneren Eingriff, als eine späte
+      DockApp-Deklaration braucht.
 - [ ] Optional: Drag-Reordering von Spalten
 - [ ] Optional: Animationen beim Scrollen
 - [ ] Lauf gegen ein echtes river ist weiterhin unbestätigt für die UI-Schicht (`ui.zig`, `shm.zig`,

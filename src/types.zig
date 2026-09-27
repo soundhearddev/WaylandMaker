@@ -115,8 +115,12 @@ pub const Window = struct {
     sticky: bool = false,
 
     /// Window Maker attributes for this window's app_id (WMWindowAttributes).
-    /// Refreshed when the app_id arrives; placement decisions (workspace,
-    /// floating, omnipresent) are taken once, when the window is first placed.
+    /// Refreshed whenever app_id/dimensions_hint/parent arrive. StartWorkspace
+    /// is decided once, when the window is first placed. Floating/Omnipresent
+    /// are re-checked on every such refresh too (window.zig's
+    /// recheckFloating), so a DockApp whose app_id or fixed-size hint shows
+    /// up only after that first placement still ends up floating instead of
+    /// stuck tiled with a full border.
     attrs: wm_attr.Attributes = .{},
 
     // ---- geometry ---------------------------------------------------------

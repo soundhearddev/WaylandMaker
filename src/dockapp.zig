@@ -419,7 +419,7 @@ test "parse own dockapps.conf format" {
     try std.testing.expectEqual(@as(i32, 1), list.apps[0].y);
     try std.testing.expectEqual(true, list.apps[0].autolaunch);
 
-    try std.testing.expectEqualStrings("galculator", list.apps[1].name);
+    try std.testing.expectEqualStrings("calculator", list.apps[1].name);
     try std.testing.expectEqual(false, list.apps[1].autolaunch);
     try std.testing.expectEqual(true, list.apps[1].lowered);
 }

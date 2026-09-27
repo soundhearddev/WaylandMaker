@@ -84,6 +84,10 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
             win.min_h = h.min_height;
             win.max_w = h.max_width;
             win.max_h = h.max_height;
+            // A fixed-size hint (the DockApp shape) can arrive after the
+            // window was already tiled on first placement; see
+            // recheckFloating.
+            recheckFloating(wm, win);
             wm.obj.manageDirty();
         },
 
@@ -100,12 +104,20 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
             if (dockapp.isSelfDeclared(win.app_id)) {
                 win.attrs = win.attrs.withDefaults(dockapp.defaultAttrs());
             }
+            // The app_id is very often the FIRST thing that reveals a
+            // DockApp; if it shows up after first placement already
+            // tiled it, float it now instead of leaving it stuck with a
+            // full border for the rest of its life. See recheckFloating.
+            recheckFloating(wm, win);
             wm.obj.manageDirty();
         },
         .title => |t| setString(wm, &win.title, t.title),
 
         .parent => |p| {
             win.parent = p.parent;
+            // A dialog whose parent shows up late should float too, same
+            // reasoning as the app_id/dimensions_hint cases above.
+            recheckFloating(wm, win);
             wm.obj.manageDirty();
         },
 
@@ -145,6 +157,35 @@ fn wantsFloating(win: *const Window) bool {
     if (win.parent != null) return true;
     if (win.min_w > 0 and win.min_w == win.max_w and win.min_h > 0 and win.min_h == win.max_h) return true;
     return false;
+}
+
+/// placeNew() decides workspace/floating exactly once, the moment a window
+/// is first placed (see types.zig's `attrs` doc comment and docs/TODO.md,
+/// "Attribute mit später eintreffender app_id"). Several clients -- most
+/// DockApps included -- only reveal the state that makes them a DockApp
+/// (a fixed-size hint, or an app_id with the "dockapp:"/"dockapp-" prefix)
+/// in an event that arrives strictly after that first placement. Without
+/// this, such a window is stuck tiled forever: full border, part of a
+/// column, a "dockapp:clock" looking exactly like an ordinary xterm.
+///
+/// Called from the app_id / dimensions_hint / parent handlers above, every
+/// time one of them changes something wantsFloating()/attrs.floating could
+/// depend on. A no-op for a window that is not yet placed (placeNew will
+/// use the now-current state) or is already floating.
+///
+/// Deliberately narrow: only the floating/tiled mode and `sticky`
+/// (Omnipresent) are revisited. StartWorkspace is not -- moving a window
+/// that may already be sitting in a column with others to a different
+/// workspace after the fact is a bigger, rarer change than a late DockApp
+/// declaration calls for, and is left as a known limitation (see
+/// docs/TODO.md).
+pub fn recheckFloating(wm: *WindowManager, win: *Window) void {
+    if (win.new or win.mode != .tiled) return;
+
+    win.sticky = win.attrs.is("omnipresent");
+    const should_float = win.attrs.floating orelse
+        (wantsFloating(win) or win.attrs.is("omnipresent") or win.attrs.is("keep_on_top"));
+    if (should_float) workspace.floatWindow(wm, win);
 }
 
 /// Place every window that is not placed yet. Manage only.

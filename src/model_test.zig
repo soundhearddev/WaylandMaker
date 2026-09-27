@@ -534,6 +534,7 @@ test "maximize_column ignores a floating window" {
 // ----------------------------------------------------------------------------
 
 const wm_attr = @import("wm_attr.zig");
+const dockapp_mod = @import("dockapp.zig");
 
 /// Fixture window with an app_id and rules parsed from `rules`.
 fn attrWindow(f: *Fixture, arena: std.mem.Allocator, app_id: []const u8, rules: []const u8) !*Window {
@@ -712,4 +713,98 @@ test "windows without rules behave exactly as before" {
     try std.testing.expect(!w.sticky);
     try std.testing.expect(@import("main.zig").focusable(w));
     try std.testing.expect(f.wm.focus_request == w);
+}
+
+// ----------------------------------------------------------------------------
+// Late-arriving app_id/size/parent: docs/TODO.md's "Attribute mit später
+// eintreffender app_id". A DockApp (or any window) whose defining state
+// shows up only after it was already tiled must not be stuck that way.
+// ----------------------------------------------------------------------------
+
+test "recheckFloating: a DockApp app_id arriving after tiling floats it" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+    try check(f);
+    try std.testing.expect(w.mode == .tiled);
+
+    // Mirrors window.zig's own .app_id handler: attrs are refreshed first,
+    // recheckFloating is called after.
+    w.attrs = dockapp_mod.defaultAttrs();
+    @import("window.zig").recheckFloating(&f.wm, w);
+    try check(f);
+
+    try std.testing.expect(w.mode == .floating);
+}
+
+test "recheckFloating: a fixed-size hint arriving after tiling floats it too" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+    try check(f);
+
+    // Same shape a DockApp's set_min_size/set_max_size produces, just
+    // reported late (dimensions_hint after the first manage_start).
+    w.min_w = 64;
+    w.min_h = 64;
+    w.max_w = 64;
+    w.max_h = 64;
+    @import("window.zig").recheckFloating(&f.wm, w);
+    try check(f);
+
+    try std.testing.expect(w.mode == .floating);
+}
+
+test "recheckFloating: Omnipresent arriving late also sets sticky" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+
+    w.attrs = .{ .omnipresent = true };
+    @import("window.zig").recheckFloating(&f.wm, w);
+    try check(f);
+
+    try std.testing.expect(w.mode == .floating);
+    try std.testing.expect(w.isOmnipresent());
+}
+
+test "recheckFloating: does nothing for an ordinary window" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+
+    @import("window.zig").recheckFloating(&f.wm, w);
+    try check(f);
+    try std.testing.expect(w.mode == .tiled);
+}
+
+test "recheckFloating: a no-longer-new but already-floating window is untouched" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    workspace.placeFloating(f.cur(), w);
+    w.new = false;
+
+    // Should stay floating and not, say, get pulled into a column.
+    w.attrs = dockapp_mod.defaultAttrs();
+    @import("window.zig").recheckFloating(&f.wm, w);
+    try check(f);
+    try std.testing.expect(w.mode == .floating);
+}
+
+test "recheckFloating: a window still in its initial placement (new) is left for placeNew" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    w.new = true; // never placed yet -- placeNew(), not recheckFloating, owns this one
+
+    w.attrs = dockapp_mod.defaultAttrs();
+    @import("window.zig").recheckFloating(&f.wm, w);
+
+    try std.testing.expect(w.workspace == null);
+    try std.testing.expect(w.mode == .tiled); // untouched Window{} default, not yet placed
 }
