@@ -1,11 +1,16 @@
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
+const wlprefs = @import("wlprefs/build.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const use_llvm = b.option(bool, "llvm", "Use LLVM backend + lld linker") orelse true;
+    const use_llvm = b.option(
+        bool,
+        "llvm",
+        "Use LLVM backend + lld linker",
+    ) orelse true;
 
     // ---- protocol bindings ----------------------------------------------
 
@@ -20,11 +25,17 @@ pub fn build(b: *std.Build) void {
     scanner.addCustomProtocol(
         b.path("protocol/river-layer-shell-v1.xml"),
     );
-    scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
+
+    scanner.addSystemProtocol(
+        "staging/cursor-shape/cursor-shape-v1.xml",
+    );
+
     // wp_cursor_shape_manager_v1.get_tablet_tool_v2 references
-    // zwp_tablet_tool_v2; the scanner needs its definition even though we
-    // never call that request (we only use get_pointer).
-    scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
+    // zwp_tablet_tool_v2; the scanner needs its definition even though
+    // we only use get_pointer.
+    scanner.addSystemProtocol(
+        "stable/tablet/tablet-v2.xml",
+    );
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
@@ -48,10 +59,13 @@ pub fn build(b: *std.Build) void {
     const xkbcommon_module =
         b.dependency("xkbcommon", .{}).module("xkbcommon");
 
-    // ---- helper: link graphics libs with include paths -------------------
+    // ---- helper: link graphics libs -------------------------------------
 
     const fn_link_graphics = struct {
-        fn call(bld: *std.Build, module: *std.Build.Module) void {
+        fn call(
+            bld: *std.Build,
+            module: *std.Build.Module,
+        ) void {
             module.linkSystemLibrary("wayland-client", .{});
             module.linkSystemLibrary("xkbcommon", .{});
             module.linkSystemLibrary("cairo", .{});
@@ -62,22 +76,26 @@ pub fn build(b: *std.Build) void {
 
             module.addIncludePath(bld.path("src"));
 
-            module.addIncludePath(.{ .cwd_relative = "/usr/include/glib-2.0" });
-            module.addIncludePath(.{ .cwd_relative = "/usr/lib/glib-2.0/include" });
-            module.addIncludePath(.{ .cwd_relative = "/usr/include/cairo" });
-            module.addIncludePath(.{ .cwd_relative = "/usr/include/pango-1.0" });
-            module.addIncludePath(.{ .cwd_relative = "/usr/include/harfbuzz" });
+            module.addIncludePath(.{
+                .cwd_relative = "/usr/include/glib-2.0",
+            });
+            module.addIncludePath(.{
+                .cwd_relative = "/usr/lib/glib-2.0/include",
+            });
+            module.addIncludePath(.{
+                .cwd_relative = "/usr/include/cairo",
+            });
+            module.addIncludePath(.{
+                .cwd_relative = "/usr/include/pango-1.0",
+            });
+            module.addIncludePath(.{
+                .cwd_relative = "/usr/include/harfbuzz",
+            });
         }
     }.call;
 
-    // ---- project root module --------------------------------------------
+    // ---- wmaker-wl root module ------------------------------------------
 
-    // addModule (not createModule) on purpose: this registers "wmaker" as
-    // a module a *dependent* Zig package can import via
-    // b.dependency("wmaker_wl", .{}).module("wmaker") -- exactly what
-    // wlprefs/build.zig does. createModule alone would keep this module
-    // private to this build.zig, unreachable from outside even though the
-    // rest of this file already imported it internally as "wmaker" below.
     const root_module = b.addModule("wmaker", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -94,7 +112,8 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/wm_text.c"),
         .flags = &.{},
     });
-    // ---- imports available to every project module ----------------------
+
+    // ---- imports available to wmaker-wl executable ----------------------
 
     const imports: []const std.Build.Module.Import = &.{
         .{
@@ -111,7 +130,7 @@ pub fn build(b: *std.Build) void {
         },
     };
 
-    // ---- executable -----------------------------------------------------
+    // ---- wmaker-wl executable -------------------------------------------
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -132,11 +151,34 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    // ---- run -------------------------------------------------------------
+    // ---- wlprefs --------------------------------------------------------
 
-    const run_cmd = b.addSystemCommand(
-        &.{ "river", "-c", "zig-out/bin/wmaker-wl" },
+    // wlprefs/build.zig uses the SAME Build object.
+    //
+    // Therefore it does NOT create:
+    //
+    //     wlprefs/zig-out/bin/wlprefs
+    //
+    // but instead:
+    //
+    //     zig-out/bin/wlprefs
+    //
+    const wlprefs_exe = wlprefs.buildWlprefs(
+        b,
+        target,
+        optimize,
+        use_llvm,
     );
+
+    b.installArtifact(wlprefs_exe);
+
+    // ---- run ------------------------------------------------------------
+
+    const run_cmd = b.addSystemCommand(&.{
+        "river",
+        "-c",
+        "zig-out/bin/wmaker-wl",
+    });
 
     run_cmd.step.dependOn(b.getInstallStep());
 
@@ -147,7 +189,7 @@ pub fn build(b: *std.Build) void {
 
     run_step.dependOn(&run_cmd.step);
 
-    // ---- tests -----------------------------------------------------------
+    // ---- tests ----------------------------------------------------------
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -167,6 +209,10 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
 
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step(
+        "test",
+        "Run unit tests",
+    );
+
     test_step.dependOn(&run_tests.step);
 }
