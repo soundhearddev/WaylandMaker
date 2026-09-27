@@ -10,7 +10,9 @@
 //     size the same way);
 //   * a sunken, horizontally-scrolling strip of 64x64 icon-only buttons
 //     at (10,10), sized 500x87 -- WPrefs' WMScrollView + 64x64
-//     WMCustomButtons in WIPImageOnly mode, no per-icon caption;
+//     WMCustomButtons in WIPImageOnly mode, no per-icon caption, plus
+//     its own 20px-tall horizontal WMScroller along the bottom of the
+//     strip (16 icons * 64px don't fit in 500px);
 //   * a single content frame at (-2,105), sized 524x235, flat until the
 //     first click and then WRGroove (WPrefs.c: changeSection() flips
 //     WPrefs.banner's relief from WRFlat to WRGroove on first use);
@@ -48,8 +50,12 @@ const widget_face = gfx.Color.rgb(0xaeaeae);
 const text_black = gfx.Color.rgb(0x000000);
 const text_dim = gfx.Color.rgb(0x505050);
 
-const font = "Helvetica 10";
-const font_bold_title = "Helvetica Bold 18";
+// "Sans" rather than upstream's literal "Helvetica"/"Lucida Sans" family
+// list -- wmaker-wl's own UI (src/ui.zig) uses the same Pango "Sans"
+// alias for the same reason: it always resolves to *something* sane via
+// fontconfig, where a hardcoded family name may not be installed at all.
+const font = "Sans 10";
+const font_bold_title = "Sans Bold 18";
 
 // ---- geometry, ported 1:1 from WPrefs.app/WPrefs.c's createMainWindow -----
 
@@ -62,6 +68,14 @@ const strip_w: i32 = 500;
 const strip_h: i32 = 87;
 
 const icon_size: i32 = 64;
+
+// WINGs' fixed scroller thickness (WINGsP.h.in: `#define SCROLLER_WIDTH
+// 20`) -- the strip's WMScrollView has a horizontal WMScroller
+// (WMSetScrollViewHasHorizontalScroller(scrollV, True), arrows
+// WSANone: track + knob only, no arrow buttons) because
+// Category.all.len*64 = 1024px of icons don't fit the 500px-wide strip.
+const scroller_h: i32 = 20;
+const icon_viewport_h: i32 = strip_h - scroller_h;
 
 const frame_left: i32 = -2; // FRAME_LEFT
 const frame_top: i32 = 105; // FRAME_TOP
@@ -103,8 +117,16 @@ pub const Window = struct {
     /// same as upstream.
     selected: ?Category = null,
     /// Horizontal scroll offset of the icon strip, for when there are
-    /// more icons than fit in strip_w (WPrefs' WMScrollView).
+    /// more icons than fit in strip_w (WPrefs' WMScrollView). Nothing
+    /// sets this yet -- dragging the scroller thumb needs wl_pointer
+    /// handling, which main.zig doesn't wire up yet -- but the strip
+    /// and its scroller already draw correctly for any value.
     scroll_x: i32 = 0,
+
+    /// Decoded section icons, one per `Category`, loaded once in
+    /// `create()`. `undefined` until `icons_loaded`.
+    icons: [Category.all.len]gfx.Image = undefined,
+    icons_loaded: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) Window {
         return .{ .gpa = gpa };
@@ -185,10 +207,25 @@ pub const Window = struct {
         toplevel.setMinSize(win_width, win_height);
         toplevel.setMaxSize(win_width, win_height);
 
+        try win.loadIcons();
+
         surface.commit();
     }
 
+    /// Decode every section icon once at startup. Cheap: 16 small PNGs,
+    /// a few KB total. See `Category.icon()` in root.zig for what gets
+    /// embedded and why.
+    fn loadIcons(win: *Window) !void {
+        for (Category.all, 0..) |cat, i| {
+            win.icons[i] = try gfx.Image.fromPngBytes(cat.icon());
+        }
+        win.icons_loaded = true;
+    }
+
     pub fn deinit(win: *Window) void {
+        if (win.icons_loaded) {
+            for (&win.icons) |*img| img.deinit();
+        }
         if (win.toplevel) |t| t.destroy();
         if (win.xdg_surface) |s| s.destroy();
         if (win.surface) |s| s.destroy();
@@ -260,14 +297,17 @@ pub const Window = struct {
     /// The scrollable strip of 64x64 section icons (WPrefs.scrollV /
     /// WPrefs.buttonF). Sunken frame; each tile is a raised button that
     /// sinks (.pushed) when it is the selected section, exactly like a
-    /// WINGs WMCustomButton with WBBStateLightMask does when "on".
+    /// WINGs WMCustomButton with WBBStateLightMask does when "on"; the
+    /// icon itself is the real WPrefs artwork (see `Category.icon()`),
+    /// centered in the tile the same way WIPImageOnly does.
     fn paintIconStrip(win: *Window, cv: *gfx.Canvas) void {
         cv.fillRect(strip_x, strip_y, strip_w, strip_h, widget_face);
         cv.relief(strip_x, strip_y, strip_w, strip_h, .sunken);
 
-        // Icons sit vertically centered in the 87px-tall strip, flush
-        // left, one after another -- WMMoveWidget(bPtr, count*64, 0).
-        const icon_y = strip_y + @divTrunc(strip_h - icon_size, 2);
+        // Icons sit vertically centered in the viewport above the
+        // scroller, flush left, one after another -- WMMoveWidget(bPtr,
+        // count*64, 0).
+        const icon_y = strip_y + @divTrunc(icon_viewport_h - icon_size, 2);
 
         for (Category.all, 0..) |cat, i| {
             const icon_x = strip_x + 2 + @as(i32, @intCast(i)) * icon_size - win.scroll_x;
@@ -276,8 +316,42 @@ pub const Window = struct {
             const pushed = win.selected != null and win.selected.? == cat;
             cv.fillRect(icon_x, icon_y, icon_size, icon_size, widget_face);
             cv.relief(icon_x, icon_y, icon_size, icon_size, if (pushed) .pushed else .raised);
-            drawIcon(cv, cat, icon_x, icon_y, icon_size);
+
+            const img = win.icons[i];
+            cv.drawImage(
+                img,
+                icon_x + @divTrunc(icon_size - img.width, 2),
+                icon_y + @divTrunc(icon_size - img.height, 2),
+            );
         }
+
+        win.paintScroller(cv);
+    }
+
+    /// The strip's horizontal scroller. Visual only for now: dragging
+    /// the knob needs wl_pointer handling that main.zig doesn't set up
+    /// yet, same caveat as `scroll_x` above -- but it draws correctly
+    /// (and reflects `scroll_x`, if that's ever set) either way.
+    fn paintScroller(win: *Window, cv: *gfx.Canvas) void {
+        const track_y = strip_y + icon_viewport_h;
+        const track_h = strip_h - icon_viewport_h;
+        cv.fillRect(strip_x, track_y, strip_w, track_h, widget_face);
+        cv.relief(strip_x, track_y, strip_w, track_h, .sunken);
+
+        const content_w = @as(i32, @intCast(Category.all.len)) * icon_size;
+        const min_thumb: i32 = 20;
+        var thumb_w = @divTrunc(strip_w * strip_w, content_w);
+        thumb_w = std.math.clamp(thumb_w, min_thumb, strip_w - 4);
+
+        const max_scroll = content_w - strip_w;
+        const thumb_track_w = strip_w - 4 - thumb_w;
+        const thumb_x = if (max_scroll > 0)
+            strip_x + 2 + @divTrunc(win.scroll_x * thumb_track_w, max_scroll)
+        else
+            strip_x + 2;
+
+        cv.fillRect(thumb_x, track_y + 2, thumb_w, track_h - 4, widget_face);
+        cv.relief(thumb_x, track_y + 2, thumb_w, track_h - 4, .raised);
     }
 
     /// Startup banner shown until a section is picked -- WPrefs.banner
@@ -298,8 +372,11 @@ pub const Window = struct {
 
     /// A section's content panel. WPrefs.banner switches to WRGroove
     /// once the first section is picked (changeSection()); no per-
-    /// setting widgets exist yet, so this only shows the section title
-    /// and a placeholder line, same position real controls will use.
+    /// setting widgets exist yet, so this shows the section title, its
+    /// real upstream description (`panel->description` -- shown as
+    /// balloon-help over the icon there; wlprefs has no balloon-help
+    /// widget yet, so it's printed here instead of lost entirely), and
+    /// a placeholder line at the position real controls will use.
     fn paintPanel(win: *Window, cv: *gfx.Canvas, cat: Category) void {
         _ = win;
         const x = frame_left;
@@ -309,10 +386,11 @@ pub const Window = struct {
 
         cv.drawText(cat.label(), x + 14, y + 12, font_bold_title, text_black);
         cv.strokeLine(x + 14, y + 40, x + frame_width - 14, y + 40, 1, gfx.Color.rgb(0x707070));
+        cv.drawText(cat.description(), x + 14, y + 56, font, text_dim);
         cv.drawText(
             "(this section has no controls yet -- placeholder panel)",
             x + 14,
-            y + 56,
+            y + frame_height - 30,
             font,
             text_dim,
         );
@@ -352,57 +430,12 @@ pub const Window = struct {
         cv.drawText(label, x + box_size + 8, y + @divTrunc(h, 2) - 5, font, text_black);
     }
 
-    /// Simple placeholder glyphs, one per category, drawn from primitive
-    /// shapes only -- real icon artwork (TIFF/XPM, as WPrefs itself
-    /// ships in tiff/xpm/) can replace these later without touching
-    /// layout or hit-testing.
-    fn drawIcon(cv: *gfx.Canvas, cat: Category, x: i32, y: i32, size: i32) void {
-        const cx = x + @divTrunc(size, 2);
-        const cy = y + @divTrunc(size, 2);
-        const r = @divTrunc(size, 2) - 14;
-        switch (cat) {
-            .layout => {
-                const s = @divTrunc(size, 2) - 12;
-                const gap = 4;
-                cv.strokeRect(cx - s - gap / 2, cy - s - gap / 2, s, s, 1.2, text_black);
-                cv.strokeRect(cx + gap / 2, cy - s - gap / 2, s, s, 1.2, text_black);
-                cv.strokeRect(cx - s - gap / 2, cy + gap / 2, s, s, 1.2, text_black);
-                cv.strokeRect(cx + gap / 2, cy + gap / 2, s, s, 1.2, text_black);
-            },
-            .look => {
-                cv.strokeCircle(cx, cy, r, 1.2, text_black);
-                cv.fillCircle(cx, cy, r - 2, gfx.Color.rgb(0x505050));
-            },
-            .workspaces => {
-                const bar_w = 7;
-                const bar_h = size - 28;
-                var i: i32 = 0;
-                while (i < 3) : (i += 1) {
-                    const bx = x + 14 + i * (bar_w + 4);
-                    cv.strokeRect(bx, cy - @divTrunc(bar_h, 2), bar_w, bar_h, 1.2, text_black);
-                }
-            },
-            .programs => {
-                cv.strokeRect(x + 12, y + 16, size - 24, size - 32, 1.2, text_black);
-                cv.drawTextCentered(">_", cx, y + 26, "monospace 8", text_black);
-            },
-            .bindings => {
-                cv.strokeRect(x + 16, y + 18, size - 32, size - 36, 1.2, text_black);
-                cv.drawTextCentered("K", cx, y + 30, font, text_black);
-            },
-            .wmaker_compat => {
-                cv.strokeCircle(cx - 6, cy, r - 4, 1.2, text_black);
-                cv.strokeRect(cx - 2, cy - (r - 4), 2 * (r - 4), 2 * (r - 4), 1.2, text_black);
-            },
-        }
-    }
-
     /// Hit-test the icon strip and update selection. Returns true if the
     /// selection changed (caller should redraw and update the window
     /// title, exactly as WMSetWindowTitle(win, sectionName) does).
     pub fn handleClick(win: *Window, x: i32, y: i32) bool {
-        if (y < strip_y or y >= strip_y + strip_h) return false;
-        const icon_y = strip_y + @divTrunc(strip_h - icon_size, 2);
+        if (y < strip_y or y >= strip_y + icon_viewport_h) return false;
+        const icon_y = strip_y + @divTrunc(icon_viewport_h - icon_size, 2);
         if (y < icon_y or y >= icon_y + icon_size) return false;
 
         for (Category.all, 0..) |cat, i| {

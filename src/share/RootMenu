@@ -8,6 +8,7 @@
   ("Editors",
     ("Vim",     SHEXEC, "alacritty -e vim"),
     ("Emacs",   EXEC,   "emacs")),
+  ("Preferences", EXEC, "wlprefs"),
   ("Windows",    WINDOWS_MENU),
   ("Workspaces", WORKSPACE_MENU),
   ("Exit",       EXIT))

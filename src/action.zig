@@ -78,6 +78,20 @@ pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) 
             error.BadArguments };
     }
 
+    // `shell`/`exec`/`shexec` (alias for the same thing) run the rest of
+    // the line through `/bin/sh -c`, verbatim -- no word-splitting or
+    // quote handling on our side, the shell does that. This is the
+    // "bind any key to any command" escape hatch: pipes, `&&`, `~`/`$VAR`
+    // expansion, backgrounding with `&`, multiple commands, all work.
+    //
+    //   bind = Super+p, shell grim -g "$(slurp)" ~/Pictures/shot.png
+    //   bind = Super+l, shell swaylock -f || pkill swaylock
+    //   bind = Super+m, shell playerctl play-pause &
+    if (eql(u8, name, "shell") or eql(u8, name, "exec") or eql(u8, name, "shexec")) {
+        if (rest.len == 0) return error.BadArguments;
+        return .{ .shell = try a.dupe(u8, rest) };
+    }
+
     if (eql(u8, name, "workspace")) return .{ .workspace = try workspaceArg(rest, cfg) };
     if (eql(u8, name, "move_to_workspace")) return .{ .move_to_workspace = try workspaceArg(rest, cfg) };
 
@@ -140,6 +154,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
     switch (cmd) {
         .none => {},
         .spawn => |argv| proc.spawn(wm, argv),
+        .shell => |sh| proc.spawnShell(wm, sh),
         .exit => wm.quit = true,
 
         .close => if (focusedWindow(wm)) |w| w.obj.close(),

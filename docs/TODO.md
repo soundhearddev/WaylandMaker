@@ -72,7 +72,12 @@
 - [ ] Lauf gegen ein echtes river ist weiterhin unbestätigt für die UI-Schicht (`ui.zig`, `shm.zig`,
       `gfx.zig`); nur `zig build`/`zig build test` sind bisher verifiziert.
 - [ ] de layout integration!!
-- [ ] config keybind exec shell / apps custom
+- [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
+      `process.spawnShell`)
+- [ ] **WPrefs-Äquivalent**: Plan und Bestandsaufnahme in `docs/WPREFS.md`. Grundgerüst
+      `src/wm_prefs.zig` liegt als reines Skelett (Typen + Signaturen, keine Implementierung)
+      vor Phase 5/6, weil eine GUI erst sinnvoll wird, sobald Dock/Clip (Phase 5) und Themes
+      (Phase 6) zumindest im Datenmodell existieren.
 
 ## Erledigt
 

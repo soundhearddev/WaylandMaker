@@ -12,8 +12,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const use_llvm = b.option(bool, "llvm", "Use LLVM backend + lld linker") orelse true;
-
     // ---- protocol bindings ------------------------------------------------
 
     const scanner = Scanner.create(b, .{});
@@ -99,8 +97,8 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "wlprefs",
         .root_module = exe_module,
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
+        .use_llvm = true,
+        .use_lld = true,
     });
 
     b.installArtifact(exe);
@@ -115,7 +113,12 @@ pub fn build(b: *std.Build) void {
 
     // ---- tests ------------------------------------------------------------
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{
+        .root_module = mod,
+        .use_llvm = true,
+        .use_lld = true,
+    });
+
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run tests");

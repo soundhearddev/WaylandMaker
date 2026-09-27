@@ -424,6 +424,11 @@ pub const WindowManager = struct {
 pub const Command = union(enum) {
     none,
     spawn: []const []const u8,
+    /// Run through `/bin/sh -c`, exactly like the root menu's `SHEXEC` and
+    /// the autostart script. Lets a bind use pipes, `&&`, `~`/`$HOME`
+    /// expansion, backgrounding with `&`, or any other shell syntax --
+    /// effectively "run any program" from a key combo.
+    shell: []const u8,
     close,
     exit,
     toggle_floating,

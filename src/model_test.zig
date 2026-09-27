@@ -404,6 +404,39 @@ test "every default key binding parses to a real command" {
     try std.testing.expectEqual(@as(usize, 0), bad);
 }
 
+test "shell command keeps shell syntax verbatim, unlike spawn" {
+    var cfg = try config.load(std.testing.io, std.testing.allocator);
+    defer cfg.deinit();
+
+    const action = @import("action.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // `shell`/`exec`/`shexec` are aliases and pass the rest of the line
+    // through untouched -- pipes, &&, ~, $VAR, quotes and all -- because
+    // /bin/sh does the parsing, not wmaker-wl.
+    const raw = "notify-send \"$(date)\" && pkill -RTMIN+8 waybar";
+    for ([_][]const u8{ "shell", "exec", "shexec" }) |kw| {
+        const line = try std.fmt.allocPrint(a, "{s} {s}", .{ kw, raw });
+        const cmd = try action.parse(a, &cfg, line);
+        try std.testing.expect(cmd == .shell);
+        try std.testing.expectEqualStrings(raw, cmd.shell);
+    }
+
+    // A bare `shell` with no command text is a config error, not a no-op
+    // that silently does nothing when the key is pressed.
+    try std.testing.expectError(error.BadArguments, action.parse(a, &cfg, "shell"));
+    try std.testing.expectError(error.BadArguments, action.parse(a, &cfg, "shell   "));
+
+    // `spawn` stays word-split (no shell): "&&" would just be an argv
+    // token here, not a shell operator.
+    const spawned = try action.parse(a, &cfg, "spawn notify-send hello && world");
+    try std.testing.expect(spawned == .spawn);
+    try std.testing.expectEqual(@as(usize, 4), spawned.spawn.len);
+    try std.testing.expectEqualStrings("&&", spawned.spawn[2]);
+}
+
 test "no two default bindings share a key combination" {
     var cfg = try config.load(std.testing.io, std.testing.allocator);
     defer cfg.deinit();
@@ -726,6 +759,12 @@ test "recheckFloating: a DockApp app_id arriving after tiling floats it" {
     defer f.deinit();
     const w = try f.newWindow();
     try workspace.placeTiled(&f.wm, f.cur(), w);
+    // Mirror the real pipeline: placeNew() (which we bypass here to place
+    // the window directly as tiled) is what clears `new` once a window
+    // has had its first placement. recheckFloating only acts on windows
+    // that are no longer `new` -- see its doc comment -- so without this
+    // the guard clause returns immediately and the window never floats.
+    w.new = false;
     try check(f);
     try std.testing.expect(w.mode == .tiled);
 
@@ -743,6 +782,7 @@ test "recheckFloating: a fixed-size hint arriving after tiling floats it too" {
     defer f.deinit();
     const w = try f.newWindow();
     try workspace.placeTiled(&f.wm, f.cur(), w);
+    w.new = false; // see the comment in the DockApp test above
     try check(f);
 
     // Same shape a DockApp's set_min_size/set_max_size produces, just
@@ -762,6 +802,7 @@ test "recheckFloating: Omnipresent arriving late also sets sticky" {
     defer f.deinit();
     const w = try f.newWindow();
     try workspace.placeTiled(&f.wm, f.cur(), w);
+    w.new = false; // see the comment in the DockApp test above
 
     w.attrs = .{ .omnipresent = true };
     @import("window.zig").recheckFloating(&f.wm, w);

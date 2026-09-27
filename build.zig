@@ -72,7 +72,13 @@ pub fn build(b: *std.Build) void {
 
     // ---- project root module --------------------------------------------
 
-    const root_module = b.createModule(.{
+    // addModule (not createModule) on purpose: this registers "wmaker" as
+    // a module a *dependent* Zig package can import via
+    // b.dependency("wmaker_wl", .{}).module("wmaker") -- exactly what
+    // wlprefs/build.zig does. createModule alone would keep this module
+    // private to this build.zig, unreachable from outside even though the
+    // rest of this file already imported it internally as "wmaker" below.
+    const root_module = b.addModule("wmaker", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,

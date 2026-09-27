@@ -164,6 +164,60 @@ pub const Canvas = struct {
     pub fn flush(cv: *Canvas) void {
         c.cairo_surface_flush(cv.surface);
     }
+
+    /// Blit a decoded `Image` with its top-left corner at (x, y).
+    pub fn drawImage(cv: *Canvas, img: Image, x: i32, y: i32) void {
+        c.cairo_save(cv.cr);
+        c.cairo_set_source_surface(cv.cr, img.surface, @floatFromInt(x), @floatFromInt(y));
+        c.cairo_paint(cv.cr);
+        c.cairo_restore(cv.cr);
+    }
+};
+
+/// A decoded raster image (wlprefs' section icons). Loaded once from an
+/// `@embedFile`d PNG -- see `Category.icon()` in root.zig -- and kept
+/// around as a cairo image surface for repeated `Canvas.drawImage` calls.
+pub const Image = struct {
+    surface: *c.cairo_surface_t,
+    width: i32,
+    height: i32,
+
+    const ReadCtx = struct {
+        data: []const u8,
+        pos: usize,
+    };
+
+    fn readCb(closure: ?*anyopaque, data: [*c]u8, length: c_uint) callconv(.c) c.cairo_status_t {
+        const ctx: *ReadCtx = @ptrCast(@alignCast(closure orelse return c.CAIRO_STATUS_READ_ERROR));
+        const n: usize = length;
+        if (ctx.pos + n > ctx.data.len) return c.CAIRO_STATUS_READ_ERROR;
+        @memcpy(data[0..n], ctx.data[ctx.pos .. ctx.pos + n]);
+        ctx.pos += n;
+        return c.CAIRO_STATUS_SUCCESS;
+    }
+
+    /// Decode a PNG held in memory. wlprefs has no XPM/TIFF decoder, so
+    /// section icons are WPrefs.app/xpm/*.xpm converted to PNG ahead of
+    /// time (see src/assets/icons/) -- real official Window Maker
+    /// artwork, not generated placeholder glyphs.
+    pub fn fromPngBytes(bytes: []const u8) !Image {
+        var ctx = ReadCtx{ .data = bytes, .pos = 0 };
+        const s = c.cairo_image_surface_create_from_png_stream(readCb, &ctx) orelse
+            return error.CairoSurface;
+        if (c.cairo_surface_status(s) != c.CAIRO_STATUS_SUCCESS) {
+            c.cairo_surface_destroy(s);
+            return error.CairoSurface;
+        }
+        return .{
+            .surface = s,
+            .width = c.cairo_image_surface_get_width(s),
+            .height = c.cairo_image_surface_get_height(s),
+        };
+    }
+
+    pub fn deinit(img: *Image) void {
+        c.cairo_surface_destroy(img.surface);
+    }
 };
 
 /// Pixel size of `text` in `font`, measured on a scratch surface.
