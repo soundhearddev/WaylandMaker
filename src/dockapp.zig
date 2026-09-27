@@ -83,16 +83,24 @@ pub fn isSelfDeclared(app_id: ?[]const u8) bool {
 }
 
 /// Sensible defaults for a self-declared DockApp: no title bar or border
-/// (it's a small tile, not a normal window) and floating (a fixed-size
-/// tile should never join the tiling layout). Returned as `Attributes`
-/// with everything else left `null`, so `withDefaults` lets an explicit
-/// attributes.conf rule for this app_id override any part of this.
+/// (it's a small tile, not a normal window), floating (a fixed-size tile
+/// should never join the tiling layout), hidden from the Windows menu
+/// (see ui.zig's buildWindowLevel), and unfocusable -- a dock tile is
+/// meant to be looked at and clicked, not to steal keyboard focus the
+/// moment it starts or to show up in Alt-equivalent focus cycling
+/// (focus_previous, click-to-focus; see main.zig's focusable()). Returned
+/// as `Attributes` with everything else left `null`, so `withDefaults`
+/// lets an explicit attributes.conf rule for this app_id override any
+/// part of this -- an interactive DockApp that *does* want keyboard focus
+/// (a small mixer with a text field, say) sets `Unfocusable = No` for its
+/// own app_id and keeps every other default.
 pub fn defaultAttrs() wm_attr.Attributes {
     return .{
         .no_titlebar = true,
         .no_border = true,
         .floating = true,
         .skip_window_list = true,
+        .unfocusable = true,
     };
 }
 

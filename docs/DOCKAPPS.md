@@ -53,8 +53,8 @@ jeweiligen `app_id` gewinnt pro Option, exakt wie bei jeder anderen Anwendung au
 
 Wie genau, hängt vom Toolkit ab:
 
-- **Roher Wayland-Client** (wie `wmaker-dockapp-clock`, siehe unten): `xdg_toplevel`s
-  `set_app_id`-Request mit dem gewünschten String.
+- **Roher Wayland-Client** (wie [`wmaker-dockapp-clock`](../examples/wmaker-dockapp-clock/),
+  siehe unten): `xdg_toplevel`s `set_app_id`-Request mit dem gewünschten String.
 - **GTK**: `Gio.Application`'s `application-id`, oder `gtk_window_set_wmclass`/
   `g_set_prgname`, je nach GTK-Version.
 - **Qt**: `QGuiApplication::setDesktopFileName("dockapp:clock")`.
@@ -136,9 +136,13 @@ kaputte Datei wird übersprungen (mit Warnung), die Session startet trotzdem.
 
 ## Referenz-Implementierung: `wmaker-dockapp-clock`
 
-Ein komplett eigenständiges Beispielprojekt (kein Teil von wmaker-wl, keine Abhängigkeit
-darauf) zeigt beide Wege: Selbst-Erkennung per `app_id`-Präfix und Einbindung über Autostart
-oder `dockapps.conf`. Siehe dessen eigene README für Details.
+[`examples/wmaker-dockapp-clock/`](../examples/wmaker-dockapp-clock/) ist ein komplett
+eigenständiges Beispielprojekt (kein Teil von wmaker-wl, keine Abhängigkeit darauf, eigenes
+`build.zig`/`build.zig.zon`, Zig 0.16.0): ein roher Wayland-Client, der nur `app_id =
+"dockapp:clock"` setzt und eine feste 64×64-Größe anfragt -- der komplette, empfohlene Weg von
+oben, ohne jede Konfigurationsdatei. Siehe dessen eigene
+[README](../examples/wmaker-dockapp-clock/README.md) zum Bauen, Ausprobieren und als Vorlage für
+eine eigene DockApp.
 
 ## Was noch fehlt
 
