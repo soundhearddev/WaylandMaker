@@ -1,52 +1,51 @@
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
-const wlprefs = @import("wlprefs/build.zig");
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+/// Build wlprefs as part of another Build.
+///
+/// `prefix` is empty when this build.zig is used standalone,
+/// and "wlprefs" when it is imported by the root project.
+///
+/// This allows both:
+///
+///     cd wlprefs && zig build
+///
+/// and:
+///
+///     cd .. && zig build
+///
+/// to build the same project.
+pub fn buildWlprefs(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_llvm: bool,
+) *std.Build.Step.Compile {
 
-    const use_llvm = b.option(
-        bool,
-        "llvm",
-        "Use LLVM backend + lld linker",
-    ) orelse true;
+    // Helper for paths belonging to this subproject.
+    const projectPath = struct {
+        fn get(
+            bld: *std.Build,
+            comptime p: []const u8,
+        ) std.Build.LazyPath {
+            return bld.path(
+                bld.fmt("wlprefs/{s}", .{p}),
+            );
+        }
+    }.get;
 
     // ---- protocol bindings ----------------------------------------------
 
     const scanner = Scanner.create(b, .{});
 
-    scanner.addCustomProtocol(
-        b.path("protocol/river-window-management-v1.xml"),
-    );
-    scanner.addCustomProtocol(
-        b.path("protocol/river-xkb-bindings-v1.xml"),
-    );
-    scanner.addCustomProtocol(
-        b.path("protocol/river-layer-shell-v1.xml"),
-    );
-
     scanner.addSystemProtocol(
-        "staging/cursor-shape/cursor-shape-v1.xml",
-    );
-
-    // wp_cursor_shape_manager_v1.get_tablet_tool_v2 references
-    // zwp_tablet_tool_v2; the scanner needs its definition even though
-    // we only use get_pointer.
-    scanner.addSystemProtocol(
-        "stable/tablet/tablet-v2.xml",
+        "stable/xdg-shell/xdg-shell.xml",
     );
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
     scanner.generate("wl_seat", 7);
-    scanner.generate("wl_output", 4);
-    scanner.generate("wl_subcompositor", 1);
-    scanner.generate("wp_cursor_shape_manager_v1", 2);
-
-    scanner.generate("river_window_manager_v1", 6);
-    scanner.generate("river_xkb_bindings_v1", 3);
-    scanner.generate("river_layer_shell_v1", 1);
+    scanner.generate("xdg_wm_base", 3);
 
     const wayland_module = b.createModule(.{
         .root_source_file = scanner.result,
@@ -74,7 +73,9 @@ pub fn build(b: *std.Build) void {
             module.linkSystemLibrary("gobject-2.0", .{});
             module.linkSystemLibrary("glib-2.0", .{});
 
-            module.addIncludePath(bld.path("src"));
+            module.addIncludePath(
+                projectPath(bld, "src"),
+            );
 
             module.addIncludePath(.{
                 .cwd_relative = "/usr/include/glib-2.0",
@@ -94,125 +95,121 @@ pub fn build(b: *std.Build) void {
         }
     }.call;
 
-    // ---- wmaker-wl root module ------------------------------------------
+    // ---- library module -------------------------------------------------
 
-    const root_module = b.addModule("wmaker", .{
-        .root_source_file = b.path("src/root.zig"),
+    const mod = b.addModule("wlprefs", .{
+        .root_source_file = projectPath(b, "src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
-    root_module.addImport("wayland", wayland_module);
-    root_module.addImport("xkbcommon", xkbcommon_module);
+    mod.addImport(
+        "wayland",
+        wayland_module,
+    );
 
-    fn_link_graphics(b, root_module);
+    mod.addImport(
+        "xkbcommon",
+        xkbcommon_module,
+    );
 
-    root_module.addCSourceFile(.{
-        .file = b.path("src/wm_text.c"),
+    fn_link_graphics(b, mod);
+
+    mod.addCSourceFile(.{
+        .file = projectPath(b, "src/wm_text.c"),
         .flags = &.{},
     });
 
-    // ---- imports available to wmaker-wl executable ----------------------
-
-    const imports: []const std.Build.Module.Import = &.{
-        .{
-            .name = "wmaker",
-            .module = root_module,
-        },
-        .{
-            .name = "wayland",
-            .module = wayland_module,
-        },
-        .{
-            .name = "xkbcommon",
-            .module = xkbcommon_module,
-        },
-    };
-
-    // ---- wmaker-wl executable -------------------------------------------
+    // ---- executable -----------------------------------------------------
 
     const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = projectPath(b, "src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = imports,
+        .imports = &.{
+            .{
+                .name = "wlprefs",
+                .module = mod,
+            },
+            .{
+                .name = "wayland",
+                .module = wayland_module,
+            },
+            .{
+                .name = "xkbcommon",
+                .module = xkbcommon_module,
+            },
+        },
     });
 
     fn_link_graphics(b, exe_module);
 
     const exe = b.addExecutable(.{
-        .name = "wmaker-wl",
+        .name = "wlprefs",
         .root_module = exe_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
 
-    b.installArtifact(exe);
+    return exe;
+}
 
-    // ---- wlprefs --------------------------------------------------------
+// -------------------------------------------------------------------------
+// Standalone build
+// -------------------------------------------------------------------------
 
-    // wlprefs/build.zig uses the SAME Build object.
-    //
-    // Therefore it does NOT create:
-    //
-    //     wlprefs/zig-out/bin/wlprefs
-    //
-    // but instead:
-    //
-    //     zig-out/bin/wlprefs
-    //
-    const wlprefs_exe = wlprefs.buildWlprefs(
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const use_llvm = b.option(
+        bool,
+        "llvm",
+        "Use LLVM backend + lld linker",
+    ) orelse true;
+
+    const exe = buildWlprefs(
         b,
         target,
         optimize,
         use_llvm,
     );
 
-    b.installArtifact(wlprefs_exe);
+    b.installArtifact(exe);
 
     // ---- run ------------------------------------------------------------
 
-    const run_cmd = b.addSystemCommand(&.{
-        "river",
-        "-c",
-        "zig-out/bin/wmaker-wl",
-    });
+    const run_step = b.step(
+        "run",
+        "Run wlprefs",
+    );
+
+    const run_cmd = b.addRunArtifact(exe);
 
     run_cmd.step.dependOn(b.getInstallStep());
 
-    const run_step = b.step(
-        "run",
-        "Run river with wmaker-wl as window manager",
-    );
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
 
     run_step.dependOn(&run_cmd.step);
 
     // ---- tests ----------------------------------------------------------
 
-    const test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = imports,
-    });
-
-    fn_link_graphics(b, test_module);
-
-    const tests = b.addTest(.{
-        .root_module = test_module,
+    const mod_tests = b.addTest(.{
+        .root_module = exe.root_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
 
-    const run_tests = b.addRunArtifact(tests);
+    const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step(
         "test",
-        "Run unit tests",
+        "Run tests",
     );
 
-    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_mod_tests.step);
 }

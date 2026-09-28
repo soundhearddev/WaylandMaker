@@ -38,10 +38,11 @@ const xdg = wayland.client.xdg;
 
 const gfx = @import("gfx.zig");
 const root = @import("root.zig");
+const panel_menu = @import("panel_menu.zig");
 const Category = root.Category;
 
 // ---- NeXTSTEP palette -------------------------------------------------------
-// The standard WINGs widget face colour (0xaeaaae, see WINGs/widgets.c
+// The standard WINGs widget face colour (0xaeaeae, see WINGs/widgets.c
 // loadPixmaps()) plus pure black/white for text and relief edges. No
 // accent colour anywhere -- selection is shown by sinking a button, not
 // by tinting it.
@@ -93,6 +94,31 @@ const close_x: i32 = 425;
 const cmd_button_w: i32 = 90; // Revert buttons; Save/Close are narrower below
 const save_close_w: i32 = 80;
 
+fn contentWidth() i32 {
+    return @as(i32, @intCast(Category.all.len)) * icon_size;
+}
+
+/// Largest valid `scroll_x` (icons start 2px inside the strip).
+fn maxScroll() i32 {
+    return @max(0, contentWidth() + 4 - strip_w);
+}
+
+/// Scroller knob geometry, shared by painting and hit-testing.
+const Thumb = struct {
+    w: i32,
+    fn x(th: Thumb, scroll_x: i32) i32 {
+        const track = strip_w - 4 - th.w;
+        const ms = maxScroll();
+        if (ms <= 0) return strip_x + 2;
+        return strip_x + 2 + @divTrunc(scroll_x * track, ms);
+    }
+};
+
+fn thumb() Thumb {
+    const w = @divTrunc(strip_w * strip_w, contentWidth());
+    return .{ .w = std.math.clamp(w, 20, strip_w - 4) };
+}
+
 pub const Window = struct {
     gpa: std.mem.Allocator,
 
@@ -101,6 +127,16 @@ pub const Window = struct {
     shm: ?*wl.Shm = null,
     wm_base: ?*xdg.WmBase = null,
     seat: ?*wl.Seat = null,
+
+    // ---- pointer input --------------------------------------------------------
+    pointer: ?*wl.Pointer = null,
+    /// Last known pointer position in surface coordinates.
+    px: i32 = 0,
+    py: i32 = 0,
+    /// True while the scroller knob is being dragged; `drag_off` is the
+    /// grab offset inside the knob.
+    dragging: bool = false,
+    drag_off: i32 = 0,
 
     // ---- this window ----------------------------------------------------------
     surface: ?*wl.Surface = null,
@@ -128,6 +164,11 @@ pub const Window = struct {
     icons: [Category.all.len]gfx.Image = undefined,
     icons_loaded: bool = false,
 
+    /// Images + example state for the "Menu Preferences" demo panel
+    /// (panel_menu.zig). Loaded together with the section icons.
+    menu_imgs: panel_menu.Images = undefined,
+    menu_state: panel_menu.State = .{},
+
     pub fn init(gpa: std.mem.Allocator) Window {
         return .{ .gpa = gpa };
     }
@@ -144,11 +185,116 @@ pub const Window = struct {
                 } else if (std.mem.orderZ(u8, g.interface, xdg.WmBase.interface.name) == .eq) {
                     win.wm_base = reg.bind(g.name, xdg.WmBase, 3) catch return;
                 } else if (std.mem.orderZ(u8, g.interface, wl.Seat.interface.name) == .eq) {
-                    win.seat = reg.bind(g.name, wl.Seat, 7) catch return;
+                    const seat = reg.bind(g.name, wl.Seat, 7) catch return;
+                    win.seat = seat;
+                    // Set right away: `capabilities` is sent on bind.
+                    seat.setListener(*Window, seatListener, win);
                 }
             },
             .global_remove => {},
         }
+    }
+
+    // ---- wl_seat / wl_pointer -------------------------------------------------
+
+    fn seatListener(seat: *wl.Seat, ev: wl.Seat.Event, win: *Window) void {
+        switch (ev) {
+            .capabilities => |c| {
+                if (c.capabilities.pointer and win.pointer == null) {
+                    const ptr = seat.getPointer() catch return;
+                    win.pointer = ptr;
+                    ptr.setListener(*Window, pointerListener, win);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn pointerListener(_: *wl.Pointer, ev: wl.Pointer.Event, win: *Window) void {
+        switch (ev) {
+            .enter => |e| {
+                win.px = e.surface_x.toInt();
+                win.py = e.surface_y.toInt();
+            },
+            .leave => win.dragging = false,
+            .motion => |m| {
+                win.px = m.surface_x.toInt();
+                win.py = m.surface_y.toInt();
+                if (win.dragging) win.dragScroller();
+            },
+            .button => |b| {
+                const btn_left = 0x110; // BTN_LEFT
+                if (b.button != btn_left) return;
+                if (b.state == .pressed) {
+                    win.onPress();
+                } else {
+                    win.dragging = false;
+                }
+            },
+            // Mouse wheel over the icon strip scrolls it, like WMScrollView.
+            .axis => |a| {
+                if (win.py < strip_y or win.py >= strip_y + strip_h) return;
+                if (win.px < strip_x or win.px >= strip_x + strip_w) return;
+                win.setScroll(win.scroll_x + @divTrunc(a.value.toInt() * 3, 2) * 2);
+            },
+            else => {},
+        }
+    }
+
+    fn redraw(win: *Window) void {
+        win.draw() catch |err| std.log.err("draw failed: {t}", .{err});
+    }
+
+    fn setScroll(win: *Window, v: i32) void {
+        const clamped = std.math.clamp(v, 0, maxScroll());
+        if (clamped == win.scroll_x) return;
+        win.scroll_x = clamped;
+        win.redraw();
+    }
+
+    /// Left button pressed at (px, py): icon strip, scroller, buttons.
+    fn onPress(win: *Window) void {
+        const x = win.px;
+        const y = win.py;
+
+        // Scroller track (bottom 20px of the strip).
+        if (x >= strip_x and x < strip_x + strip_w and
+            y >= strip_y + icon_viewport_h and y < strip_y + strip_h)
+        {
+            const th = thumb();
+            const tx = th.x(win.scroll_x);
+            if (x >= tx and x < tx + th.w) {
+                win.dragging = true;
+                win.drag_off = x - tx;
+            } else if (x < tx) {
+                win.setScroll(win.scroll_x - strip_w);
+            } else {
+                win.setScroll(win.scroll_x + strip_w);
+            }
+            return;
+        }
+
+        // Section icons.
+        if (win.handleClick(x, y)) {
+            if (win.selected) |cat| {
+                if (win.toplevel) |t| t.setTitle(cat.label());
+            }
+            win.redraw();
+            return;
+        }
+
+        // Close button.
+        if (x >= close_x and x < close_x + save_close_w and y >= button_y and y < button_y + button_h) {
+            win.closed = true;
+        }
+    }
+
+    fn dragScroller(win: *Window) void {
+        const th = thumb();
+        const track = strip_w - 4 - th.w;
+        if (track <= 0) return;
+        const rel = win.px - win.drag_off - (strip_x + 2);
+        win.setScroll(@divTrunc(rel * maxScroll(), track));
     }
 
     // ---- xdg_wm_base --------------------------------------------------------
@@ -219,12 +365,14 @@ pub const Window = struct {
         for (Category.all, 0..) |cat, i| {
             win.icons[i] = try gfx.Image.fromPngBytes(cat.icon());
         }
+        win.menu_imgs = try panel_menu.Images.load();
         win.icons_loaded = true;
     }
 
     pub fn deinit(win: *Window) void {
         if (win.icons_loaded) {
             for (&win.icons) |*img| img.deinit();
+            win.menu_imgs.deinit();
         }
         if (win.toplevel) |t| t.destroy();
         if (win.xdg_surface) |s| s.destroy();
@@ -338,17 +486,9 @@ pub const Window = struct {
         cv.fillRect(strip_x, track_y, strip_w, track_h, widget_face);
         cv.relief(strip_x, track_y, strip_w, track_h, .sunken);
 
-        const content_w = @as(i32, @intCast(Category.all.len)) * icon_size;
-        const min_thumb: i32 = 20;
-        var thumb_w = @divTrunc(strip_w * strip_w, content_w);
-        thumb_w = std.math.clamp(thumb_w, min_thumb, strip_w - 4);
-
-        const max_scroll = content_w - strip_w;
-        const thumb_track_w = strip_w - 4 - thumb_w;
-        const thumb_x = if (max_scroll > 0)
-            strip_x + 2 + @divTrunc(win.scroll_x * thumb_track_w, max_scroll)
-        else
-            strip_x + 2;
+        const th = thumb();
+        const thumb_x = th.x(win.scroll_x);
+        const thumb_w = th.w;
 
         cv.fillRect(thumb_x, track_y + 2, thumb_w, track_h - 4, widget_face);
         cv.relief(thumb_x, track_y + 2, thumb_w, track_h - 4, .raised);
@@ -378,11 +518,21 @@ pub const Window = struct {
     /// widget yet, so it's printed here instead of lost entirely), and
     /// a placeholder line at the position real controls will use.
     fn paintPanel(win: *Window, cv: *gfx.Canvas, cat: Category) void {
-        _ = win;
         const x = frame_left;
         const y = frame_top;
         cv.fillRect(x, y, frame_width, frame_height, widget_face);
         cv.relief(x, y, frame_width, frame_height, .groove);
+
+        // Sections that already have a (demo) layout draw it at the
+        // panel-box origin, frame + 2px, exactly like upstream's
+        // WMSetViewExpandsToParent(box, 2, 2, 2, 2).
+        switch (cat) {
+            .menu_preferences => {
+                panel_menu.paint(cv, x + 2, y + 2, win.menu_state, &win.menu_imgs);
+                return;
+            },
+            else => {},
+        }
 
         cv.drawText(cat.label(), x + 14, y + 12, font_bold_title, text_black);
         cv.strokeLine(x + 14, y + 40, x + frame_width - 14, y + 40, 1, gfx.Color.rgb(0x707070));
