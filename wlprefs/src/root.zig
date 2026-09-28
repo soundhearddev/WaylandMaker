@@ -34,6 +34,8 @@ const xdg = wayland.client.xdg;
 pub const gfx = @import("gfx.zig");
 pub const window = @import("window.zig");
 
+pub const version_string = "0.1.0";
+
 /// The section list, 1:1 with upstream WPrefs.app/WPrefs.c's
 /// `Initialize()` -- same 16 sections (its `MAX_SECTIONS`), same order,
 /// same names, same icon files. Each currently renders an empty

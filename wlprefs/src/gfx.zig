@@ -71,6 +71,33 @@ pub const Canvas = struct {
         c.cairo_fill(cv.cr);
     }
 
+    /// Blit a decoded `Image` with its top-left corner at (x, y), clipped to a bounding box.
+    pub fn drawImageClipped(
+        cv: *Canvas,
+        img: *const Image,
+        x: i32,
+        y: i32,
+        clip_x: i32,
+        clip_y: i32,
+        clip_w: i32,
+        clip_h: i32,
+    ) void {
+        c.cairo_save(cv.cr);
+        c.cairo_rectangle(
+            cv.cr,
+            @floatFromInt(clip_x),
+            @floatFromInt(clip_y),
+            @floatFromInt(clip_w),
+            @floatFromInt(clip_h),
+        );
+        c.cairo_clip(cv.cr);
+
+        c.cairo_set_source_surface(cv.cr, img.surface, @floatFromInt(x), @floatFromInt(y));
+        c.cairo_paint(cv.cr);
+
+        c.cairo_restore(cv.cr);
+    }
+
     /// Beveled frame: light on top/left, dark on bottom/right (NeXT
     /// "raised" look), matching wmaker-wl's own widget style.
     pub fn bevel(cv: *Canvas, x: i32, y: i32, w: i32, h: i32, light: Color, dark: Color) void {

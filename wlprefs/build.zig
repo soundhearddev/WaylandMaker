@@ -1,6 +1,5 @@
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
-
 // wlprefs: standalone settings-window skeleton for wmaker-wl.
 //
 // This is a plain Wayland client (xdg-shell), not a river-window-management

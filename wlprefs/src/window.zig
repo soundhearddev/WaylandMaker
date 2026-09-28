@@ -18,43 +18,30 @@
 //     WPrefs.banner's relief from WRFlat to WRGroove on first use);
 //     it shows a centered banner (title/version/status) until a
 //     section is picked, then that section's panel;
-//   * a row of raised command buttons along the bottom (y=350): Balloon
-//     Help (a toggle, unused here) on the left, Revert Page / Revert
-//     All / Save / Close on the right;
+//   * a row of raised command buttons along the bottom (y=350): status
+//     text on the left, Revert Page / Revert All / Save / Close on the right;
 //   * the window title becomes the selected section's name, exactly as
 //     WMSetWindowTitle(WPrefs.win, rec->sectionName) does.
-//
-// See root.zig's doc comment for what's real vs. stubbed: this is the
-// shell only, no section has actual controls yet.
-//
-// Deliberately NOT a river-window-management client: wlprefs is meant to
-// be an ordinary app that wmaker-wl manages like any other window, so it
-// only speaks wl_compositor / wl_shm / xdg_wm_base / wl_seat.
 
 const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const xkb = @import("xkbcommon");
 
 const gfx = @import("gfx.zig");
 const root = @import("root.zig");
 const panel_menu = @import("panel_menu.zig");
+const panels = @import("panels.zig");
+const settings = @import("settings.zig");
 const Category = root.Category;
 
 // ---- NeXTSTEP palette -------------------------------------------------------
-// The standard WINGs widget face colour (0xaeaeae, see WINGs/widgets.c
-// loadPixmaps()) plus pure black/white for text and relief edges. No
-// accent colour anywhere -- selection is shown by sinking a button, not
-// by tinting it.
 
 const widget_face = gfx.Color.rgb(0xaeaeae);
 const text_black = gfx.Color.rgb(0x000000);
 const text_dim = gfx.Color.rgb(0x505050);
 
-// "Sans" rather than upstream's literal "Helvetica"/"Lucida Sans" family
-// list -- wmaker-wl's own UI (src/ui.zig) uses the same Pango "Sans"
-// alias for the same reason: it always resolves to *something* sane via
-// fontconfig, where a hardcoded family name may not be installed at all.
 const font = "Sans 10";
 const font_bold_title = "Sans Bold 18";
 
@@ -70,11 +57,6 @@ const strip_h: i32 = 87;
 
 const icon_size: i32 = 64;
 
-// WINGs' fixed scroller thickness (WINGsP.h.in: `#define SCROLLER_WIDTH
-// 20`) -- the strip's WMScrollView has a horizontal WMScroller
-// (WMSetScrollViewHasHorizontalScroller(scrollV, True), arrows
-// WSANone: track + knob only, no arrow buttons) because
-// Category.all.len*64 = 1024px of icons don't fit the 500px-wide strip.
 const scroller_h: i32 = 20;
 const icon_viewport_h: i32 = strip_h - scroller_h;
 
@@ -86,24 +68,21 @@ const frame_height: i32 = 235; // FRAME_HEIGHT
 const button_y: i32 = 350;
 const button_h: i32 = 28;
 const balloon_x: i32 = 15;
-const balloon_w: i32 = 200;
 const revert_page_x: i32 = 135;
 const revert_all_x: i32 = 235;
 const save_x: i32 = 335;
 const close_x: i32 = 425;
-const cmd_button_w: i32 = 90; // Revert buttons; Save/Close are narrower below
+const cmd_button_w: i32 = 90;
 const save_close_w: i32 = 80;
 
 fn contentWidth() i32 {
     return @as(i32, @intCast(Category.all.len)) * icon_size;
 }
 
-/// Largest valid `scroll_x` (icons start 2px inside the strip).
 fn maxScroll() i32 {
     return @max(0, contentWidth() + 4 - strip_w);
 }
 
-/// Scroller knob geometry, shared by painting and hit-testing.
 const Thumb = struct {
     w: i32,
     fn x(th: Thumb, scroll_x: i32) i32 {
@@ -119,6 +98,52 @@ fn thumb() Thumb {
     return .{ .w = std.math.clamp(w, 20, strip_w - 4) };
 }
 
+// ---- small file helpers (libc, no std.Io needed) --------------------------
+fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+    const pz = try gpa.dupeZ(u8, path);
+    defer gpa.free(pz);
+    const f = std.c.fopen(pz.ptr, "rb") orelse return error.FileNotFound;
+    defer _ = std.c.fclose(f);
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.fread(&buf, 1, buf.len, f);
+        if (n == 0) break;
+        try list.appendSlice(gpa, buf[0..n]);
+        if (list.items.len > (1 << 20)) return error.FileTooBig;
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+/// Atomic: write `path.tmp` first, then rename -- a crash in the middle of
+/// saving leaves the old config.conf intact.
+fn writeFile(a: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    const tmp = try std.fmt.allocPrintSentinel(a, "{s}.tmp", .{path}, 0);
+    const dst = try a.dupeZ(u8, path);
+    const f = std.c.fopen(tmp.ptr, "wb") orelse return error.WriteFailed;
+    if (std.c.fwrite(data.ptr, 1, data.len, f) != data.len) {
+        _ = std.c.fclose(f);
+        return error.WriteFailed;
+    }
+    if (std.c.fclose(f) != 0) return error.WriteFailed;
+    if (std.c.rename(tmp.ptr, dst.ptr) != 0) return error.WriteFailed;
+}
+
+/// `mkdir -p` for a single directory (~/.config/wmaker-wl).
+fn mkdirP(dir: [:0]const u8) void {
+    var i: usize = 1;
+    while (i <= dir.len) : (i += 1) {
+        if (i == dir.len or dir[i] == '/') {
+            var tmp: [512]u8 = undefined;
+            if (i >= tmp.len) return;
+            @memcpy(tmp[0..i], dir[0..i]);
+            tmp[i] = 0;
+            _ = std.c.mkdir(@ptrCast(&tmp), 0o755);
+        }
+    }
+}
+
 pub const Window = struct {
     gpa: std.mem.Allocator,
 
@@ -128,53 +153,111 @@ pub const Window = struct {
     wm_base: ?*xdg.WmBase = null,
     seat: ?*wl.Seat = null,
 
-    // ---- pointer input --------------------------------------------------------
+    // ---- input --------------------------------------------------------------
     pointer: ?*wl.Pointer = null,
-    /// Last known pointer position in surface coordinates.
     px: i32 = 0,
     py: i32 = 0,
-    /// True while the scroller knob is being dragged; `drag_off` is the
-    /// grab offset inside the knob.
     dragging: bool = false,
     drag_off: i32 = 0,
 
-    // ---- this window ----------------------------------------------------------
+    keyboard: ?*wl.Keyboard = null,
+    xkb_ctx: ?*xkb.Context = null,
+    xkb_keymap: ?*xkb.Keymap = null,
+    xkb_state: ?*xkb.State = null,
+    focused_text: ?*settings.Text = null,
+
+    // ---- window state -------------------------------------------------------
     surface: ?*wl.Surface = null,
     xdg_surface: ?*xdg.Surface = null,
     toplevel: ?*xdg.Toplevel = null,
 
-    /// Set once the compositor has ack'd our first configure; only then
-    /// are we allowed to attach a buffer.
     configured: bool = false,
     closed: bool = false,
 
-    /// null = still showing the startup banner (WPrefs.currentPanel ==
-    /// NULL); once a tile is clicked this is set and never goes back,
-    /// same as upstream.
     selected: ?Category = null,
-    /// Horizontal scroll offset of the icon strip, for when there are
-    /// more icons than fit in strip_w (WPrefs' WMScrollView). Nothing
-    /// sets this yet -- dragging the scroller thumb needs wl_pointer
-    /// handling, which main.zig doesn't wire up yet -- but the strip
-    /// and its scroller already draw correctly for any value.
     scroll_x: i32 = 0,
 
-    /// Decoded section icons, one per `Category`, loaded once in
-    /// `create()`. `undefined` until `icons_loaded`.
     icons: [Category.all.len]gfx.Image = undefined,
     icons_loaded: bool = false,
 
-    /// Images + example state for the "Menu Preferences" demo panel
-    /// (panel_menu.zig). Loaded together with the section icons.
     menu_imgs: panel_menu.Images = undefined,
     menu_state: panel_menu.State = .{},
+
+    // ---- settings -----------------------------------------------------------
+    cur: settings.Settings = settings.Settings.init(),
+    saved: settings.Settings = settings.Settings.init(),
+    original: std.ArrayList(u8) = .empty,
+    page_snapshot: settings.Settings = settings.Settings.init(),
+    status: [64:0]u8 = [_:0]u8{0} ** 64,
 
     pub fn init(gpa: std.mem.Allocator) Window {
         return .{ .gpa = gpa };
     }
 
-    // ---- wl_registry --------------------------------------------------------
+    // ---- load / save config.conf -------------------------------------
+    fn setStatus(win: *Window, msg: []const u8) void {
+        const n = @min(msg.len, win.status.len - 1);
+        @memcpy(win.status[0..n], msg[0..n]);
+        win.status[n] = 0;
+    }
 
+    pub fn loadSettings(win: *Window) void {
+        var arena = std.heap.ArenaAllocator.init(win.gpa);
+        defer arena.deinit();
+        const path = (root.configPath(arena.allocator()) catch null) orelse return;
+        var st = settings.Settings.init();
+        win.original.clearRetainingCapacity();
+        if (readFile(win.gpa, path)) |text| {
+            defer win.gpa.free(text);
+            win.original.appendSlice(win.gpa, text) catch {};
+            settings.parse(&st, text);
+        } else |_| {}
+        win.cur = st;
+        win.saved = st;
+        win.page_snapshot = st;
+    }
+
+    fn dirty(win: *const Window) bool {
+        var a: [64]u8 = undefined;
+        var b: [64]u8 = undefined;
+        for (settings.keys) |k| {
+            const x = settings.format(&win.cur, k, &a);
+            const y = settings.format(&win.saved, k, &b);
+            if ((x == null) != (y == null)) return true;
+            if (x != null and !std.mem.eql(u8, x.?, y.?)) return true;
+        }
+        return false;
+    }
+
+    fn save(win: *Window) void {
+        var arena = std.heap.ArenaAllocator.init(win.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const path = (root.configPath(a) catch null) orelse {
+            win.setStatus("No HOME/XDG_CONFIG_HOME");
+            return;
+        };
+        const out = settings.render(a, win.original.items, &win.cur, &win.saved) catch {
+            win.setStatus("Save failed (memory)");
+            return;
+        };
+        if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| {
+            const dir_z = a.dupeZ(u8, path[0..i]) catch return;
+            mkdirP(dir_z);
+        }
+        writeFile(a, path, out) catch {
+            win.setStatus("Save failed (write permissions?)");
+            return;
+        };
+        win.original.clearRetainingCapacity();
+        win.original.appendSlice(win.gpa, out) catch {};
+        win.saved = win.cur;
+        win.page_snapshot = win.cur;
+        settings.signalReload();
+        win.setStatus("Saved, compositor reloaded");
+    }
+
+    // ---- wl_registry --------------------------------------------------------
     pub fn registryListener(reg: *wl.Registry, ev: wl.Registry.Event, win: *Window) void {
         switch (ev) {
             .global => |g| {
@@ -187,7 +270,6 @@ pub const Window = struct {
                 } else if (std.mem.orderZ(u8, g.interface, wl.Seat.interface.name) == .eq) {
                     const seat = reg.bind(g.name, wl.Seat, 7) catch return;
                     win.seat = seat;
-                    // Set right away: `capabilities` is sent on bind.
                     seat.setListener(*Window, seatListener, win);
                 }
             },
@@ -195,8 +277,7 @@ pub const Window = struct {
         }
     }
 
-    // ---- wl_seat / wl_pointer -------------------------------------------------
-
+    // ---- wl_seat & Listeners ------------------------------------------------
     fn seatListener(seat: *wl.Seat, ev: wl.Seat.Event, win: *Window) void {
         switch (ev) {
             .capabilities => |c| {
@@ -205,6 +286,59 @@ pub const Window = struct {
                     win.pointer = ptr;
                     ptr.setListener(*Window, pointerListener, win);
                 }
+                if (c.capabilities.keyboard and win.keyboard == null) {
+                    const kb = seat.getKeyboard() catch return;
+                    win.keyboard = kb;
+                    kb.setListener(*Window, keyboardListener, win);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn keyboardListener(_: *wl.Keyboard, ev: wl.Keyboard.Event, win: *Window) void {
+        switch (ev) {
+            .keymap => |k| {
+                defer _ = std.os.linux.close(k.fd);
+                if (k.format != .xkb_v1) return;
+                const map = std.posix.mmap(null, k.size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, k.fd, 0) catch return;
+                defer std.posix.munmap(map);
+                const ctx = win.xkb_ctx orelse blk: {
+                    const c = xkb.Context.new(.no_flags) orelse return;
+                    win.xkb_ctx = c;
+                    break :blk c;
+                };
+                const km = xkb.Keymap.newFromBuffer(ctx, map.ptr, k.size - 1, .text_v1, .no_flags) orelse return;
+                const st = xkb.State.new(km) orelse {
+                    km.unref();
+                    return;
+                };
+                if (win.xkb_state) |s| s.unref();
+                if (win.xkb_keymap) |m| m.unref();
+                win.xkb_keymap = km;
+                win.xkb_state = st;
+            },
+            .modifiers => |m| {
+                if (win.xkb_state) |s| _ = s.updateMask(m.mods_depressed, m.mods_latched, m.mods_locked, 0, 0, m.group);
+            },
+            .key => |k| {
+                if (k.state != .pressed) return;
+                const t = win.focused_text orelse return;
+                const st = win.xkb_state orelse return;
+                const code: u32 = @as(u32, k.key) + 8; // evdev -> xkb
+                const sym = st.keyGetOneSym(code);
+                switch (sym) {
+                    .BackSpace => t.backspace(),
+                    .Return, .KP_Enter, .Escape => win.focused_text = null,
+                    else => {
+                        var buf: [8]u8 = undefined;
+                        const n = st.keyGetUtf8(code, &buf);
+                        if (n != 1) return;
+                        if (buf[0] < 0x20 or buf[0] == 0x7f) return;
+                        t.append(buf[0]);
+                    },
+                }
+                win.redraw();
             },
             else => {},
         }
@@ -223,7 +357,7 @@ pub const Window = struct {
                 if (win.dragging) win.dragScroller();
             },
             .button => |b| {
-                const btn_left = 0x110; // BTN_LEFT
+                const btn_left = 0x110;
                 if (b.button != btn_left) return;
                 if (b.state == .pressed) {
                     win.onPress();
@@ -231,7 +365,6 @@ pub const Window = struct {
                     win.dragging = false;
                 }
             },
-            // Mouse wheel over the icon strip scrolls it, like WMScrollView.
             .axis => |a| {
                 if (win.py < strip_y or win.py >= strip_y + strip_h) return;
                 if (win.px < strip_x or win.px >= strip_x + strip_w) return;
@@ -239,6 +372,43 @@ pub const Window = struct {
             },
             else => {},
         }
+    }
+
+    fn panelClick(win: *Window, cat: Category, x: i32, y: i32) void {
+        var ctx: panels.Ctx = .{ .mode = .click, .cx = x, .cy = y, .focused = win.focused_text };
+        if (!win.runPanel(cat, &ctx)) return;
+        win.focused_text = ctx.res.focus;
+        if (ctx.res.changed or ctx.res.focus != null) {
+            win.status[0] = 0;
+            win.redraw();
+        } else if (win.focused_text != null) {
+            win.focused_text = null;
+            win.redraw();
+        }
+    }
+
+    fn runPanel(win: *Window, cat: Category, ctx: *panels.Ctx) bool {
+        const ox = frame_left + 2;
+        const oy = frame_top + 2;
+        switch (cat) {
+            .focus => panels.focus(ctx, ox, oy, &win.cur),
+            .window_handling => panels.windowHandling(ctx, ox, oy, &win.cur),
+            .workspace => panels.workspace(ctx, ox, oy, &win.cur),
+            .appearance => panels.appearance(ctx, ox, oy, &win.cur),
+            .mouse_settings => panels.mouse(ctx, ox, oy, &win.cur),
+            .ergonomic => panels.ergonomic(ctx, ox, oy, &win.cur),
+            .docks => panels.docks(ctx, ox, oy, &win.cur),
+            else => return false,
+        }
+        return true;
+    }
+
+    fn dragScroller(win: *Window) void {
+        const th = thumb();
+        const track = strip_w - 4 - th.w;
+        if (track <= 0) return;
+        const rel = win.px - win.drag_off - (strip_x + 2);
+        win.setScroll(@divTrunc(rel * maxScroll(), track));
     }
 
     fn redraw(win: *Window) void {
@@ -252,12 +422,11 @@ pub const Window = struct {
         win.redraw();
     }
 
-    /// Left button pressed at (px, py): icon strip, scroller, buttons.
     fn onPress(win: *Window) void {
         const x = win.px;
         const y = win.py;
 
-        // Scroller track (bottom 20px of the strip).
+        // Scroller track
         if (x >= strip_x and x < strip_x + strip_w and
             y >= strip_y + icon_viewport_h and y < strip_y + strip_h)
         {
@@ -274,38 +443,66 @@ pub const Window = struct {
             return;
         }
 
-        // Section icons.
+        // Section icons
         if (win.handleClick(x, y)) {
             if (win.selected) |cat| {
                 if (win.toplevel) |t| t.setTitle(cat.label());
             }
+            win.focused_text = null;
+            win.page_snapshot = win.cur;
             win.redraw();
             return;
         }
 
-        // Close button.
-        if (x >= close_x and x < close_x + save_close_w and y >= button_y and y < button_y + button_h) {
-            win.closed = true;
+        // Panel-Controls
+        if (win.selected) |cat| {
+            if (x >= frame_left and x < frame_left + frame_width and y >= frame_top and y < frame_top + frame_height) {
+                win.panelClick(cat, x, y);
+                return;
+            }
+        }
+
+        // Button bar
+        if (y >= button_y and y < button_y + button_h) {
+            if (x >= close_x and x < close_x + save_close_w) {
+                win.closed = true;
+            } else if (x >= save_x and x < save_x + save_close_w) {
+                if (win.selected != null) {
+                    win.save();
+                    win.redraw();
+                }
+            } else if (x >= revert_all_x and x < revert_all_x + cmd_button_w) {
+                win.cur = win.saved;
+                win.focused_text = null;
+                win.setStatus("Reverted all");
+                win.redraw();
+            } else if (x >= revert_page_x and x < revert_page_x + cmd_button_w) {
+                win.cur = win.page_snapshot;
+                win.focused_text = null;
+                win.setStatus("Reverted page");
+                win.redraw();
+            }
         }
     }
 
-    fn dragScroller(win: *Window) void {
-        const th = thumb();
-        const track = strip_w - 4 - th.w;
-        if (track <= 0) return;
-        const rel = win.px - win.drag_off - (strip_x + 2);
-        win.setScroll(@divTrunc(rel * maxScroll(), track));
+    fn handleClick(win: *Window, x: i32, y: i32) bool {
+        if (y < strip_y or y >= strip_y + icon_viewport_h) return false;
+        if (x < strip_x + 2 or x >= strip_x + strip_w - 2) return false;
+        const rel_x = x - (strip_x + 2) + win.scroll_x;
+        const index = @divTrunc(rel_x, icon_size);
+        if (index < 0 or index >= Category.all.len) return false;
+        const cat = Category.all[@intCast(index)];
+        if (win.selected == cat) return false;
+        win.selected = cat;
+        return true;
     }
 
-    // ---- xdg_wm_base --------------------------------------------------------
-
+    // ---- xdg_wm_base / xdg_surface / xdg_toplevel ---------------------------
     pub fn wmBaseListener(base: *xdg.WmBase, ev: xdg.WmBase.Event, _: *Window) void {
         switch (ev) {
             .ping => |p| base.pong(p.serial),
         }
     }
-
-    // ---- xdg_surface --------------------------------------------------------
 
     pub fn xdgSurfaceListener(surf: *xdg.Surface, ev: xdg.Surface.Event, win: *Window) void {
         switch (ev) {
@@ -319,20 +516,13 @@ pub const Window = struct {
         }
     }
 
-    // ---- xdg_toplevel ---------------------------------------------------------
-
     pub fn toplevelListener(_: *xdg.Toplevel, ev: xdg.Toplevel.Event, win: *Window) void {
         switch (ev) {
-            // WPrefs pins min size == max size == its fixed 520x390; we
-            // do the same; compositor-proposed sizes are ignored.
             .configure => {},
             .close => win.closed = true,
         }
     }
 
-    /// Create the surface/xdg_surface/xdg_toplevel triple and map the
-    /// window. Call once globals have been bound (after the first
-    /// registry roundtrip).
     pub fn create(win: *Window) !void {
         const compositor = win.compositor orelse return error.MissingGlobal;
         const wm_base = win.wm_base orelse return error.MissingGlobal;
@@ -358,9 +548,6 @@ pub const Window = struct {
         surface.commit();
     }
 
-    /// Decode every section icon once at startup. Cheap: 16 small PNGs,
-    /// a few KB total. See `Category.icon()` in root.zig for what gets
-    /// embedded and why.
     fn loadIcons(win: *Window) !void {
         for (Category.all, 0..) |cat, i| {
             win.icons[i] = try gfx.Image.fromPngBytes(cat.icon());
@@ -374,17 +561,16 @@ pub const Window = struct {
             for (&win.icons) |*img| img.deinit();
             win.menu_imgs.deinit();
         }
+        win.original.deinit(win.gpa);
+        if (win.xkb_state) |s| s.unref();
+        if (win.xkb_keymap) |m| m.unref();
+        if (win.xkb_ctx) |c| c.unref();
         if (win.toplevel) |t| t.destroy();
         if (win.xdg_surface) |s| s.destroy();
         if (win.surface) |s| s.destroy();
     }
 
     // ---- drawing --------------------------------------------------------------
-
-    /// Render the current frame into a freshly-allocated wl_shm buffer and
-    /// attach it. A fresh buffer per frame keeps this skeleton simple;
-    /// double-buffering with a reused pool is future work once real
-    /// controls make redraw frequency matter.
     fn draw(win: *Window) !void {
         if (!win.configured) return;
         const shm = win.shm orelse return error.MissingGlobal;
@@ -411,191 +597,119 @@ pub const Window = struct {
         );
         defer std.posix.munmap(data);
 
-        var canvas = try gfx.Canvas.initForData(data.ptr, win_width, win_height, stride);
-        defer canvas.deinit();
+        var cv = try gfx.Canvas.initForData(data.ptr, win_width, win_height, stride);
+        defer cv.deinit();
 
-        win.paint(&canvas);
-        canvas.flush();
+        cv.clear(widget_face);
+
+        paintStrip(&cv, win);
+        paintFrame(&cv, win);
+        paintButtons(&cv, win);
 
         const pool = try shm.createPool(fd, @intCast(size));
         defer pool.destroy();
 
-        const buffer = try pool.createBuffer(0, win_width, win_height, stride, .argb8888);
-        defer buffer.destroy();
+        const buf = try pool.createBuffer(
+            0,
+            win_width,
+            win_height,
+            stride,
+            .argb8888,
+        );
+        defer buf.destroy();
 
-        surface.attach(buffer, 0, 0);
+        surface.attach(buf, 0, 0);
         surface.damageBuffer(0, 0, win_width, win_height);
         surface.commit();
     }
 
-    fn paint(win: *Window, cv: *gfx.Canvas) void {
-        cv.clear(widget_face);
-
-        win.paintIconStrip(cv);
-
-        if (win.selected) |cat| {
-            win.paintPanel(cv, cat);
-        } else {
-            win.paintBanner(cv);
-        }
-
-        win.paintButtonBar(cv);
-    }
-
-    /// The scrollable strip of 64x64 section icons (WPrefs.scrollV /
-    /// WPrefs.buttonF). Sunken frame; each tile is a raised button that
-    /// sinks (.pushed) when it is the selected section, exactly like a
-    /// WINGs WMCustomButton with WBBStateLightMask does when "on"; the
-    /// icon itself is the real WPrefs artwork (see `Category.icon()`),
-    /// centered in the tile the same way WIPImageOnly does.
-    fn paintIconStrip(win: *Window, cv: *gfx.Canvas) void {
-        cv.fillRect(strip_x, strip_y, strip_w, strip_h, widget_face);
+    fn paintStrip(cv: *gfx.Canvas, win: *Window) void {
         cv.relief(strip_x, strip_y, strip_w, strip_h, .sunken);
 
-        // Icons sit vertically centered in the viewport above the
-        // scroller, flush left, one after another -- WMMoveWidget(bPtr,
-        // count*64, 0).
-        const icon_y = strip_y + @divTrunc(icon_viewport_h - icon_size, 2);
+        const clip_x = strip_x + 2;
+        const clip_y = strip_y + 2;
+        const clip_w = strip_w - 4;
+        const clip_h = icon_viewport_h - 2;
 
         for (Category.all, 0..) |cat, i| {
-            const icon_x = strip_x + 2 + @as(i32, @intCast(i)) * icon_size - win.scroll_x;
-            if (icon_x + icon_size < strip_x or icon_x > strip_x + strip_w) continue;
+            const ix = clip_x + @as(i32, @intCast(i)) * icon_size - win.scroll_x;
+            if (ix + icon_size <= clip_x or ix >= clip_x + clip_w) continue;
 
-            const pushed = win.selected != null and win.selected.? == cat;
-            cv.fillRect(icon_x, icon_y, icon_size, icon_size, widget_face);
-            cv.relief(icon_x, icon_y, icon_size, icon_size, if (pushed) .pushed else .raised);
+            const is_sel = (win.selected == cat);
+            gfx.c.cairo_save(cv.cr);
+            gfx.c.cairo_rectangle(cv.cr, @floatFromInt(clip_x), @floatFromInt(clip_y), @floatFromInt(clip_w), @floatFromInt(clip_h));
+            gfx.c.cairo_clip(cv.cr);
 
-            const img = win.icons[i];
-            cv.drawImage(
-                img,
-                icon_x + @divTrunc(icon_size - img.width, 2),
-                icon_y + @divTrunc(icon_size - img.height, 2),
-            );
+            cv.relief(ix, clip_y, icon_size, icon_size, if (is_sel) .sunken else .raised);
+
+            gfx.c.cairo_restore(cv.cr);
+            if (win.icons_loaded) {
+                const off: i32 = if (is_sel) 1 else 0;
+                cv.drawImageClipped(&win.icons[i], ix + 8 + off, clip_y + 8 + off, clip_x, clip_y, clip_w, clip_h);
+            }
         }
 
-        win.paintScroller(cv);
-    }
-
-    /// The strip's horizontal scroller. Visual only for now: dragging
-    /// the knob needs wl_pointer handling that main.zig doesn't set up
-    /// yet, same caveat as `scroll_x` above -- but it draws correctly
-    /// (and reflects `scroll_x`, if that's ever set) either way.
-    fn paintScroller(win: *Window, cv: *gfx.Canvas) void {
-        const track_y = strip_y + icon_viewport_h;
-        const track_h = strip_h - icon_viewport_h;
-        cv.fillRect(strip_x, track_y, strip_w, track_h, widget_face);
-        cv.relief(strip_x, track_y, strip_w, track_h, .sunken);
+        const sy = strip_y + icon_viewport_h;
+        cv.fillRect(strip_x + 2, sy, strip_w - 4, scroller_h - 2, widget_face);
+        cv.relief(strip_x + 1, sy - 1, strip_w - 2, scroller_h, .sunken);
 
         const th = thumb();
-        const thumb_x = th.x(win.scroll_x);
-        const thumb_w = th.w;
-
-        cv.fillRect(thumb_x, track_y + 2, thumb_w, track_h - 4, widget_face);
-        cv.relief(thumb_x, track_y + 2, thumb_w, track_h - 4, .raised);
+        const tx = th.x(win.scroll_x);
+        cv.relief(tx, sy + 1, th.w, scroller_h - 4, .raised);
     }
 
-    /// Startup banner shown until a section is picked -- WPrefs.banner
-    /// with nameL/versionL/statusL, flat relief, before changeSection()
-    /// ever runs.
-    fn paintBanner(win: *Window, cv: *gfx.Canvas) void {
-        const x = frame_left;
-        const y = frame_top;
-        cv.fillRect(x, y, frame_width, frame_height, widget_face);
-        // WRFlat: no relief drawn at all, matching WMSetFrameRelief(banner, WRFlat).
-        _ = win;
-
-        const cx = x + @divTrunc(frame_width, 2);
-        cv.drawTextCentered("Window Maker Preferences", cx, y + 60, font_bold_title, text_black);
-        cv.drawTextCentered("wlprefs 0.1.0", cx, y + 130, font, text_dim);
-        cv.drawTextCentered("Select a section above to begin.", cx, y + 160, font, text_dim);
+    fn paintFrame(cv: *gfx.Canvas, win: *Window) void {
+        if (win.selected == null) {
+            cv.relief(frame_left, frame_top, frame_width, frame_height, .sunken);
+            paintBanner(cv);
+        } else {
+            cv.relief(frame_left, frame_top, frame_width, frame_height, .groove);
+            if (win.selected) |cat| paintPanel(cv, win, cat);
+        }
     }
 
-    /// A section's content panel. WPrefs.banner switches to WRGroove
-    /// once the first section is picked (changeSection()); no per-
-    /// setting widgets exist yet, so this shows the section title, its
-    /// real upstream description (`panel->description` -- shown as
-    /// balloon-help over the icon there; wlprefs has no balloon-help
-    /// widget yet, so it's printed here instead of lost entirely), and
-    /// a placeholder line at the position real controls will use.
-    fn paintPanel(win: *Window, cv: *gfx.Canvas, cat: Category) void {
-        const x = frame_left;
-        const y = frame_top;
-        cv.fillRect(x, y, frame_width, frame_height, widget_face);
-        cv.relief(x, y, frame_width, frame_height, .groove);
+    fn paintBanner(cv: *gfx.Canvas) void {
+        const title = "Window Maker Preferences";
+        const ver = "Version " ++ root.version_string;
+        const status = "Select a section icon above to begin.";
 
-        // Sections that already have a (demo) layout draw it at the
-        // panel-box origin, frame + 2px, exactly like upstream's
-        // WMSetViewExpandsToParent(box, 2, 2, 2, 2).
-        switch (cat) {
-            .menu_preferences => {
-                panel_menu.paint(cv, x + 2, y + 2, win.menu_state, &win.menu_imgs);
-                return;
-            },
-            else => {},
+        cv.drawText(title, frame_left + 140, frame_top + 65, font_bold_title, text_black);
+        cv.drawText(ver, frame_left + 220, frame_top + 105, font, text_black);
+        cv.drawText(status, frame_left + 150, frame_top + 145, font, text_black);
+    }
+
+    fn paintPanel(cv: *gfx.Canvas, win: *Window, cat: Category) void {
+        const x = frame_left + 2;
+        const y = frame_top + 2;
+
+        if (cat == .menu_preferences) {
+            panel_menu.paint(cv, x + 2, y + 2, win.menu_state, &win.menu_imgs);
+            return;
         }
 
-        cv.drawText(cat.label(), x + 14, y + 12, font_bold_title, text_black);
-        cv.strokeLine(x + 14, y + 40, x + frame_width - 14, y + 40, 1, gfx.Color.rgb(0x707070));
-        cv.drawText(cat.description(), x + 14, y + 56, font, text_dim);
-        cv.drawText(
-            "(this section has no controls yet -- placeholder panel)",
-            x + 14,
-            y + frame_height - 30,
-            font,
-            text_dim,
-        );
+        var ctx: panels.Ctx = .{ .mode = .paint, .cv = cv, .focused = win.focused_text };
+        if (win.runPanel(cat, &ctx)) return;
+
+        const placeholder = "(no Wayland equivalent or not yet implemented in compositor -- see docs/WMPREFS.md §4)";
+        cv.drawText(placeholder, x + 30, y + 100, font, text_black);
     }
 
-    /// Bottom command-button row -- WPrefs.balloonBtn / undosBtn /
-    /// undoBtn / saveBtn / closeBtn, all at y=350. The revert buttons
-    /// stay hidden until a section is dirty in upstream; here (no real
-    /// settings yet) they are simply drawn disabled-looking (dim label)
-    /// since there is nothing to revert.
-    fn paintButtonBar(win: *Window, cv: *gfx.Canvas) void {
-        drawToggle(cv, balloon_x, button_y, balloon_w, button_h, "Balloon Help", false);
-
-        drawButton(cv, revert_page_x, button_y, cmd_button_w, button_h, "Revert Page", true);
-        drawButton(cv, revert_all_x, button_y, cmd_button_w, button_h, "Revert All", true);
-        drawButton(cv, save_x, button_y, save_close_w, button_h, "Save", win.selected != null);
+    fn paintButtons(cv: *gfx.Canvas, win: *Window) void {
+        drawButton(cv, revert_page_x, button_y, cmd_button_w, button_h, "Revert Page", win.selected != null);
+        drawButton(cv, revert_all_x, button_y, cmd_button_w, button_h, "Revert All", win.selected != null);
+        drawButton(cv, save_x, button_y, save_close_w, button_h, "Save", win.selected != null and win.dirty());
         drawButton(cv, close_x, button_y, save_close_w, button_h, "Close", true);
+
+        if (win.status[0] != 0) {
+            cv.drawText(&win.status, balloon_x, button_y + @divTrunc(button_h, 2) - 5, font, text_dim);
+        }
     }
 
     fn drawButton(cv: *gfx.Canvas, x: i32, y: i32, w: i32, h: i32, label: [:0]const u8, enabled: bool) void {
-        cv.fillRect(x, y, w, h, widget_face);
         cv.relief(x, y, w, h, .raised);
-        const cx = x + @divTrunc(w, 2);
-        const cy = y + @divTrunc(h, 2) - 5;
-        cv.drawTextCentered(label, cx, cy, font, if (enabled) text_black else text_dim);
-    }
-
-    fn drawToggle(cv: *gfx.Canvas, x: i32, y: i32, w: i32, h: i32, label: [:0]const u8, on: bool) void {
-        _ = w; // Signalisiert dem Compiler, dass 'w' vorsätzlich nicht genutzt wird
-
-        const box_size = 14;
-        const box_y = y + @divTrunc(h - box_size, 2);
-        cv.fillRect(x, box_y, box_size, box_size, widget_face);
-        cv.relief(x, box_y, box_size, box_size, .sunken);
-        if (on) cv.fillRect(x + 3, box_y + 3, box_size - 6, box_size - 6, text_black);
-
-        cv.drawText(label, x + box_size + 8, y + @divTrunc(h, 2) - 5, font, text_black);
-    }
-
-    /// Hit-test the icon strip and update selection. Returns true if the
-    /// selection changed (caller should redraw and update the window
-    /// title, exactly as WMSetWindowTitle(win, sectionName) does).
-    pub fn handleClick(win: *Window, x: i32, y: i32) bool {
-        if (y < strip_y or y >= strip_y + icon_viewport_h) return false;
-        const icon_y = strip_y + @divTrunc(icon_viewport_h - icon_size, 2);
-        if (y < icon_y or y >= icon_y + icon_size) return false;
-
-        for (Category.all, 0..) |cat, i| {
-            const icon_x = strip_x + 2 + @as(i32, @intCast(i)) * icon_size - win.scroll_x;
-            if (x >= icon_x and x < icon_x + icon_size) {
-                if (win.selected != null and win.selected.? == cat) return false;
-                win.selected = cat;
-                return true;
-            }
-        }
-        return false;
+        const text_col = if (enabled) text_black else text_dim;
+        const tx = x + @divTrunc(w - @as(i32, @intCast(label.len * 7)), 2);
+        const ty = y + @divTrunc(h, 2) - 5;
+        cv.drawText(label, tx, ty, font, text_col);
     }
 };
