@@ -36,6 +36,7 @@ const wayland = @import("wayland");
 const config = @import("config.zig");
 const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
+const dockapp = @import("dockapp.zig");
 const river = wayland.client.river;
 const wl = wayland.client.wl;
 
@@ -128,6 +129,10 @@ pub const Window = struct {
     /// output's top-left). Remembered across tiled<->floating toggles.
     float_rect: Rect = .{},
     has_float_rect: bool = false,
+    /// A fixed-size DockApp window sitting in its Dock tile (ui.zig's
+    /// placeDocked sets this every manage pass and also owns `float_rect`
+    /// while it is true). Docked windows are raised above the Dock itself.
+    docked: bool = false,
 
     /// Content rect (borders excluded) currently *wanted* on screen in
     /// global coordinates. Computed by layout every pass.
@@ -279,6 +284,9 @@ pub const Output = struct {
     rect: Rect = .{},
     /// Area not covered by layer-shell exclusive zones (bars, docks).
     usable: ?Rect = null,
+    /// Space taken by wmaker-wl's own Dock (ui.zig keeps this current).
+    /// Subtracted from the area windows may occupy, see `workArea`.
+    reserved: Insets = .{},
 
     workspaces: [config.max_workspaces]Workspace = undefined,
     workspace_count: u32 = 0,
@@ -292,10 +300,25 @@ pub const Output = struct {
         return o.rect.w > 0 and o.rect.h > 0;
     }
 
-    /// Rectangle windows may occupy.
+    /// Rectangle windows may occupy: the area left by layer-shell bars,
+    /// minus whatever our own Dock reserves.
     pub fn workArea(o: *const Output) Rect {
-        return o.usable orelse o.rect;
+        const base = o.usable orelse o.rect;
+        const r = o.reserved;
+        return .{
+            .x = base.x + r.left,
+            .y = base.y + r.top,
+            .w = @max(1, base.w - r.left - r.right),
+            .h = @max(1, base.h - r.top - r.bottom),
+        };
     }
+
+    pub const Insets = struct {
+        left: i32 = 0,
+        right: i32 = 0,
+        top: i32 = 0,
+        bottom: i32 = 0,
+    };
 };
 
 // ============================================================================
@@ -401,6 +424,11 @@ pub const WindowManager = struct {
     attrs: wm_attr.Table = .{},
     /// The root menu (Window Maker WMRootMenu / wlmaker RootMenu.plist).
     root_menu: ?*const wm_menu.Menu = null,
+    /// Dock and Clip contents (dockapps.conf / WMState), owned by cfg's
+    /// arena exactly like `root_menu`. ui.zig deep-copies what it needs,
+    /// and rebuilds when `dock_gen` changes (every (re)load bumps it).
+    dockapps: dockapp.List = .{},
+    dock_gen: u32 = 0,
 
     /// Actions queued by key presses. `pressed` fires *outside* a manage
     /// sequence, but almost every request an action needs is only legal

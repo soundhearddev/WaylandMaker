@@ -30,4 +30,8 @@ zig build test
 river -c ./zig-out/bin/wmaker-wl
 ```
 
+Window Maker's **Dock** (a column of 64 px tiles on a screen edge) and **Clip** (workspace tile with arrows,
+plus per-workspace launchers) are built in; configure them with the `dock_*` / `clip_*` options in
+`config.conf` and the entries in `~/.config/wmaker-wl/dockapps.conf` (or an existing `WMState`).
+
 See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how to define DockApps (`~/.config/wmaker-wl/dockapps.conf`).

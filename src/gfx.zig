@@ -97,6 +97,83 @@ pub const Canvas = struct {
     pub fn flush(cv: *Canvas) void {
         c.cairo_surface_flush(cv.surface);
     }
+
+    /// Diagonal gradient, top-left to bottom-right (Window Maker tiles).
+    pub fn dGradient(cv: *Canvas, x: i32, y: i32, w: i32, h: i32, from: Color, to: Color) void {
+        const pat = c.cairo_pattern_create_linear(
+            @floatFromInt(x),
+            @floatFromInt(y),
+            @floatFromInt(x + w),
+            @floatFromInt(y + h),
+        ) orelse return;
+        defer c.cairo_pattern_destroy(pat);
+        c.cairo_pattern_add_color_stop_rgba(pat, 0, from.r, from.g, from.b, from.a);
+        c.cairo_pattern_add_color_stop_rgba(pat, 1, to.r, to.g, to.b, to.a);
+        c.cairo_set_source(cv.cr, pat);
+        c.cairo_rectangle(cv.cr, @floatFromInt(x), @floatFromInt(y), @floatFromInt(w), @floatFromInt(h));
+        c.cairo_fill(cv.cr);
+    }
+
+    /// Filled polygon through `points` (at least 3).
+    pub fn fillPolygon(cv: *Canvas, points: []const [2]f64, col: Color) void {
+        if (points.len < 3) return;
+        cv.setColor(col);
+        c.cairo_move_to(cv.cr, points[0][0], points[0][1]);
+        for (points[1..]) |pt| c.cairo_line_to(cv.cr, pt[0], pt[1]);
+        c.cairo_close_path(cv.cr);
+        c.cairo_fill(cv.cr);
+    }
+
+    /// Draw `icon` scaled to fit a `size` x `size` box at (x, y), keeping
+    /// its aspect ratio and centring it in the box.
+    pub fn drawIcon(cv: *Canvas, icon: Icon, x: i32, y: i32, size: i32) void {
+        const fs: f64 = @floatFromInt(size);
+        const sx = fs / @as(f64, @floatFromInt(icon.w));
+        const sy = fs / @as(f64, @floatFromInt(icon.h));
+        const scale = @min(sx, sy);
+        const dw = @as(f64, @floatFromInt(icon.w)) * scale;
+        const dh = @as(f64, @floatFromInt(icon.h)) * scale;
+        c.cairo_save(cv.cr);
+        c.cairo_translate(
+            cv.cr,
+            @as(f64, @floatFromInt(x)) + (fs - dw) / 2,
+            @as(f64, @floatFromInt(y)) + (fs - dh) / 2,
+        );
+        c.cairo_scale(cv.cr, scale, scale);
+        c.cairo_set_source_surface(cv.cr, icon.surface, 0, 0);
+        c.cairo_paint(cv.cr);
+        c.cairo_restore(cv.cr);
+    }
+};
+
+/// A PNG loaded through cairo (Dock/Clip tile icons).
+pub const Icon = struct {
+    surface: *c.cairo_surface_t,
+    w: i32,
+    h: i32,
+
+    /// Largest side we accept; a bigger "icon" is a mistake or an attack.
+    pub const max_side: i32 = 2048;
+
+    /// null if the file is missing, not a PNG, or absurdly large.
+    pub fn loadPng(path: [:0]const u8) ?Icon {
+        const s = c.cairo_image_surface_create_from_png(path.ptr) orelse return null;
+        if (c.cairo_surface_status(s) != c.CAIRO_STATUS_SUCCESS) {
+            c.cairo_surface_destroy(s);
+            return null;
+        }
+        const w: i32 = c.cairo_image_surface_get_width(s);
+        const h: i32 = c.cairo_image_surface_get_height(s);
+        if (w <= 0 or h <= 0 or w > max_side or h > max_side) {
+            c.cairo_surface_destroy(s);
+            return null;
+        }
+        return .{ .surface = s, .w = w, .h = h };
+    }
+
+    pub fn deinit(i: *Icon) void {
+        c.cairo_surface_destroy(i.surface);
+    }
 };
 
 pub const Rect = struct {

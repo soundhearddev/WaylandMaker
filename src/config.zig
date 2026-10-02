@@ -50,6 +50,12 @@ pub const NewWindowMode = enum {
     stack,
 };
 
+/// Which screen edge the Dock (Window Maker's WMDock) sits on.
+pub const DockEdge = enum { left, right };
+
+/// Which screen corner the Clip (Window Maker's WMClip) sits in.
+pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
+
 /// Hard upper bound; Output holds workspaces in a fixed array.
 pub const max_workspaces = 16;
 
@@ -106,6 +112,32 @@ pub const Config = struct {
     /// ~/GNUstep/Library/WindowMaker/autostart when enable_wmaker_compat
     /// allows it. Neither needs to exist; a missing script is a no-op.
     enable_autostart: bool = true,
+
+    // ---- Dock and Clip (see dock.zig) -------------------------------------------
+    /// Draw the Dock: a column of 64 px tiles on one screen edge. Its first
+    /// tile is the Window Maker logo tile, the others are the DockApps of
+    /// dockapps.conf / WMState that have `place = dock` (the default).
+    dock_enabled: bool = true,
+    dock_edge: DockEdge = .right,
+    /// Distance of the Dock's top edge from the top of the screen, in px.
+    dock_offset: i32 = 0,
+    /// true: the Dock is drawn above windows (Window Maker's "Keep on top");
+    /// false: below them ("Lowered").
+    dock_on_top: bool = true,
+    /// Shrink the usable area by the Dock's width so tiled windows never end
+    /// up under it. Ignored while the Dock is lowered.
+    dock_reserve_space: bool = true,
+    /// Draw the Clip: one tile with workspace arrows plus the DockApps whose
+    /// `place = clip` belongs to the current workspace.
+    clip_enabled: bool = true,
+    clip_corner: ClipCorner = .top_left,
+    clip_on_top: bool = true,
+    /// Start with only the Clip tile shown, without its workspace icons.
+    clip_collapsed: bool = false,
+    /// Workspace names, in order. Missing/empty entries are shown as just
+    /// the workspace number. Without this option the names of Window
+    /// Maker's WMState (if read) are used.
+    workspace_names: []const []const u8 = &.{},
 
     // ---- dock apps ----------------------------------------------------------
     /// Run every `autolaunch = yes` DockApp once when the session comes up
@@ -248,7 +280,7 @@ fn applyOption(
     if (eql(u8, key, "bind")) return addBind(a, binds, value);
     if (eql(u8, key, "unbind")) return removeBind(binds, value);
 
-    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold" }) |name| {
+    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
             const v = std.fmt.parseInt(i32, value, 10) catch return error.Invalid;
             if (v < 0) return error.Invalid;
@@ -271,6 +303,13 @@ fn applyOption(
             var v = std.mem.trimStart(u8, value, "#");
             if (std.mem.startsWith(u8, v, "0x")) v = v[2..];
             @field(cfg, name) = std.fmt.parseInt(u32, v, 16) catch return error.Invalid;
+            return;
+        }
+    }
+
+    inline for (.{ "dock_enabled", "dock_on_top", "dock_reserve_space", "clip_enabled", "clip_on_top", "clip_collapsed" }) |name| {
+        if (eql(u8, key, name)) {
+            @field(cfg, name) = try parseBool(value);
             return;
         }
     }
@@ -301,6 +340,20 @@ fn applyOption(
         cfg.enable_autostart = try parseBool(value);
     } else if (eql(u8, key, "enable_dockapps")) {
         cfg.enable_dockapps = try parseBool(value);
+    } else if (eql(u8, key, "dock_edge")) {
+        cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
+    } else if (eql(u8, key, "clip_corner")) {
+        cfg.clip_corner = std.meta.stringToEnum(ClipCorner, value) orelse return error.Invalid;
+    } else if (eql(u8, key, "workspace_names")) {
+        // Empty entries are kept (they mean "this workspace has no name"),
+        // so the names stay aligned with the workspace numbers.
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, value, ',');
+        while (it.next()) |tok| {
+            const name = std.mem.trim(u8, tok, " \t\"");
+            try list.append(a, try a.dupe(u8, name));
+        }
+        cfg.workspace_names = try list.toOwnedSlice(a);
     } else if (eql(u8, key, "mouse_mod")) {
         cfg.mouse_mod = parseMods(value) orelse return error.Invalid;
     } else if (eql(u8, key, "terminal")) {
@@ -482,4 +535,61 @@ test "command splitting" {
     const argv = try parseCommand(arena.allocator(), "foot -e \"htop -d 5\"");
     try std.testing.expectEqual(@as(usize, 3), argv.len);
     try std.testing.expectEqualStrings("htop -d 5", argv[2]);
+}
+
+test "dock and clip options parse, bad values are rejected" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expect(cfg.dock_enabled);
+    try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
+    try std.testing.expectEqual(ClipCorner.top_left, cfg.clip_corner);
+
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(),
+        \\dock_edge = left
+        \\dock_offset = 120
+        \\dock_on_top = no
+        \\dock_reserve_space = off
+        \\clip_corner = bottom_right
+        \\clip_collapsed = yes
+        \\clip_enabled = false
+        \\workspace_names = Main, , "Web"
+        \\clip_corner = middle
+        \\dock_offset = -4
+    , &cfg, &binds, "<test>");
+    try std.testing.expectEqual(DockEdge.left, cfg.dock_edge);
+    try std.testing.expectEqual(@as(i32, 120), cfg.dock_offset);
+    try std.testing.expect(!cfg.dock_on_top);
+    try std.testing.expect(!cfg.dock_reserve_space);
+    // The two bad lines at the end changed nothing.
+    try std.testing.expectEqual(ClipCorner.bottom_right, cfg.clip_corner);
+    try std.testing.expect(cfg.clip_collapsed);
+    try std.testing.expect(!cfg.clip_enabled);
+    try std.testing.expectEqual(@as(usize, 3), cfg.workspace_names.len);
+    try std.testing.expectEqualStrings("Main", cfg.workspace_names[0]);
+    try std.testing.expectEqualStrings("", cfg.workspace_names[1]);
+    try std.testing.expectEqualStrings("Web", cfg.workspace_names[2]);
+}
+
+test "the built-in default config has the documented Dock and Clip defaults" {
+    // Parse the built-in text itself: config.load() would also read the
+    // developer's own config.conf and the test would depend on it.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), default_config_text, &cfg, &binds, "<built-in>");
+    try std.testing.expect(cfg.dock_enabled);
+    try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
+    try std.testing.expectEqual(@as(i32, 0), cfg.dock_offset);
+    try std.testing.expect(cfg.dock_on_top);
+    try std.testing.expect(cfg.dock_reserve_space);
+    try std.testing.expect(cfg.clip_enabled);
+    try std.testing.expectEqual(ClipCorner.top_left, cfg.clip_corner);
+    try std.testing.expect(cfg.clip_on_top);
+    try std.testing.expect(!cfg.clip_collapsed);
+    try std.testing.expectEqual(@as(usize, 0), cfg.workspace_names.len);
 }

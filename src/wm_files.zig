@@ -192,7 +192,7 @@ fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]con
 
         var diag: plist.Diag = .{};
         const list = if (is_wmstate)
-            dockapp.parseWMStateDiag(a, text, &diag)
+            dockapp.parseWMStateAllDiag(a, text, &diag)
         else
             dockapp.parseOwn(a, text);
 

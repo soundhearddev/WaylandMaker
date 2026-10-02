@@ -102,7 +102,7 @@ Reihenfolge nach deinen Prioritäten (Root-Menü und Dock zuerst), mit Abhängig
   geschlossenes Untermenü blieb bis zum nächsten Zyklus mit seinem letzten Frame sichtbar
   (`reapGraveyard()`-Reihenfolge in `sync()`).
 
-**Phase 5: Dock und Clip** (wichtig)
+**Phase 5: Dock und Clip** (wichtig) — umgesetzt, siehe `docs/DOCKAPPS.md` und `docs/TODO.md`; offen bleiben XPM-Icons, Verschieben per Maus und Zurückschreiben des Zustands.
 * Zustand laden: Window-Maker-`WMState` (`Dock.Applications` mit `Command`, `Name`, `AutoLaunch`,
   `Position`) und das einfachere wlmaker-Format (`Edge`, `Anchor`, `Launchers`).
 * 64-px-Kacheln (56 px Inhalt, Fase 2, diagonaler Verlauf), PNG-Icons per cairo. **XPM-Icons**, das

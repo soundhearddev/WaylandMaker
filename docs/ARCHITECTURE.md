@@ -20,9 +20,10 @@
 | `wm_attr.zig` | `WMWindowAttributes`: per-`app_id` rules | no |
 | `wm_files.zig` | Search paths and loading Window Maker files | no |
 | `process.zig` | Spawns commands (`EXEC`/`SHEXEC`, autostart) detached from the WM | no |
-| `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient, bevel, text, measure | no |
+| `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient (vertical, diagonal), polygon, bevel, text, measure, PNG icons | no |
 | `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
-| `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling | yes |
+| `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling; owns the Dock and Clip surfaces, their clicks, and puts DockApp windows into their tile | yes |
+| `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
 | `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |
 | `compatibility.zig` | Unused legacy stub, not imported anywhere except `root.zig` | no |
 | `root.zig` | Re-exports every module so `main.zig` and tests can reach them by name | no |
@@ -120,7 +121,8 @@ this section only covers the client-side protocol discipline:
 
 ## Known Limitations
 
-- Title bars and the dock are not implemented yet (see `docs/TODO.md`).
+- Title bars are not implemented yet. The Dock and the Clip exist (`dock.zig`, `ui.zig`), but cannot be moved with the mouse or
+  edited by drag and drop, and only appear on the first output (see `docs/TODO.md`).
 - Drag-reordering windows within the strip is not implemented; dragging makes windows floating.
 - The root menu currently binds only the first `wl_seat` that appears; additional seats get no pointer or
   keyboard for the menu.

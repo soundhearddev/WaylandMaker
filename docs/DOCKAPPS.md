@@ -81,8 +81,9 @@ Kein neues Format, keine zusätzliche Datei -- exakt der Weg, den es unter X11 a
 
 Nur relevant, wenn zusätzlich zum reinen Start auch **Metadaten** hinterlegt werden sollen, die
 das Programm selbst nicht über seine `app_id` transportieren kann -- ein Icon-Pfad, eine feste
-Grid-Position für eine künftige Dock-UI (siehe „Was noch fehlt" unten), oder eine bestehende
-Window-Maker-`WMState`-Datei mit vorhandenen Dock-Einträgen übernehmen. Für alles andere ist
+Grid-Position im Dock, ein Eintrag für den Clip, oder eine bestehende Window-Maker-`WMState`-Datei
+mit vorhandenen Dock-Einträgen übernehmen. Diese Datei bestimmt außerdem, **was im Dock und im
+Clip steht** (siehe „Dock und Clip" unten). Für alles andere ist
 diese Datei **nicht nötig** -- Selbst-Erkennung plus Autostart deckt den Normalfall vollständig
 ab.
 
@@ -101,10 +102,13 @@ autolaunch = yes
 | Feld | Bedeutung | Pflicht |
 |---|---|---|
 | `command` | Befehlszeile, die beim Start ausgeführt wird | ja |
-| `icon` | Pfad/Name eines Icons | nein |
-| `position` | Grid-Position `x,y` (Kachel-Koordinaten, nicht Pixel) | nein, Default `0,0` |
+| `icon` | PNG-Pfad, oder ein Name, der in `/usr/share/icons/hicolor/*/apps` und `/usr/share/pixmaps` gesucht wird (Default: Programmname) | nein |
+| `position` | Grid-Position `x,y` (Kachel-Koordinaten, nicht Pixel); im Dock zählt nur `y`, im Clip `x`, dann `y` | nein, Default `0,0` |
+| `place` | `dock` oder `clip` | nein, Default `dock` |
+| `workspace` | nur Clip: 1-basierter Workspace, oder `all` | nein, Default `all` |
+| `app_id` | `app_id` der Fenster, die dieser Eintrag startet, falls sie sich nicht aus Name/Befehl ergibt | nein |
 | `autolaunch` | beim Sessionstart einmal automatisch starten | nein, Default `no` |
-| `lowered` | Kachel liegt unter statt über normalen Fenstern | nein, Default `no` |
+| `lowered` | von Window Maker übernommen, gespeichert; ohne Wirkung (stattdessen `dock_on_top`/`clip_on_top` in `config.conf`) | nein, Default `no` |
 
 Wichtig: **`command` ist die einzige Pflichtangabe.** Ein Eintrag ohne `command` wird beim Parsen
 stillschweigend übersprungen -- kein Fehler, kein Absturz. Unbekannte Schlüssel werden ebenfalls
@@ -117,11 +121,14 @@ Kommentar ein wie in `config.conf`.
 ### 2. Window Makers eigenes Format: `~/GNUstep/Defaults/WMState`
 
 Nur wenn `enable_wmaker_compat = true` gesetzt ist **und** keine eigene `dockapps.conf`
-existiert. Liest den `Dock`- (ersatzweise `Clip`-)Abschnitt einer bestehenden
-Window-Maker-`WMState`-Datei unverändert:
+existiert. Liest eine bestehende Window-Maker-`WMState`-Datei unverändert: `Dock.Applications`
+(der Logo-Eintrag mit `Command = "-"` ist keine Anwendung, seine `Position` ist nur der Anker der
+Spalte), den Clip (`Clip.Applications` für alle Workspaces, `Workspaces[i].Clip.Applications` nur für
+Workspace `i`) und die Workspace-Namen (`Workspaces[i].Name`):
 
 ```
-{ Dock = { Applications = ( { Command = xterm; Name = "xterm.XTerm"; AutoLaunch = No; }, ... ); }; }
+{ Dock = { Applications = ( { Command = xterm; Name = "xterm.XTerm"; AutoLaunch = No; }, ... ); };
+  Workspaces = ( { Name = Main; Clip = { Applications = ( ... ); }; }, ... ); }
 ```
 
 Gedacht, um ein bestehendes Window-Maker-Dock-Setup weiterzuverwenden, nicht um neue Einträge von
@@ -144,13 +151,49 @@ oben, ohne jede Konfigurationsdatei. Siehe dessen eigene
 [README](../examples/wmaker-dockapp-clock/README.md) zum Bauen, Ausprobieren und als Vorlage für
 eine eigene DockApp.
 
+## Dock und Clip
+
+`ui.zig`/`dock.zig` zeichnen beides als 64-px-Kacheln im NeXT-/Window-Maker-Look.
+
+**Dock** (`dock_enabled`, `dock_edge = left|right`, `dock_offset`, `dock_on_top`,
+`dock_reserve_space`): eine Spalte am Bildschirmrand der ersten Ausgabe. Oben die „WM“-Logo-Kachel,
+darunter die Einträge mit `place = dock`, nach `y` sortiert und lückenlos gestapelt (`y = 0` kommt
+direkt hinter das Logo, ein negatives `y` davor).
+
+| Aktion | Wirkung |
+|---|---|
+| Linksklick auf eine Kachel | Programm starten, oder das laufende Fenster fokussieren |
+| Mittelklick | immer eine neue Instanz starten |
+| Rechtsklick | Menü: *Launch*, *Lower Dock* / *Keep Dock on Top* |
+| kleines Dreieck unten links | ein Fenster dieses Eintrags ist offen |
+
+Ein Fenster gehört zu einem Eintrag, wenn (in dieser Reihenfolge) der explizite `app_id` passt;
+sonst wenn `dockapp:<name>`/`dockapp-<name>` den Namen trifft, ein Teil eines Window-Maker-Namens
+`instance.Class` die `app_id` ist, ein Argument des Befehls selbst eine solche `dockapp:…`-Kennung
+trägt (`alacritty --class dockapp:htop` — dann zählt *nur* die), oder der Dateiname des Programms.
+Groß-/Kleinschreibung egal.
+
+**DockApp-Fenster in der Kachel:** ein Fenster mit `app_id = dockapp:<name>`, dessen Größe *fest*
+(Min = Max) und höchstens 64×64 ist (der Beispielclient `wl-clock`), wird mittig in die Kachel des
+gleichnamigen Eintrags gesetzt, über das Dock gestapelt und ist auf allen Workspaces sichtbar. Alles
+andere (ein Terminal mit `--class dockapp:htop`) bleibt ein normales schwebendes Fenster; seine
+Kachel startet/fokussiert es nur.
+
+**Clip** (`clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `workspace_names`):
+
+| Aktion | Wirkung |
+|---|---|
+| Pfeil oben rechts / unten links | nächster / vorheriger Workspace |
+| Mausrad über dem Clip | dito |
+| Rechtsklick auf die Workspace-Kachel | Menü: *Collapse/Expand*, *Lower/Keep on Top*, Workspace vor/zurück, *Workspaces* |
+| Mittelklick | Workspace-Menü |
+| Kacheln daneben | Einträge mit `place = clip` des aktuellen Workspaces; Klick wie im Dock |
+
+Liegt der Clip auf der Dock-Seite und überdeckt es, rückt er neben das Dock.
+
 ## Was noch fehlt
 
-Weder Selbst-Erkennung noch `dockapps.conf` zeichnen eine grafische Dock-Kachel-Leiste -- das
-ist Phase 5 in `docs/TODO.md`. `river_layer_shell_v1` (`protocol/river-layer-shell-v1.xml`)
-erlaubt wmaker-wl außerdem nicht, selbst eine Layer-Shell-Surface zu erzeugen (es lässt den
-Fenstermanager nur wissen, wie viel Platz *externe* Layer-Shell-Clients belegen, siehe
-`output.zig`s `non_exclusive_area`). Bis dahin ist eine DockApp ein normales, freischwebendes
-Fenster mit den oben beschriebenen Attributen -- funktional bereits nützlich (kein Rahmen, kein
-Titel, taucht nicht in der Fensterliste auf), aber noch keine feste Kachel-Position im
-Bildschirmrand.
+Dock und Clip lassen sich nicht mit der Maus verschieben, und Einträge nicht per Drag & Drop
+hinzufügen oder entfernen: Position und Inhalt kommen aus `config.conf` und `dockapps.conf` /
+`WMState`, und wmaker-wl schreibt nie in Nutzerdateien. Icons sind nur PNG (kein XPM, kein SVG). Das
+Dock hat kein „Collapse“, und beide hängen an der ersten Ausgabe. Siehe `docs/TODO.md`.

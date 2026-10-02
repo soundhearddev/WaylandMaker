@@ -10,7 +10,33 @@
       `SHORTCUT`-Anzeige. Zeiger-Cursor wechselt über Menü/Desktop korrekt zum Pfeil
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
-- [ ] **Phase 5**: Dock und Clip (`WMState`/wlmaker-State, 64-px-Kacheln, `app_id`-Zuordnung)
+- [x] **Phase 5**: Dock und Clip (`dock.zig`, `ui.zig`; `WMState`, 64-px-Kacheln, `app_id`-Zuordnung).
+      *Dock:* Spalte aus 64-px-Kacheln am linken/rechten Rand (`dock_edge`, `dock_offset`), erste Kachel
+      ist die „WM“-Logo-Kachel, danach die Einträge mit `place = dock`. Linksklick startet das Programm
+      oder fokussiert es, wenn schon ein Fenster davon läuft (Vergleich über `DockApp.matches`:
+      expliziter `app_id`, `dockapp:<name>`, Teile von `instance.Class`, `--class dockapp:…` im Befehl,
+      Programmname); Mittelklick startet immer eine neue Instanz; Rechtsklick öffnet ein Menü (Launch,
+      „Lower Dock“/„Keep Dock on Top“). Läuft-Anzeige als kleines Dreieck unten links. PNG-Icons per
+      cairo (Pfad oder Name in `hicolor`/`pixmaps`), sonst der erste Buchstabe des Namens.
+      Feste 64×64-DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`) werden direkt **in ihre
+      Kachel gesetzt** (`ui.placeDocked`, über dem Dock gestapelt) und sind `omnipresent`.
+      Der Arbeitsbereich schrumpft um das Dock (`Output.reserved`), außer es ist „lowered“ oder
+      `dock_reserve_space = false`.
+      *Clip:* Kachel mit Workspace-Nummer und -Name, Pfeil oben rechts = nächster, unten links =
+      vorheriger Workspace (wie in Window Maker), Mausrad schaltet ebenfalls; daneben in einer Reihe die
+      Einträge mit `place = clip`, pro Workspace (`workspace = N`) oder für alle. Rechtsklick: Clip-Menü
+      (Collapse/Expand, Lower/Keep on Top, Workspaces), Mittelklick: Workspace-Menü. Ecke über
+      `clip_corner`; Workspace-Namen über `workspace_names` oder aus `WMState` (`Workspaces[i].Name`).
+      `WMState`: `Dock.Applications` (Logo-Eintrag `Command = "-"` wird nur als Anker gelesen),
+      `Clip.Applications` und `Workspaces[i].Clip.Applications`.
+      Außerdem behoben: `onRender` stapelt jetzt erst die Fenster und dann Dock/Menüs (`applyRender` hob
+      das fokussierte Fenster sonst über ein offenes Menü), und `skip_window_list` blendet Fenster nun
+      wirklich aus der Fensterliste aus; der Root-`build.zig` baut wieder `wmaker-wl` (er baute nur
+      `wlprefs`).
+      *Noch offen:* XPM-Icons; Dock/Clip per Maus verschieben (Position kommt nur aus der Config);
+      Einträge per Drag & Drop hinzufügen/entfernen und Zustand zurückschreiben (wmaker-wl schreibt nie
+      in Nutzerdateien); „Collapse“ für das Dock; Attract-Icons des Clips; Mehr-Monitor (Dock/Clip
+      sitzen auf der ersten Ausgabe).
 - [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf`, `RootMenu` und
       `WMWindowAttributes` neu ein und ersetzt alle Tastenkürzel im laufenden Betrieb, ohne Fenster oder
       Layout anzufassen (Autostart läuft bewusst nicht erneut). Signalhandler setzt nur ein Flag

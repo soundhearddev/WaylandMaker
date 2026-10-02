@@ -54,6 +54,7 @@ test {
     _ = @import("wm_menu.zig");
     _ = @import("wm_attr.zig");
     _ = @import("dockapp.zig");
+    _ = @import("dock.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
     _ = @import("wm_prefs.zig");
@@ -318,6 +319,10 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     const files = try wm_files.load(wm.io, arena, &wm.cfg);
     wm.root_menu = files.root_menu;
     wm.attrs = files.attributes;
+    // Dock/Clip contents. ui.zig deep-copies them when it sees a new
+    // generation, so nothing outside this arena keeps pointing into it.
+    wm.dockapps = files.dockapps;
+    wm.dock_gen +%= 1;
     return files;
 }
 
@@ -519,6 +524,9 @@ fn onManage(wm: *WindowManager) void {
         }
     }
 
+    // 6b. DockApp windows that fit a Dock tile go into it (sets float_rect).
+    if (wm.ui) |u| u.placeDocked();
+
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
 
@@ -625,12 +633,14 @@ fn layoutAll(wm: *WindowManager) void {
 /// position corrected; nothing here changes management state.
 fn onRender(wm: *WindowManager) void {
     defer wm.obj.renderFinish();
-    if (wm.ui) |u| u.onRender();
     const focus = if (wm.seats.first()) |s| s.focused else null;
     var it = wm.windows.first();
     while (it) |w| : (it = types.nextWindow(w, wm)) {
         window_mod.applyRender(wm, w, w == focus);
     }
+    // After the windows: applyRender raises the focused window, and the
+    // Dock, the Clip and an open menu all have to end up above it.
+    if (wm.ui) |u| u.onRender();
 }
 
 // ----------------------------------------------------------------------------
@@ -669,6 +679,7 @@ test "wm.commands / root_menu / attrs are only ever assigned inside loadFromConf
         "wm." ++ "commands = ",
         "wm." ++ "root_menu = ",
         "wm." ++ "attrs = ",
+        "wm." ++ "dockapps = ",
     };
     for (fields) |field| {
         var i: usize = 0;
