@@ -53,7 +53,7 @@ jeweiligen `app_id` gewinnt pro Option, exakt wie bei jeder anderen Anwendung au
 
 Wie genau, hängt vom Toolkit ab:
 
-- **Roher Wayland-Client** (wie [`wmaker-dockapp-clock`](../examples/wmaker-dockapp-clock/),
+- **Roher Wayland-Client** (wie [`wl-clock`](../examples/wl-clock/),
   siehe unten): `xdg_toplevel`s `set_app_id`-Request mit dem gewünschten String.
 - **GTK**: `Gio.Application`'s `application-id`, oder `gtk_window_set_wmclass`/
   `g_set_prgname`, je nach GTK-Version.
@@ -71,7 +71,7 @@ DockApps. Für die allermeisten Fälle reicht das:
 
 ```sh
 #!/bin/sh
-wmaker-dockapp-clock &
+wl-clock &
 nm-applet &
 ```
 
@@ -141,15 +141,30 @@ Hand zu schreiben.
 wie das `autostart`-Skript -- und läuft bei einem SIGHUP-Reload bewusst nicht erneut. Eine
 kaputte Datei wird übersprungen (mit Warnung), die Session startet trotzdem.
 
-## Referenz-Implementierung: `wmaker-dockapp-clock`
+## Referenz-Implementierung: `wl-clock`
 
-[`examples/wmaker-dockapp-clock/`](../examples/wmaker-dockapp-clock/) ist ein komplett
-eigenständiges Beispielprojekt (kein Teil von wmaker-wl, keine Abhängigkeit darauf, eigenes
-`build.zig`/`build.zig.zon`, Zig 0.16.0): ein roher Wayland-Client, der nur `app_id =
-"dockapp:clock"` setzt und eine feste 64×64-Größe anfragt -- der komplette, empfohlene Weg von
-oben, ohne jede Konfigurationsdatei. Siehe dessen eigene
-[README](../examples/wmaker-dockapp-clock/README.md) zum Bauen, Ausprobieren und als Vorlage für
-eine eigene DockApp.
+[`examples/wl-clock/`](../examples/wl-clock/) ist ein komplett eigenständiges Beispielprojekt (kein
+Teil von wmaker-wl, keine Abhängigkeit darauf, eigenes `build.zig`/`build.zig.zon`, Zig 0.16.0): ein
+roher Wayland-Client, der nur `app_id = "dockapp:<name>"` setzt und eine feste 64×64-Größe anfragt --
+der komplette, empfohlene Weg von oben, ohne jede Konfigurationsdatei.
+
+Er zeichnet seine ganze Kachel selbst, im Look der Dock-Kacheln (abgeschrägter Rahmen mit Verlauf,
+darin ein eingelassenes LCD mit Datum, Sieben-Segment-Zeit, Monat und Sekundenbalken), wie es Window-
+Maker-DockApps tun. Docked sieht man deshalb keinen Unterschied zu den Kacheln daneben. Ein Klick
+schaltet 12/24 Stunden um. Mit `--name`, `--tz` und `--label` laufen mehrere Uhren nebeneinander
+(Weltzeit), jede mit eigenem Eintrag:
+
+```ini
+[tokyo]
+command = wl-clock --name tokyo --tz Asia/Tokyo --label tokyo
+position = 0,2
+autolaunch = yes
+```
+
+**Der Name verbindet beides:** der Eintragsname (`[tokyo]`) muss `wl-clock`s `--name` entsprechen,
+denn das Fenster hat `app_id = dockapp:tokyo`. Siehe dessen
+[README](../examples/wl-clock/README.md) zum Bauen, Ausprobieren und als Vorlage für eine eigene
+DockApp.
 
 ## Dock und Clip
 

@@ -30,6 +30,10 @@ pub var global: ?*WindowManager = null;
 /// Ask for focus on `win`. Safe from event callbacks: it only records the
 /// wish and requests a manage sequence.
 pub fn requestFocus(wm: *WindowManager, win: *Window) void {
+    // Hovering or clicking a DockApp (the clock in the Dock) must not touch
+    // the focus -- and not set follow_request either, which would scroll
+    // the strip back to the focused window under the user's hands.
+    if (win.attrs.is("unfocusable")) return;
     wm.focus_request = win;
     wm.follow_request = true;
     wm.obj.manageDirty();

@@ -72,7 +72,7 @@ const wm_attr = @import("wm_attr.zig");
 // win over these defaults, see window.zig's app_id handling.
 //
 // Naming the app_id is the standalone author's job (see
-// wmaker-dockapp-clock's README for a worked example); parsing it is
+// examples/wl-clock/README.md for a worked example); parsing it is
 // wmaker-wl's.
 
 const self_declaring_prefixes = [_][]const u8{ "dockapp:", "dockapp-" };

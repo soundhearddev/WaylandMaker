@@ -116,7 +116,7 @@ Kein GTK/WINGs-Klon, sondern konsistent mit dem Rest des Projekts:
    zu verwerfen) und stößt den laufenden Compositor per SIGHUP zum Neuladen an, exakt der bereits
    vorhandene Live-Reload-Mechanismus (`docs/TODO.md`, "Live-Config-Reload"). Keine zweite
    Config-Quelle, kein IPC-Protokoll, das gepflegt werden müsste.
-2. **Eigenständiges Projekt, wie `wmaker-dockapp-clock`.** Ein `wmaker-wl-prefs`-Programm, das den
+2. **Eigenständiges Projekt, wie `wl-clock`.** Ein `wmaker-wl-prefs`-Programm, das den
    geparsten Zustand über dieselben Parser aus diesem Repo (`config.zig`, `wm_attr.zig`,
    `dockapp.zig` als kleine, wiederverwendbare Bibliothek exportiert, s. `src/root.zig`) liest.
    Muss also **nicht** in den Compositor-Prozess selbst.

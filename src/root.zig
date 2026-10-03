@@ -18,6 +18,6 @@ pub const plist = @import("plist.zig");
 /// SKELETT (siehe docs/WPREFS.md), noch keine funktionierende
 /// Implementierung. Re-exportiert wie jedes andere Modul hier, damit ein
 /// künftiges eigenständiges "wmaker-wl-prefs"-GUI-Projekt (analog
-/// examples/wmaker-dockapp-clock) es schon jetzt als Abhängigkeit gegen
+/// examples/wl-clock) es schon jetzt als Abhängigkeit gegen
 /// dieses Repo bauen und iterativ füllen kann.
 pub const prefs_model = @import("wm_prefs.zig");

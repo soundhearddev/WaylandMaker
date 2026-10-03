@@ -33,6 +33,12 @@
       das fokussierte Fenster sonst über ein offenes Menü), und `skip_window_list` blendet Fenster nun
       wirklich aus der Fensterliste aus; der Root-`build.zig` baut wieder `wmaker-wl` (er baute nur
       `wlprefs`).
+      *Beispiel-DockApp* `examples/wl-clock` (neu geschrieben): zeichnet die komplette 64×64-Kachel im
+      Look der Dock-Kacheln mit eingelassenem LCD, lokale Zeit statt UTC, `--name`/`--tz`/`--label`/
+      `--12h`/`--no-seconds`, Klick schaltet 12/24 h, ein Pool mit zwei Buffern statt einem neuen pro
+      Sekunde, `poll`-Schleife ohne Leerlauf-CPU, `--snapshot` ohne Compositor. Passend dazu ignoriert
+      `action.requestFocus` unfokussierbare Fenster (Hover/Klick auf eine DockApp verschiebt weder Fokus
+      noch Streifen).
       *Noch offen:* XPM-Icons; Dock/Clip per Maus verschieben (Position kommt nur aus der Config);
       Einträge per Drag & Drop hinzufügen/entfernen und Zustand zurückschreiben (wmaker-wl schreibt nie
       in Nutzerdateien); „Collapse“ für das Dock; Attract-Icons des Clips; Mehr-Monitor (Dock/Clip

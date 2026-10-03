@@ -6,7 +6,7 @@
 // Zweck: eine GUI-freie Lese-/Schreib-Schicht über genau die Dateien, die
 // wmaker-wl selbst schon parst (config.conf, attributes.conf,
 // dockapps.conf). Eine künftige "wmaker-wl-prefs"-GUI (eigenständiges
-// Projekt, analog zu examples/wmaker-dockapp-clock, das dieses Repo per
+// Projekt, analog zu examples/wl-clock, das dieses Repo per
 // root.zig als Bibliothek importiert) soll NICHT selbst Parser/Serializer
 // pflegen, sondern:
 //

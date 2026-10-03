@@ -1,5 +1,5 @@
 zig-out/
 zig-pkg/
-.zig-cache/
+.zig-cache
 docs/other/*
 log.txt

@@ -847,3 +847,30 @@ test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
     o.reserved = .{ .left = 5000 };
     try std.testing.expect(o.workArea().w >= 1);
 }
+
+test "wl-clock: --name picks the Dock tile, several clocks do not mix" {
+    // Entry names are what `dockapp:<name>` is matched against; the command
+    // line (here wl-clock's own --name/--tz/--label) plays no part.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "clock", .command = try config.parseCommand(a, "wl-clock"), .y = 1 },
+        .{ .name = "tokyo", .command = try config.parseCommand(a, "wl-clock --name tokyo --tz Asia/Tokyo --label tokyo"), .y = 2 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+    defer m.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 0), m.dockSlotFor("dockapp:clock"));
+    try std.testing.expectEqual(@as(?usize, 1), m.dockSlotFor("dockapp:tokyo"));
+
+    // Tiles: LOGO, clock, tokyo. The tokyo window lands in tile 2.
+    const dock: Rect = .{ .x = 1856, .y = 0, .w = 64, .h = 192 };
+    const r = dockedRect(&m, dock, 3, "dockapp:tokyo", 64, 64, 64, 64).?;
+    try std.testing.expectEqual(@as(i32, 128), r.y);
+
+    // Both are "running" only when their own window exists.
+    _ = m.setRunning(&.{"dockapp:tokyo"});
+    try std.testing.expect(!m.dock[0].running);
+    try std.testing.expect(m.dock[1].running);
+}

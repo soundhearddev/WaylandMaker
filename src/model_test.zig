@@ -849,3 +849,18 @@ test "recheckFloating: a window still in its initial placement (new) is left for
     try std.testing.expect(w.workspace == null);
     try std.testing.expect(w.mode == .tiled); // untouched Window{} default, not yet placed
 }
+
+test "hovering or clicking an unfocusable DockApp changes neither focus nor follow" {
+    // seat.zig calls requestFocus on pointer enter (focus_follows_mouse) and
+    // on every click. For the clock in the Dock that must be a no-op: a
+    // follow_request would scroll the strip back to the focused window.
+    // (A focusable window would call manageDirty on the dummy object, which
+    // is why only the no-op path is exercised here.)
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    w.attrs = dockapp_mod.defaultAttrs();
+    @import("action.zig").requestFocus(&f.wm, w);
+    try std.testing.expect(f.wm.focus_request == null);
+    try std.testing.expect(!f.wm.follow_request);
+}
