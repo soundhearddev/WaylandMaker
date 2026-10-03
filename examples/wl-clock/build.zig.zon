@@ -1,0 +1,22 @@
+.{
+    .name = .wl_clock,
+    .version = "1.1.0",
+    .fingerprint = 0xa2092dcc49ba82e,
+    .minimum_zig_version = "0.16.0",
+
+    // Same zig-wayland version wmaker-wl itself uses (see ../../build.zig.zon).
+    // This example is otherwise fully standalone -- it does not depend on
+    // wmaker-wl or import anything from ../../src.
+    .dependencies = .{
+        .wayland = .{
+            .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.6.0.tar.gz",
+            .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
