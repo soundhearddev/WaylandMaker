@@ -156,6 +156,54 @@ pub fn buildWlprefs(
     return exe;
 }
 
+fn buildWlClock(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const scanner = Scanner.create(b, .{});
+
+    scanner.addSystemProtocol(
+        "stable/xdg-shell/xdg-shell.xml",
+    );
+
+    scanner.addSystemProtocol(
+        "staging/cursor-shape/cursor-shape-v1.xml",
+    );
+
+    scanner.addSystemProtocol(
+        "stable/tablet/tablet-v2.xml",
+    );
+
+    scanner.generate("wl_compositor", 4);
+    scanner.generate("wl_shm", 1);
+    scanner.generate("wl_seat", 5);
+    scanner.generate("xdg_wm_base", 3);
+    scanner.generate("wp_cursor_shape_manager_v1", 1);
+
+    const wayland_module = b.createModule(.{
+        .root_source_file = scanner.result,
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("examples/wl-clock/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    exe_module.addImport("wayland", wayland_module);
+    exe_module.linkSystemLibrary("wayland-client", .{});
+
+    return b.addExecutable(.{
+        .name = "wl-clock",
+        .root_module = exe_module,
+        .use_llvm = true,
+    });
+}
+
 // -------------------------------------------------------------------------
 // wmaker-wl (root project) -- also builds wlprefs via buildWlprefs() above
 // -------------------------------------------------------------------------
@@ -329,6 +377,24 @@ pub fn build(b: *std.Build) void {
     );
 
     b.installArtifact(wlprefs_exe);
+
+    // ---- Optional --------------------------------------------------------
+
+    const build_wl_clock = b.option(
+        bool,
+        "wl-clock",
+        "Build and install examples/wl-clock",
+    ) orelse false;
+
+    if (build_wl_clock) {
+        const wl_clock = buildWlClock(
+            b,
+            target,
+            optimize,
+        );
+
+        b.installArtifact(wl_clock);
+    }
 
     // ---- run ------------------------------------------------------------
 
