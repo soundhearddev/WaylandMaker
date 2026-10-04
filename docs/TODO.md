@@ -10,6 +10,24 @@
       `SHORTCUT`-Anzeige. Zeiger-Cursor wechselt über Menü/Desktop korrekt zum Pfeil
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
+- [x] **wlprefs** (`wlprefs/`, siehe `docs/WMPREFS.md` „Stand“): lädt `config.conf` jetzt wirklich (der
+      erste Entwurf las die Datei nie und ersetzte sie beim ersten Speichern durch die paar Zeilen, die
+      von den Standardwerten abwichen), speichert nur geänderte Schlüssel in der Datei selbst,
+      atomar mit Backup, sperrt sich bei unlesbarer Datei, deckt alle Dock-/Clip-/Workspace-Namen-/
+      Preset-/Maus-Modifier-Schlüssel ab, zeigt die wirksamen Tastenkürzel, hat einen Bild-Fallback statt
+      selbstgemalter Icons (`docs/WLPREFS-ICONS.md`) und eine `poll`-Schleife, die SIGTERM sauber
+      beendet (libwayland wiederholt `poll` bei EINTR, ein blockierendes `dispatch()` hätte nie
+      zurückgekehrt).
+      *Noch offen in wlprefs:*
+      - Tastenkürzel **bearbeiten** (Tabelle mit Aufnahme per Tastendruck; die Anzeige gibt es);
+      - Fensterregeln (`attributes.conf`) und DockApp-Editor (`dockapps.conf`) als eigene Seiten;
+      - Root-Menü-Editor (`RootMenu`);
+      - die 6 Dock-/Clip-Icons (`docs/WLPREFS-ICONS.md`), bis dahin Platzhalter;
+      - Schrift- und Theme-Seite (hängt an Phase 6);
+      - „Defaults“-Knopf je Seite; Tab-Navigation zwischen Textfeldern; Cursor-Position in Textfeldern;
+      - HiDPI/Skalierung (das Fenster ist fest 520×390 wie WPrefs);
+      - Live-Vorschau der Änderungen (heute: Speichern → SIGHUP);
+      - die Menü-Seite wird erst echt, wenn wmaker-wl diese Optionen hat.
 - [x] **Phase 5**: Dock und Clip (`dock.zig`, `ui.zig`; `WMState`, 64-px-Kacheln, `app_id`-Zuordnung).
       *Dock:* Spalte aus 64-px-Kacheln am linken/rechten Rand (`dock_edge`, `dock_offset`), erste Kachel
       ist die „WM“-Logo-Kachel, danach die Einträge mit `place = dock`. Linksklick startet das Programm

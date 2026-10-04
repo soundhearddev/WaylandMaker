@@ -13,6 +13,56 @@ GUI setzt auf genau dieser Schicht auf und kann realistischerweise erst sinnvoll
 Phase 5 (Dock/Clip) und Phase 6 (Themes) zumindest im Datenmodell stehen -- eine GUI, die Optionen
 anzeigt, die der Compositor noch gar nicht auswertet, wäre irreführend.
 
+## Stand: `wlprefs` (Version 0.2)
+
+`wlprefs/` ist das GUI-Projekt aus §5, ein eigenständiges Programm (`zig build` im Root baut es mit,
+`cd wlprefs && zig build` allein auch). Es bildet WPrefs.app geometrisch nach (gleiches Fenster, gleiche
+16 Abschnitts-Icons) und bearbeitet genau die Datei, die wmaker-wl liest.
+
+**Echte Seiten** (jede Einstellung ist ein `config.conf`-Schlüssel):
+
+| Abschnitt | Schlüssel |
+|---|---|
+| Window Focus | `focus_follows_mouse`, `center_focused_column` |
+| Window Handling | `new_window`, `gap`, `outer_gap`, `min_window_size` |
+| Workspace | `workspace_count`, `workspace_names`, `default_column_width`, `width_step`, `width_presets` |
+| Appearance | `border_width`, `border_focused`, `border_unfocused`, `border_floating` |
+| Mouse | `mouse_mod` (beliebige Kombination), `drag_threshold`, `floating_size` |
+| Ergonomic (Standardprogramme) | `terminal`, `launcher`, `browser` |
+| Docks | `dock_enabled`, `dock_edge`, `dock_offset`, `dock_on_top`, `dock_reserve_space`, `clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed` |
+| Other Configurations | `enable_dockapps`, `enable_autostart`, `enable_wmaker_compat` |
+| Keyboard Shortcuts | **nur Anzeige** der wirksamen `bind`-Zeilen (Standard + eigene), `*` = aus der eigenen Datei |
+
+Menu Preferences zeigt das WPrefs-Bild, ist aber ausdrücklich „nur Anzeige“ (wmaker-wl hat diese
+Optionen nicht). Icons, Paths, Menu, Hot Corners, Fonts und Expert haben keine Entsprechung und sagen
+auf ihrer Seite, warum und was man stattdessen tut.
+
+**Speichern verändert nie mehr als nötig** (`settings.render`, `prefs.save`, `configfile.writeAtomic`):
+
+- Die Datei wird beim Start gelesen und beim Speichern **noch einmal**. Geändert werden nur die Zeilen
+  der Schlüssel, die der Nutzer geändert hat; Kommentare, Leerzeilen, `bind`/`unbind`, unbekannte
+  Schlüssel, CRLF und von Hand zwischenzeitlich Geändertes bleiben unberührt.
+- Eine Datei, die existiert, aber nicht lesbar ist, **sperrt das Speichern** (statt sie durch den
+  GUI-Zustand zu ersetzen). Fehlt sie, wird sie beim ersten Speichern angelegt.
+- Schreiben ist atomar (temporäre Datei, `fsync`, `rename`), behält die Rechte, folgt einem Symlink
+  (Dotfile-Manager) und legt beim ersten Überschreiben einer Sitzung `config.conf.bak` an.
+- Werte, die der Compositor ablehnen oder falsch lesen würde (leeres Terminal, Befehl mit führendem
+  Anführungszeichen, Presets außerhalb (0,1], kein Maus-Modifier), werden **nicht geschrieben**, mit
+  Meldung. Ein Wert, den das GUI nicht darstellen kann (`mouse_mod = Super+Mod5`), bleibt wie er ist.
+- Die Standardwerte stammen aus `src/share/default_config.conf` (zur Bauzeit eingebettet), nicht aus
+  einer Kopie. Ein Test im Compositor prüft, dass alles, was wlprefs schreibt, von `config.zig` mit
+  demselben Wert gelesen wird (`wlprefs and the compositor agree`).
+- Danach bekommt jeder laufende `wmaker-wl` des Nutzers `SIGHUP` (über `/proc`, ohne `pkill`).
+
+Bedienung: `Save` (oder Strg+S), `Revert Page`, `Revert All`; `Close` mit ungesicherten Änderungen
+warnt und verwirft erst beim zweiten Klick. `wlprefs --config DATEI` bearbeitet eine andere Datei,
+`wlprefs --shot ORDNER` schreibt jede Seite als PNG (ohne Wayland-Sitzung).
+
+Icons: `docs/WLPREFS-ICONS.md`. Offenes: `docs/TODO.md`.
+
+Die folgenden Abschnitte sind die ursprüngliche Bestandsaufnahme und Planung; sie bleiben als
+Begründung stehen.
+
 ## 1. Was WPrefs.app bei X11 Window Maker konfiguriert
 
 WPrefs gliedert sich in Icons/Tabs, jede davon eine eigene `.conf`-Sektion in

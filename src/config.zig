@@ -193,7 +193,7 @@ fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
 // Parsing
 // ----------------------------------------------------------------------------
 
-fn parse(
+pub fn parse(
     a: std.mem.Allocator,
     text: []const u8,
     cfg: *Config,

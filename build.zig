@@ -15,12 +15,23 @@ const Scanner = @import("wayland").Scanner;
 ///     cd .. && zig build
 ///
 /// to build the same project.
+pub const Wlprefs = struct {
+    exe: *std.Build.Step.Compile,
+    /// The library module (everything but main.zig); its tests are the
+    /// `test-wlprefs` step.
+    mod: *std.Build.Module,
+    /// settings.zig on its own (no Wayland, no cairo). The compositor's own
+    /// tests import it, to check that what wlprefs writes is what
+    /// config.zig reads.
+    settings: *std.Build.Module,
+};
+
 pub fn buildWlprefs(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     use_llvm: bool,
-) *std.Build.Step.Compile {
+) Wlprefs {
 
     // Helper for paths belonging to this subproject.
     const projectPath = struct {
@@ -114,6 +125,12 @@ pub fn buildWlprefs(
         xkbcommon_module,
     );
 
+    // wmaker-wl's own default config. wlprefs takes its defaults from it,
+    // so "differs from the default" means the same in both programs.
+    mod.addAnonymousImport("default_config.conf", .{
+        .root_source_file = b.path("src/share/default_config.conf"),
+    });
+
     fn_link_graphics(b, mod);
 
     mod.addCSourceFile(.{
@@ -153,55 +170,16 @@ pub fn buildWlprefs(
         .use_lld = use_llvm,
     });
 
-    return exe;
-}
-
-fn buildWlClock(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const scanner = Scanner.create(b, .{});
-
-    scanner.addSystemProtocol(
-        "stable/xdg-shell/xdg-shell.xml",
-    );
-
-    scanner.addSystemProtocol(
-        "staging/cursor-shape/cursor-shape-v1.xml",
-    );
-
-    scanner.addSystemProtocol(
-        "stable/tablet/tablet-v2.xml",
-    );
-
-    scanner.generate("wl_compositor", 4);
-    scanner.generate("wl_shm", 1);
-    scanner.generate("wl_seat", 5);
-    scanner.generate("xdg_wm_base", 3);
-    scanner.generate("wp_cursor_shape_manager_v1", 1);
-
-    const wayland_module = b.createModule(.{
-        .root_source_file = scanner.result,
+    const settings_mod = b.createModule(.{
+        .root_source_file = projectPath(b, "src/settings.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    const exe_module = b.createModule(.{
-        .root_source_file = b.path("examples/wl-clock/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+    settings_mod.addAnonymousImport("default_config.conf", .{
+        .root_source_file = b.path("src/share/default_config.conf"),
     });
 
-    exe_module.addImport("wayland", wayland_module);
-    exe_module.linkSystemLibrary("wayland-client", .{});
-
-    return b.addExecutable(.{
-        .name = "wl-clock",
-        .root_module = exe_module,
-        .use_llvm = true,
-    });
+    return .{ .exe = exe, .mod = mod, .settings = settings_mod };
 }
 
 // -------------------------------------------------------------------------
@@ -369,32 +347,27 @@ pub fn build(b: *std.Build) void {
     //
     //     zig-out/bin/wlprefs
     //
-    const wlprefs_exe = buildWlprefs(
+    const wlprefs = buildWlprefs(
         b,
         target,
         optimize,
         use_llvm,
     );
 
-    b.installArtifact(wlprefs_exe);
+    b.installArtifact(wlprefs.exe);
 
-    // ---- Optional --------------------------------------------------------
-
-    const build_wl_clock = b.option(
-        bool,
-        "wl-clock",
-        "Build and install examples/wl-clock",
-    ) orelse false;
-
-    if (build_wl_clock) {
-        const wl_clock = buildWlClock(
-            b,
-            target,
-            optimize,
-        );
-
-        b.installArtifact(wl_clock);
-    }
+    // `zig build test-wlprefs`: the settings window's own tests (config
+    // reading/writing against real files, the in-place editor, icons).
+    const wlprefs_tests = b.addTest(.{
+        .root_module = wlprefs.mod,
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
+    });
+    const wlprefs_test_step = b.step(
+        "test-wlprefs",
+        "Run the unit tests of wlprefs",
+    );
+    wlprefs_test_step.dependOn(&b.addRunArtifact(wlprefs_tests).step);
 
     // ---- run ------------------------------------------------------------
 
@@ -424,6 +397,7 @@ pub fn build(b: *std.Build) void {
     });
 
     fn_link_graphics(b, test_module);
+    test_module.addImport("wlprefs_settings", wlprefs.settings);
 
     const tests = b.addTest(.{
         .root_module = test_module,

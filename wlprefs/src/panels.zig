@@ -1,51 +1,61 @@
 // SPDX-License-Identifier: 0BSD
 //
-// Real settings panels for wlprefs. Each panel maps a WPrefs section
-// to the wmaker-wl-config.conf keys that actually exist (see
-// docs/WMPREFS.md §1/§2). Sections without a Wayland equivalent (Icons,
-// Hot Corners, Expert, ...) deliberately remain placeholders (§4).
+// The settings pages of wlprefs. Each page maps a WPrefs.app section onto
+// the config.conf keys wmaker-wl really has (docs/WMPREFS.md). A section
+// without a counterpart says so and says why, instead of showing controls
+// that would do nothing.
 //
-// Structure: `layout()` runs over a panel once per frame and calls `w.checkbox/stepper/...`
-// for each widget. The same code serves both for drawing (mode = .paint) and for
-// hit-testing (mode = .click) -- this ensures drawing and click areas can never desynchronize.
+// Structure: a page is ONE function that is run twice per interaction -- once
+// with mode = .paint to draw it, once with mode = .click to find out what was
+// hit. Drawing and hit areas are the same code, so they cannot drift apart.
 
 const std = @import("std");
 const gfx = @import("gfx.zig");
 const settings = @import("settings.zig");
+const icons = @import("icons.zig");
+const binds = @import("binds.zig");
 const Settings = settings.Settings;
 
 const face = gfx.Color.rgb(0xaeaeae);
 const black = gfx.Color.rgb(0x000000);
+const white = gfx.Color.rgb(0xffffff);
 const dim = gfx.Color.rgb(0x505050);
 const font = "Sans 10";
+const font_small = "Sans 7";
 
 pub const Mode = enum { paint, click };
 
 /// What effect a click had.
 pub const Result = struct {
-    /// A value was changed -> redraw window + mark "dirty".
+    /// A value was changed -> redraw + the Save button lights up.
     changed: bool = false,
     /// A text field gained focus.
     focus: ?*settings.Text = null,
+    /// The click did something that needs a redraw but changes no setting
+    /// (scrolling a list).
+    redraw: bool = false,
 };
 
-/// Context for a single layout() pass.
+/// Context for a single pass over a page.
 pub const Ctx = struct {
     mode: Mode,
     cv: ?*gfx.Canvas = null,
     /// Click position (only mode == .click).
     cx: i32 = 0,
     cy: i32 = 0,
-    /// Currently focused text field (for the cursor).
+    /// The text field that has the keyboard (for its cursor).
     focused: ?*settings.Text = null,
+    icons: ?*const icons.Set = null,
     res: Result = .{},
 
     fn hit(c: *const Ctx, x: i32, y: i32, w: i32, h: i32) bool {
         return c.mode == .click and c.cx >= x and c.cx < x + w and c.cy >= y and c.cy < y + h;
     }
 
-    // ---- Labels ---------------------------------------------------------
+    // ---- labels ---------------------------------------------------------
 
+    /// WMFrame with a title: groove border starting half a line down, the
+    /// title interrupting the top edge.
     pub fn frame(c: *Ctx, x: i32, y: i32, w: i32, h: i32, title: ?[:0]const u8) void {
         const cv = c.cv orelse return;
         const top: i32 = if (title != null) 7 else 0;
@@ -67,7 +77,7 @@ pub const Ctx = struct {
         cv.drawText(text, x, y, font, dim);
     }
 
-    // ---- Checkbox (WMCreateSwitchButton) --------------------------------
+    // ---- checkbox (WMCreateSwitchButton) --------------------------------
 
     pub fn checkbox(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: *bool) void {
         const box: i32 = 14;
@@ -84,7 +94,7 @@ pub const Ctx = struct {
         }
     }
 
-    // ---- Radio (Enum selection) -----------------------------------------
+    // ---- radio ------------------------------------------------------------
 
     pub fn radio(c: *Ctx, x: i32, y: i32, text: [:0]const u8, selected: bool) bool {
         const r: i32 = 7;
@@ -102,7 +112,36 @@ pub const Ctx = struct {
         return false;
     }
 
-    // ---- Stepper: [-] value [+] ------------------------------------------
+    // ---- a radio made of a picture (WBTOnOff image buttons) ---------------
+
+    /// A 48x48 button showing icon `id` -- or, when no icon has been
+    /// provided, the marked fallback -- pushed in when selected, with its
+    /// text label under it.
+    pub fn iconRadio(c: *Ctx, x: i32, y: i32, id: icons.Id, selected: bool) bool {
+        const sp = icons.spec(id);
+        const pad: i32 = 2;
+        const bw = sp.w + 2 * pad;
+        const bh = sp.h + 2 * pad;
+        if (c.cv) |cv| {
+            cv.fillRect(x, y, bw, bh, face);
+            cv.relief(x, y, bw, bh, if (selected) .pushed else .raised);
+            const off: i32 = if (selected) 1 else 0;
+            if (c.icons) |set| {
+                icons.draw(cv, set, id, x + pad + off, y + pad + off);
+            } else {
+                icons.drawFallback(cv, id, x + pad + off, y + pad + off);
+            }
+            const t = gfx.measureText(sp.label, font_small);
+            cv.drawText(sp.label, x + @divTrunc(bw - t.w, 2), y + bh + 2, font_small, if (selected) black else dim);
+        }
+        if (c.hit(x, y, bw, bh)) {
+            c.res.changed = true;
+            return true;
+        }
+        return false;
+    }
+
+    // ---- stepper: [-] value [+] -----------------------------------------
 
     fn stepBtn(c: *Ctx, x: i32, y: i32, sym: [:0]const u8) bool {
         const s: i32 = 20;
@@ -114,10 +153,10 @@ pub const Ctx = struct {
         return c.hit(x, y, s, s);
     }
 
-    /// Integer stepper with label on the left. Returns: value changed.
-    pub fn stepInt(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: anytype, lo: i64, hi: i64, step: i64) void {
+    /// Integer stepper; the label gets `lw` px.
+    pub fn stepIntW(c: *Ctx, x: i32, y: i32, lw: i32, text: [:0]const u8, v: anytype, lo: i64, hi: i64, step: i64) void {
         c.label(x, y + 2, text);
-        const bx = x + 190;
+        const bx = x + lw;
         if (c.stepBtn(bx, y, "-")) {
             v.* = @intCast(@max(lo, @as(i64, v.*) - step));
             c.res.changed = true;
@@ -133,6 +172,10 @@ pub const Ctx = struct {
             v.* = @intCast(@min(hi, @as(i64, v.*) + step));
             c.res.changed = true;
         }
+    }
+
+    pub fn stepInt(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: anytype, lo: i64, hi: i64, step: i64) void {
+        c.stepIntW(x, y, 190, text, v, lo, hi, step);
     }
 
     /// Fraction stepper (0.05..1.0), displayed as a percentage.
@@ -156,7 +199,7 @@ pub const Ctx = struct {
         }
     }
 
-    // ---- Color Field: Preview + Hex stepper per channel ------------------
+    // ---- colour: preview + R/G/B steppers ----------------------------------
 
     pub fn colour(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: *u32) void {
         c.label(x, y + 2, text);
@@ -165,7 +208,6 @@ pub const Ctx = struct {
             cv.fillRect(bx, y, 44, 20, gfx.Color.rgb(v.*));
             cv.relief(bx, y, 44, 20, .sunken);
         }
-        // R/G/B each -/+ in steps of 16.
         const names = [_][:0]const u8{ "R", "G", "B" };
         inline for (names, 0..) |n, i| {
             const shift: u5 = @intCast(16 - 8 * i);
@@ -190,22 +232,25 @@ pub const Ctx = struct {
         }
     }
 
-    // ---- Text Field --------------------------------------------------------
+    // ---- text field ---------------------------------------------------------
 
     pub fn textField(c: *Ctx, x: i32, y: i32, w: i32, text: [:0]const u8, t: *settings.Text) void {
         c.label(x, y + 4, text);
         const fx = x + 110;
         const fw = w - 110;
         if (c.cv) |cv| {
-            cv.fillRect(fx, y, fw, 24, gfx.Color.rgb(0xffffff));
+            cv.fillRect(fx, y, fw, 24, white);
             cv.relief(fx, y, fw, 24, .sunken);
-            var buf: [200:0]u8 = undefined;
+            var buf: [settings.Text.capacity + 1:0]u8 = undefined;
             const n = @min(t.len, buf.len - 1);
             @memcpy(buf[0..n], t.get()[0..n]);
             buf[n] = 0;
-            cv.drawText(buf[0..n :0], fx + 5, y + 4, font, black);
+            // Show the END of a long value, where the typing happens.
+            var start: usize = 0;
+            while (start < n and gfx.measureText(buf[start..n :0], font).w > fw - 12) start += 1;
+            cv.drawText(buf[start..n :0], fx + 5, y + 4, font, black);
             if (c.focused == t) {
-                const tw = gfx.measureText(buf[0..n :0], font).w;
+                const tw = gfx.measureText(buf[start..n :0], font).w;
                 cv.fillRect(fx + 5 + tw + 1, y + 4, 1, 15, black);
             }
         }
@@ -214,15 +259,14 @@ pub const Ctx = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Panels. Origin (ox,oy) = top-left corner of the content box.
-// Area: ~520 x 231 px.
+// Pages. Origin (ox, oy) = top-left of the content box, about 520 x 231 px.
 // ---------------------------------------------------------------------------
 
 pub fn focus(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.frame(ox + 20, oy + 14, 480, 96, "Focus");
     c.checkbox(ox + 40, oy + 40, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
     c.hint(ox + 40, oy + 62, "Focus changes as soon as the mouse pointer enters a window.");
-    c.hint(ox + 40, oy + 80, "Off: Focus only via click or keyboard shortcut.");
+    c.hint(ox + 40, oy + 80, "Off: focus only via click or keyboard shortcut.");
 
     c.frame(ox + 20, oy + 122, 480, 96, "Scrolling");
     c.label(ox + 40, oy + 146, "Center focused column:");
@@ -248,14 +292,15 @@ pub fn windowHandling(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 }
 
 pub fn workspace(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 78, "Workspaces");
-    c.stepInt(ox + 40, oy + 40, "Number of workspaces:", &s.workspace_count, 1, settings.max_workspaces, 1);
-    c.hint(ox + 40, oy + 66, "Maximum 16. Names: see docs/WMPREFS.md §3.2 (not yet in compositor).");
+    c.frame(ox + 14, oy + 6, 492, 100, "Workspaces");
+    c.stepInt(ox + 34, oy + 28, "Number of workspaces:", &s.workspace_count, 1, settings.max_workspaces, 1);
+    c.textField(ox + 34, oy + 54, 452, "Names:", &s.workspace_names);
+    c.hint(ox + 34, oy + 82, "Comma separated; shown in the Clip and the menu. Empty = no name.");
 
-    c.frame(ox + 20, oy + 104, 480, 112, "Column Width");
-    c.stepFrac(ox + 40, oy + 130, "Default width:", &s.default_column_width, 0.05);
-    c.stepFrac(ox + 40, oy + 156, "Step size (Wider/Narrower):", &s.width_step, 0.05);
-    c.hint(ox + 40, oy + 184, "Presets (width_presets) remain editable in config.conf.");
+    c.frame(ox + 14, oy + 112, 492, 112, "Columns");
+    c.stepFrac(ox + 34, oy + 134, "Default width:", &s.default_column_width, 0.05);
+    c.stepFrac(ox + 34, oy + 160, "Step size (Wider / Narrower):", &s.width_step, 0.05);
+    c.textField(ox + 34, oy + 188, 452, "Presets:", &s.width_presets);
 }
 
 pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
@@ -281,39 +326,151 @@ pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 }
 
 pub fn mouse(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 100, "Mouse Modifier");
-    c.label(ox + 40, oy + 40, "Move (left) / Resize (right) with:");
-    if (s.mouse_mod_raw) {
-        c.hint(ox + 40, oy + 68, "Custom value in config.conf -- will not be overwritten.");
+    c.frame(ox + 20, oy + 14, 480, 108, "Mouse Modifier");
+    c.label(ox + 40, oy + 38, "Move (left button) / resize (right button) while holding:");
+    if (s.mouse_mod.raw) {
+        c.hint(ox + 40, oy + 70, "A custom value in config.conf (e.g. with Mod3/Mod5).");
+        c.hint(ox + 40, oy + 90, "It is kept exactly as it is and will not be overwritten.");
     } else {
-        var m = s.mouse_mod;
-        if (c.radio(ox + 40, oy + 72, "Super", m == .super)) m = .super;
-        if (c.radio(ox + 140, oy + 72, "Alt", m == .alt)) m = .alt;
-        if (c.radio(ox + 220, oy + 72, "Ctrl", m == .ctrl)) m = .ctrl;
-        if (c.radio(ox + 310, oy + 72, "Shift", m == .shift)) m = .shift;
-        s.mouse_mod = m;
+        c.checkbox(ox + 40, oy + 66, "Super", &s.mouse_mod.super);
+        c.checkbox(ox + 140, oy + 66, "Alt", &s.mouse_mod.alt);
+        c.checkbox(ox + 220, oy + 66, "Ctrl", &s.mouse_mod.ctrl);
+        c.checkbox(ox + 310, oy + 66, "Shift", &s.mouse_mod.shift);
+        if (!s.mouse_mod.any()) c.hint(ox + 40, oy + 92, "Select at least one modifier.");
     }
 
-    c.frame(ox + 20, oy + 126, 480, 96, "Floating Windows");
-    c.stepInt(ox + 40, oy + 152, "Drag threshold to float (px):", &s.drag_threshold, 0, 200, 4);
-    c.stepFrac(ox + 40, oy + 182, "Size of new floating windows:", &s.floating_size, 0.05);
+    c.frame(ox + 20, oy + 134, 480, 90, "Floating Windows");
+    c.stepInt(ox + 40, oy + 158, "Drag threshold to float (px):", &s.drag_threshold, 0, 200, 4);
+    c.stepFrac(ox + 40, oy + 188, "New floating window size:", &s.floating_size, 0.05);
 }
 
+/// WPrefs' "Miscellaneous Ergonomic Preferences" holds the default
+/// applications in wmaker-wl.
 pub fn ergonomic(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    // WPrefs' "Application Preferences": Default applications.
     c.frame(ox + 20, oy + 14, 480, 132, "Default Applications");
     c.textField(ox + 40, oy + 40, 440, "Terminal:", &s.terminal);
     c.textField(ox + 40, oy + 72, 440, "Launcher:", &s.launcher);
     c.textField(ox + 40, oy + 104, 440, "Browser:", &s.browser);
-    c.hint(ox + 40, oy + 158, "Program directly (without shell), arguments separated by space.");
-    c.hint(ox + 40, oy + 176, "Sets spawn_terminal / spawn_launcher / spawn_browser.");
+    c.hint(ox + 40, oy + 158, "A program and its arguments, separated by spaces (no shell).");
+    c.hint(ox + 40, oy + 176, "Started by the spawn_terminal / spawn_launcher / spawn_browser keys.");
 }
 
+/// Dock and Clip.
 pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 150, "Session & Compatibility");
-    c.checkbox(ox + 40, oy + 40, "Automatically start DockApps on launch", &s.enable_dockapps);
-    c.checkbox(ox + 40, oy + 68, "Run autostart script on launch", &s.enable_autostart);
-    c.checkbox(ox + 40, oy + 96, "Read Window Maker files (~/GNUstep/...)", &s.enable_wmaker_compat);
-    c.hint(ox + 40, oy + 124, "Files in ~/.config/wmaker-wl always take precedence.");
-    c.hint(ox + 20, oy + 178, "Dock Editor (Icons/Position): awaiting Phase 5, see docs/TODO.md.");
+    // ---- Dock ---------------------------------------------------------------
+    c.frame(ox + 12, oy + 6, 252, 216, "Dock");
+    c.checkbox(ox + 28, oy + 28, "Show the Dock", &s.dock_enabled);
+    c.label(ox + 28, oy + 50, "Edge of the screen:");
+    var e = s.dock_edge;
+    if (c.iconRadio(ox + 48, oy + 70, .dock_left, e == .left)) e = .left;
+    if (c.iconRadio(ox + 136, oy + 70, .dock_right, e == .right)) e = .right;
+    s.dock_edge = e;
+    c.stepIntW(ox + 28, oy + 144, 130, "From the top (px):", &s.dock_offset, 0, 4000, 10);
+    c.checkbox(ox + 28, oy + 170, "Keep on top of windows", &s.dock_on_top);
+    c.checkbox(ox + 28, oy + 192, "Keep windows out from under it", &s.dock_reserve_space);
+
+    // ---- Clip ---------------------------------------------------------------
+    c.frame(ox + 272, oy + 6, 238, 216, "Clip");
+    c.checkbox(ox + 288, oy + 28, "Show the Clip", &s.clip_enabled);
+    c.label(ox + 288, oy + 50, "Corner of the screen:");
+    var k = s.clip_corner;
+    if (c.iconRadio(ox + 282, oy + 70, .clip_top_left, k == .top_left)) k = .top_left;
+    if (c.iconRadio(ox + 336, oy + 70, .clip_top_right, k == .top_right)) k = .top_right;
+    if (c.iconRadio(ox + 390, oy + 70, .clip_bottom_left, k == .bottom_left)) k = .bottom_left;
+    if (c.iconRadio(ox + 444, oy + 70, .clip_bottom_right, k == .bottom_right)) k = .bottom_right;
+    s.clip_corner = k;
+    c.checkbox(ox + 288, oy + 160, "Keep on top of windows", &s.clip_on_top);
+    c.checkbox(ox + 288, oy + 184, "Start collapsed", &s.clip_collapsed);
+}
+
+/// WPrefs' "Other Configurations": session and compatibility switches.
+pub fn configurations(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
+    c.frame(ox + 20, oy + 14, 480, 160, "Session & Compatibility");
+    c.checkbox(ox + 40, oy + 42, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
+    c.checkbox(ox + 40, oy + 70, "Run the autostart script on launch", &s.enable_autostart);
+    c.checkbox(ox + 40, oy + 98, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
+    c.hint(ox + 40, oy + 130, "Files in ~/.config/wmaker-wl always take precedence over those.");
+    c.hint(ox + 40, oy + 148, "Autostart and autolaunch only run when wmaker-wl starts.");
+}
+
+/// A section that has no counterpart (yet): the reason, not dead controls.
+pub fn unavailable(c: *Ctx, ox: i32, oy: i32, headline: [:0]const u8, text: [:0]const u8) void {
+    c.frame(ox + 20, oy + 14, 480, 200, null);
+    c.label(ox + 40, oy + 34, headline);
+    c.hint(ox + 40, oy + 66, text);
+}
+
+// ---- Keyboard shortcuts: read-only list -----------------------------------
+
+pub const bind_rows = 10;
+const bind_row_h = 17;
+
+/// How far the list can scroll.
+pub fn bindMaxScroll(n: usize) i32 {
+    if (n <= bind_rows) return 0;
+    return @intCast(n - bind_rows);
+}
+
+fn clipText(buf: []u8, s: []const u8, max_chars: usize) [:0]const u8 {
+    var end = @min(s.len, max_chars);
+    // Never cut a UTF-8 sequence in half.
+    while (end > 0 and end < s.len and (s[end] & 0xC0) == 0x80) end -= 1;
+    const cut = end < s.len;
+    const keep = if (cut and end >= 3) end - 3 else end;
+    const n = @min(keep, buf.len - 4);
+    @memcpy(buf[0..n], s[0..n]);
+    var len = n;
+    if (cut) {
+        @memcpy(buf[len..][0..3], "...");
+        len += 3;
+    }
+    buf[len] = 0;
+    return buf[0..len :0];
+}
+
+pub fn shortcuts(c: *Ctx, ox: i32, oy: i32, list: []const binds.Entry, scroll: *i32) void {
+    c.hint(ox + 20, oy + 8, "Read-only. * = from your config.conf. Edit the `bind =` lines by hand.");
+
+    const lx = ox + 20;
+    const ly = oy + 30;
+    const lw = 458;
+    const lh = bind_rows * bind_row_h + 4;
+    const max_scroll = bindMaxScroll(list.len);
+    scroll.* = std.math.clamp(scroll.*, 0, max_scroll);
+
+    if (c.cv) |cv| {
+        cv.fillRect(lx, ly, lw, lh, white);
+        cv.relief(lx, ly, lw, lh, .sunken);
+        var i: usize = 0;
+        while (i < bind_rows) : (i += 1) {
+            const idx: usize = @intCast(scroll.*);
+            if (idx + i >= list.len) break;
+            const e = list[idx + i];
+            const y = ly + 2 + @as(i32, @intCast(i)) * bind_row_h;
+            var b1: [64]u8 = undefined;
+            var b2: [96]u8 = undefined;
+            if (e.user) cv.drawText("*", lx + 4, y, font, black);
+            cv.drawText(clipText(&b1, e.combo, 24), lx + 16, y, font, black);
+            cv.drawText(clipText(&b2, e.action, 52), lx + 200, y, font, if (e.user) black else dim);
+        }
+        if (list.len == 0) cv.drawText("(no key bindings)", lx + 16, ly + 4, font, dim);
+    }
+
+    // Scroll buttons.
+    const bx = lx + lw + 4;
+    if (c.stepBtn(bx, ly, "^") and scroll.* > 0) {
+        scroll.* -= 1;
+        c.res.redraw = true;
+    }
+    if (c.stepBtn(bx, ly + lh - 20, "v") and scroll.* < max_scroll) {
+        scroll.* += 1;
+        c.res.redraw = true;
+    }
+    if (c.cv) |cv| {
+        var buf: [32:0]u8 = undefined;
+        if (list.len > bind_rows) {
+            const s = std.fmt.bufPrintZ(&buf, "{d}/{d}", .{ scroll.* + 1, list.len }) catch "";
+            cv.drawText(s, bx - 4, ly + 28, font_small, dim);
+        }
+    }
 }

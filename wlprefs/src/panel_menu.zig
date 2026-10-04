@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: 0BSD
 //
-// "Menu Preferences" demo panel -- visual port of upstream
+// "Menu Preferences" page -- visual port of upstream
 // WPrefs.app/MenuPreferences.c's createPanel(): same frames, same
 // positions, same official images (xpm/speed*.xpm, menualign*.xpm).
 //
-// DEMO ONLY: it shows every knob Window Maker offers for menus
-// (scrolling speed = the menu "animation", submenu alignment, wrap,
-// scroll-on-hover, vi keys) in a fixed example state. Nothing is read
-// from or written to any config yet.
+// DISPLAY ONLY, and it says so on the page: wmaker-wl's menu has none of
+// these options (scrolling speed, submenu alignment, wrap, vi keys), so
+// nothing is read from or written to any config and the controls do not
+// react. The page stays so that the section looks like WPrefs and the
+// moment an option gets a config.conf key, its control is already here.
 
 const std = @import("std");
 const gfx = @import("gfx.zig");
@@ -85,6 +86,7 @@ fn switchButton(cv: *gfx.Canvas, x: i32, y: i32, h: i32, label: [:0]const u8, on
 /// `ox`,`oy` = top-left of the panel box (the content frame + 2px, as
 /// WMSetViewExpandsToParent(box, 2, 2, 2, 2) does upstream).
 pub fn paint(cv: *gfx.Canvas, ox: i32, oy: i32, st: State, im: *const Images) void {
+    cv.drawText("Display only: wmaker-wl's menu has none of these options yet.", ox + 25, oy + 2, font, gfx.Color.rgb(0x505050));
     // ---- Menu Scrolling Speed -------------------------------------------
     const sx = ox + 25;
     const sy = oy + 20;

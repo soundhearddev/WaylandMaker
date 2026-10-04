@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: 0BSD
 //
+// HINWEIS: das GUI-Projekt `wlprefs/` existiert inzwischen (docs/WMPREFS.md,
+// "Stand"). Es hat seine eigene, getestete Lese-/Schreib-Schicht
+// (wlprefs/src/settings.zig, prefs.zig, configfile.zig) für config.conf und
+// teilt keinen Code mit diesem Skelett. Das Skelett bleibt als Entwurf einer
+// Bibliothek für attributes.conf/dockapps.conf stehen.
+//
 // SKELETT, KEINE FERTIGE IMPLEMENTIERUNG. Siehe docs/WPREFS.md, Abschnitt 6,
 // Punkt 2, für den Gesamtplan, in den dieses Modul passt.
 //

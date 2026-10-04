@@ -72,6 +72,12 @@ pub fn build(b: *std.Build) void {
 
     mod.addImport("wayland", wayland_module);
     mod.addImport("xkbcommon", xkbcommon_module);
+    // wmaker-wl's own default config.conf. wlprefs takes its defaults from
+    // it, so "differs from the default" always means the same thing in the
+    // compositor and here (see settings.zig).
+    mod.addAnonymousImport("default_config.conf", .{
+        .root_source_file = b.path("../src/share/default_config.conf"),
+    });
     fn_link_graphics(b, mod);
 
     mod.addCSourceFile(.{

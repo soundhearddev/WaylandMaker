@@ -1,104 +1,101 @@
 // SPDX-License-Identifier: 0BSD
 //
-// wlprefs settings layer: read/edit/write wmaker-wl's config.conf.
+// wlprefs settings layer: read, edit and write wmaker-wl's config.conf.
 //
-// Intentionally WITHOUT Wayland/Cairo dependency so that it can be tested in isolation.
-// The format is exactly that of src/config.zig: `key = value`, `#` starts
-// a comment (except in `#rrggbb` colors).
+// Deliberately free of Wayland and cairo, so it can be tested in isolation.
+// It mirrors src/config.zig of the compositor rule for rule (comment
+// stripping, `key = value`, value trimming, what counts as a valid value,
+// the renamed options), because "what wlprefs shows" has to be exactly
+// "what the compositor will use".
 //
-// Saving replaces only the lines of changed keys IN-PLACE (the rest of the
-// file remains byte-identical, comments are preserved); unknown
-// keys and `bind`/`unbind` are never touched. New keys are appended
-// to the end. This keeps config.conf as the single source of truth
-// (see docs/WMPREFS.md §5).
+// SAVING NEVER REGENERATES THE FILE. `render()` takes the text that is on
+// disk and changes only the lines of keys the user actually changed:
+//
+//   * every other byte stays: comments, blank lines, `bind`/`unbind`, keys
+//     this program does not know, the user's own formatting, CRLF endings;
+//   * a changed key keeps its position, indentation and trailing comment;
+//   * a key that is not in the file yet is appended at the end, but only if
+//     it differs from the default (a minimal config stays minimal);
+//   * a value wlprefs cannot represent (e.g. `mouse_mod = Super+Mod5`) is
+//     never touched unless the user changes it.
+//
+// "Changed" is decided against `base`, the settings as they were when the
+// file was read. Because the caller re-reads the file right before saving
+// (window.zig), an edit made to the file by hand in the meantime survives
+// as long as the GUI did not change that same key.
 
 const std = @import("std");
 
 pub const max_workspaces = 16;
 
+/// wmaker-wl's own default config, embedded at build time (build.zig). The
+/// defaults below are *this file*, not a copy of it: a default changed in
+/// the compositor changes here with the next build.
+pub const default_config_text = @embedFile("default_config.conf");
+
 pub const CenterMode = enum { on_overflow, always, never };
 pub const NewWindowMode = enum { new_column, stack };
+pub const DockEdge = enum { left, right };
+pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
-/// Modifier for mouse_mod. config.zig supports more combinations; the GUI
-/// offers the four standard individual modifiers and leaves foreign values
-/// unmodified (see `mouse_mod_raw`).
-pub const MouseMod = enum {
-    super,
-    alt,
-    ctrl,
-    shift,
+/// `mouse_mod`: any combination of the four common modifiers. `raw` marks a
+/// value the GUI cannot show faithfully (Mod3/Mod5, or something that does
+/// not parse): the line is then left alone unless the user edits it.
+pub const MouseMods = struct {
+    super: bool = true,
+    alt: bool = false,
+    ctrl: bool = false,
+    shift: bool = false,
+    raw: bool = false,
 
-    pub fn text(m: MouseMod) []const u8 {
-        return switch (m) {
-            .super => "Super",
-            .alt => "Alt",
-            .ctrl => "Ctrl",
-            .shift => "Shift",
-        };
+    pub fn any(m: MouseMods) bool {
+        return m.super or m.alt or m.ctrl or m.shift;
     }
 
-    pub fn parse(s: []const u8) ?MouseMod {
-        const eq = std.ascii.eqlIgnoreCase;
-        if (eq(s, "super") or eq(s, "mod4") or eq(s, "logo")) return .super;
-        if (eq(s, "alt") or eq(s, "mod1")) return .alt;
-        if (eq(s, "ctrl") or eq(s, "control")) return .ctrl;
-        if (eq(s, "shift")) return .shift;
-        return null;
+    /// Same tokens as config.zig's parseMods. null if nothing valid.
+    pub fn parse(s: []const u8) ?MouseMods {
+        var m: MouseMods = .{ .super = false };
+        var seen = false;
+        var it = std.mem.tokenizeScalar(u8, s, '+');
+        while (it.next()) |tok| {
+            const t = std.mem.trim(u8, tok, " \t");
+            if (t.len == 0) continue;
+            seen = true;
+            const eq = std.ascii.eqlIgnoreCase;
+            if (eq(t, "super") or eq(t, "mod4") or eq(t, "logo")) {
+                m.super = true;
+            } else if (eq(t, "shift")) {
+                m.shift = true;
+            } else if (eq(t, "ctrl") or eq(t, "control")) {
+                m.ctrl = true;
+            } else if (eq(t, "alt") or eq(t, "mod1")) {
+                m.alt = true;
+            } else if (eq(t, "mod3") or eq(t, "mod5") or eq(t, "altgr")) {
+                m.raw = true; // valid for the compositor, not for this GUI
+            } else return null;
+        }
+        return if (seen) m else null;
     }
-};
 
-/// All keys edited by wlprefs. Defaults = src/share/default_config.conf.
-pub const Settings = struct {
-    // layout
-    gap: i32 = 8,
-    outer_gap: i32 = 8,
-    default_column_width: f64 = 0.5,
-    width_step: f64 = 0.1,
-    min_window_size: i32 = 120,
-    center_focused_column: CenterMode = .on_overflow,
-    new_window: NewWindowMode = .new_column,
-
-    // look
-    border_width: i32 = 2,
-    border_focused: u32 = 0xd8a657,
-    border_unfocused: u32 = 0x3c3836,
-    border_floating: u32 = 0x7daea3,
-
-    // workspaces
-    workspace_count: u32 = 4,
-
-    // floating / mouse
-    drag_threshold: i32 = 24,
-    floating_size: f64 = 0.6,
-    focus_follows_mouse: bool = false,
-    mouse_mod: MouseMod = .super,
-    /// true if mouse_mod in the file is a value that the GUI cannot
-    /// represent (e.g. `Super+Shift`): then the key will not be touched
-    /// during saving unless the user changes it themselves.
-    mouse_mod_raw: bool = false,
-
-    // programs (as a single line, as in the file)
-    terminal: Text = .{},
-    launcher: Text = .{},
-    browser: Text = .{},
-
-    // wmaker compat / session
-    enable_wmaker_compat: bool = false,
-    enable_autostart: bool = true,
-    enable_dockapps: bool = true,
-
-    pub fn init() Settings {
-        var s: Settings = .{};
-        s.terminal.set("alacritty");
-        s.launcher.set("fuzzel");
-        s.browser.set("firefox");
-        return s;
+    pub fn format(m: MouseMods, out: []u8) ?[]const u8 {
+        if (m.raw or !m.any()) return null;
+        var w: std.Io.Writer = .fixed(out);
+        var first = true;
+        inline for (.{ .{ "Super", "super" }, .{ "Ctrl", "ctrl" }, .{ "Alt", "alt" }, .{ "Shift", "shift" } }) |p| {
+            if (@field(m, p[1])) {
+                if (!first) w.writeByte('+') catch return null;
+                w.writeAll(p[0]) catch return null;
+                first = false;
+            }
+        }
+        return w.buffered();
     }
 };
 
-/// Small inline text buffer (no allocator needed, suitable for GUI).
+/// A small inline text buffer: no allocator, suitable for a GUI field.
 pub const Text = struct {
-    buf: [160]u8 = undefined,
+    pub const capacity = 256;
+    buf: [capacity]u8 = undefined,
     len: usize = 0,
 
     pub fn set(t: *Text, s: []const u8) void {
@@ -110,21 +107,88 @@ pub const Text = struct {
         return t.buf[0..t.len];
     }
 
+    /// Typing. Refuses what a config line cannot hold: control characters,
+    /// and a `#` that would start a comment (at the start or after
+    /// whitespace -- the compositor cuts the line there).
     pub fn append(t: *Text, ch: u8) void {
-        if (t.len < t.buf.len) {
-            t.buf[t.len] = ch;
-            t.len += 1;
-        }
+        if (t.len >= t.buf.len) return;
+        if (ch < 0x20 or ch == 0x7f) return;
+        if (ch == '#' and (t.len == 0 or t.buf[t.len - 1] == ' ' or t.buf[t.len - 1] == '\t')) return;
+        t.buf[t.len] = ch;
+        t.len += 1;
     }
 
     pub fn backspace(t: *Text) void {
         if (t.len > 0) t.len -= 1;
     }
+
+    pub fn clear(t: *Text) void {
+        t.len = 0;
+    }
 };
 
-// ---------------------------------------------------------------------------
-// Parsing -- same rules as config.zig (stripComment/applyOption)
-// ---------------------------------------------------------------------------
+/// Every key edited by wlprefs.
+pub const Settings = struct {
+    // ---- layout
+    gap: i32 = 8,
+    outer_gap: i32 = 8,
+    default_column_width: f64 = 0.5,
+    /// As typed: "0.333, 0.5, 0.667, 1.0".
+    width_presets: Text = .{},
+    width_step: f64 = 0.1,
+    min_window_size: i32 = 120,
+    center_focused_column: CenterMode = .on_overflow,
+    new_window: NewWindowMode = .new_column,
+
+    // ---- look
+    border_width: i32 = 2,
+    border_focused: u32 = 0xd8a657,
+    border_unfocused: u32 = 0x3c3836,
+    border_floating: u32 = 0x7daea3,
+
+    // ---- workspaces
+    workspace_count: u32 = 4,
+    /// As typed: "Main, Web, Code". An empty entry means "no name".
+    workspace_names: Text = .{},
+
+    // ---- floating / mouse
+    drag_threshold: i32 = 24,
+    floating_size: f64 = 0.6,
+    focus_follows_mouse: bool = false,
+    mouse_mod: MouseMods = .{},
+
+    // ---- programs (one line each, as in the file)
+    terminal: Text = .{},
+    launcher: Text = .{},
+    browser: Text = .{},
+
+    // ---- compatibility / session
+    enable_wmaker_compat: bool = false,
+    enable_autostart: bool = true,
+    enable_dockapps: bool = true,
+
+    // ---- Dock and Clip
+    dock_enabled: bool = true,
+    dock_edge: DockEdge = .right,
+    dock_offset: i32 = 0,
+    dock_on_top: bool = true,
+    dock_reserve_space: bool = true,
+    clip_enabled: bool = true,
+    clip_corner: ClipCorner = .top_left,
+    clip_on_top: bool = true,
+    clip_collapsed: bool = false,
+
+    /// The compositor's defaults: wmaker-wl's shipped default_config.conf.
+    pub fn init() Settings {
+        var s: Settings = .{};
+        parse(&s, default_config_text);
+        return s;
+    }
+};
+
+// ----------------------------------------------------------------------------
+// Parsing: the rules of config.zig
+// ----------------------------------------------------------------------------
 
 fn isColour(s: []const u8) bool {
     if (s.len < 7 or s[0] != '#') return false;
@@ -132,10 +196,11 @@ fn isColour(s: []const u8) bool {
     return s.len == 7 or s[7] == ' ' or s[7] == '\t' or s[7] == '\r';
 }
 
-/// Length of content excluding comments (without trim).
+/// Where a comment starts in `raw` (raw.len if none): a `#` at the start or
+/// after whitespace, unless it introduces a `#rrggbb` colour.
 fn commentStart(raw: []const u8) usize {
-    for (raw, 0..) |c, i| {
-        if (c != '#') continue;
+    for (raw, 0..) |ch, i| {
+        if (ch != '#') continue;
         if (!(i == 0 or raw[i - 1] == ' ' or raw[i - 1] == '\t')) continue;
         if (isColour(raw[i..])) continue;
         return i;
@@ -155,12 +220,34 @@ fn parseColour(value: []const u8) ?u32 {
     return std.fmt.parseInt(u32, v, 16) catch null;
 }
 
-/// Applies a single `key = value` line. Unknown/invalid entries are ignored
-/// as in the compositor (the value then remains the default).
-pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
-    const eql = std.mem.eql;
+/// Renamed options of the previous config format keep working in the
+/// compositor; so they do here.
+pub fn canonicalKey(key: []const u8) []const u8 {
+    if (std.mem.eql(u8, key, "default_column_width_fraction")) return "default_column_width";
+    if (std.mem.eql(u8, key, "min_column_width")) return "min_window_size";
+    return key;
+}
 
-    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold" }) |name| {
+/// Is `text` a list the compositor accepts for width_presets: at least one
+/// number, each in (0, 1]?
+pub fn validPresets(text: []const u8) bool {
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, text, ", \t");
+    while (it.next()) |tok| {
+        const f = std.fmt.parseFloat(f64, tok) catch return false;
+        if (!(f > 0 and f <= 1)) return false;
+        n += 1;
+    }
+    return n > 0;
+}
+
+/// Apply one `key = value` pair. Invalid values are ignored, exactly as the
+/// compositor ignores them (it then keeps the earlier/default value).
+pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
+    const eql = std.mem.eql;
+    const key = canonicalKey(raw_key);
+
+    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
             const v = std.fmt.parseInt(i32, value, 10) catch return;
             if (v >= 0) @field(s, name) = v;
@@ -180,7 +267,11 @@ pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
             return;
         }
     }
-    inline for (.{ "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart", "enable_dockapps" }) |name| {
+    inline for (.{
+        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",         "clip_collapsed",
+    }) |name| {
         if (eql(u8, key, name)) {
             if (parseBool(value)) |b| @field(s, name) = b;
             return;
@@ -188,50 +279,115 @@ pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
     }
     inline for (.{ "terminal", "launcher", "browser" }) |name| {
         if (eql(u8, key, name)) {
-            @field(s, name).set(value);
+            // The compositor rejects an empty command and keeps the old one.
+            if (value.len > 0) @field(s, name).set(value);
             return;
         }
     }
 
-    if (eql(u8, key, "workspace_count")) {
+    if (eql(u8, key, "width_presets")) {
+        if (validPresets(value)) s.width_presets.set(value);
+    } else if (eql(u8, key, "workspace_names")) {
+        s.workspace_names.set(value);
+    } else if (eql(u8, key, "workspace_count")) {
         const v = std.fmt.parseInt(u32, value, 10) catch return;
         if (v >= 1 and v <= max_workspaces) s.workspace_count = v;
     } else if (eql(u8, key, "center_focused_column")) {
         if (std.meta.stringToEnum(CenterMode, value)) |m| s.center_focused_column = m;
     } else if (eql(u8, key, "new_window")) {
         if (std.meta.stringToEnum(NewWindowMode, value)) |m| s.new_window = m;
+    } else if (eql(u8, key, "dock_edge")) {
+        if (std.meta.stringToEnum(DockEdge, value)) |m| s.dock_edge = m;
+    } else if (eql(u8, key, "clip_corner")) {
+        if (std.meta.stringToEnum(ClipCorner, value)) |m| s.clip_corner = m;
     } else if (eql(u8, key, "mouse_mod")) {
-        if (MouseMod.parse(value)) |m| {
+        if (MouseMods.parse(value)) |m| {
             s.mouse_mod = m;
-            s.mouse_mod_raw = false;
         } else {
-            s.mouse_mod_raw = true;
+            // The compositor keeps its default; the GUI must not "fix" it.
+            s.mouse_mod.raw = true;
         }
     }
+}
+
+/// Split one line of the file the way config.zig does. null for lines that
+/// carry no `key = value`.
+const Line = struct {
+    key: []const u8,
+    value: []const u8,
+    /// Where the comment starts in the raw line (raw.len if none).
+    comment: usize,
+};
+
+fn splitLine(raw: []const u8) ?Line {
+    const cs = commentStart(raw);
+    const body = std.mem.trim(u8, raw[0..cs], " \t\r");
+    if (body.len == 0) return null;
+    const eq = std.mem.indexOfScalar(u8, body, '=') orelse return null;
+    return .{
+        .key = std.mem.trim(u8, body[0..eq], " \t"),
+        .value = std.mem.trim(u8, body[eq + 1 ..], " \t\""),
+        .comment = cs,
+    };
 }
 
 pub fn parse(s: *Settings, text: []const u8) void {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
-        const body = std.mem.trim(u8, raw[0..commentStart(raw)], " \t\r");
-        if (body.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, body, '=') orelse continue;
-        const key = std.mem.trim(u8, body[0..eq], " \t");
-        const value = std.mem.trim(u8, body[eq + 1 ..], " \t\"");
-        apply(s, key, value);
+        const l = splitLine(raw) orelse continue;
+        apply(s, l.key, l.value);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Writing
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Validation: what we refuse to write
+// ----------------------------------------------------------------------------
 
-/// Formats the value of a key in the way config.zig reads it back.
-/// Returns null for keys unknown to this layer.
-pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
+pub const Problem = struct {
+    key: []const u8,
+    message: []const u8,
+};
+
+fn commandProblem(key: []const u8, label: []const u8, t: *const Text, storage: *[96]u8) ?Problem {
+    const v = std.mem.trim(u8, t.get(), " \t");
+    if (v.len == 0) {
+        return .{ .key = key, .message = std.fmt.bufPrint(storage, "{s}: must not be empty", .{label}) catch "must not be empty" };
+    }
+    // A leading quote is stripped from the line by the compositor, which
+    // changes the meaning of what follows.
+    if (v[0] == '"') {
+        return .{ .key = key, .message = std.fmt.bufPrint(storage, "{s}: must not start with a quote", .{label}) catch "must not start with a quote" };
+    }
+    return null;
+}
+
+/// The first reason the current settings cannot be saved faithfully, or
+/// null. `storage` backs the returned message.
+pub fn problem(s: *const Settings, storage: *[96]u8) ?Problem {
+    if (commandProblem("terminal", "Terminal", &s.terminal, storage)) |p| return p;
+    if (commandProblem("launcher", "Launcher", &s.launcher, storage)) |p| return p;
+    if (commandProblem("browser", "Browser", &s.browser, storage)) |p| return p;
+    if (!validPresets(s.width_presets.get())) {
+        return .{ .key = "width_presets", .message = "Presets: numbers between 0 and 1, separated by commas" };
+    }
+    if (!s.mouse_mod.raw and !s.mouse_mod.any()) {
+        return .{ .key = "mouse_mod", .message = "Mouse: select at least one modifier" };
+    }
+    return null;
+}
+
+// ----------------------------------------------------------------------------
+// Formatting + rendering
+// ----------------------------------------------------------------------------
+
+/// The value of `key` as it is written to the file (no `#` before a colour;
+/// render() adds one when the line already used one). null for keys this
+/// layer does not know, and for values it must not write.
+pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
     const eql = std.mem.eql;
+    const key = canonicalKey(raw_key);
 
-    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold" }) |name| {
+    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{d}", .{@field(s, name)}) catch null;
     }
     inline for (.{ "default_column_width", "width_step", "floating_size" }) |name| {
@@ -240,37 +396,68 @@ pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
     inline for (.{ "border_focused", "border_unfocused", "border_floating" }) |name| {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{x:0>6}", .{@field(s, name)}) catch null;
     }
-    inline for (.{ "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart", "enable_dockapps" }) |name| {
+    inline for (.{
+        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",         "clip_collapsed",
+    }) |name| {
         if (eql(u8, key, name)) return if (@field(s, name)) "true" else "false";
     }
     inline for (.{ "terminal", "launcher", "browser" }) |name| {
-        if (eql(u8, key, name)) return @field(s, name).get();
+        if (eql(u8, key, name)) return std.mem.trim(u8, @field(s, name).get(), " \t");
     }
+    if (eql(u8, key, "width_presets")) return std.mem.trim(u8, s.width_presets.get(), " \t");
+    if (eql(u8, key, "workspace_names")) return std.mem.trim(u8, s.workspace_names.get(), " \t");
     if (eql(u8, key, "workspace_count")) return std.fmt.bufPrint(out, "{d}", .{s.workspace_count}) catch null;
     if (eql(u8, key, "center_focused_column")) return @tagName(s.center_focused_column);
     if (eql(u8, key, "new_window")) return @tagName(s.new_window);
-    if (eql(u8, key, "mouse_mod")) return if (s.mouse_mod_raw) null else s.mouse_mod.text();
+    if (eql(u8, key, "dock_edge")) return @tagName(s.dock_edge);
+    if (eql(u8, key, "clip_corner")) return @tagName(s.clip_corner);
+    if (eql(u8, key, "mouse_mod")) return s.mouse_mod.format(out);
     return null;
 }
 
-/// All keys written by the GUI (order = order when appending).
+/// All keys written by the GUI (the order is the order of appending).
 pub const keys = [_][]const u8{
-    "gap",              "outer_gap",            "default_column_width",
-    "width_step",       "min_window_size",      "center_focused_column",
-    "new_window",       "border_width",         "border_focused",
-    "border_unfocused", "border_floating",      "workspace_count",
-    "drag_threshold",   "floating_size",        "focus_follows_mouse",
-    "mouse_mod",        "terminal",             "launcher",
-    "browser",          "enable_wmaker_compat", "enable_autostart",
-    "enable_dockapps",
+    "gap",                 "outer_gap",            "default_column_width",  "width_presets",
+    "width_step",          "min_window_size",      "center_focused_column", "new_window",
+    "border_width",        "border_focused",       "border_unfocused",      "border_floating",
+    "workspace_count",     "workspace_names",      "drag_threshold",        "floating_size",
+    "focus_follows_mouse", "mouse_mod",            "terminal",              "launcher",
+    "browser",             "enable_wmaker_compat", "enable_autostart",      "enable_dockapps",
+    "dock_enabled",        "dock_edge",            "dock_offset",           "dock_on_top",
+    "dock_reserve_space",  "clip_enabled",         "clip_corner",           "clip_on_top",
+    "clip_collapsed",
 };
 
-/// Builds the new file content: `original` with all keys from `keys`
-/// set in-place to the value from `s`. Only lines whose value has
-/// actually changed (compared to `base`, the state read when loading)
-/// are modified -- everything else remains byte-identical.
-/// Keys missing in the file that differ from the default are appended to
-/// the end. Result belongs to the caller (`gpa`).
+fn keyIndex(key: []const u8) ?usize {
+    const k = canonicalKey(key);
+    for (keys, 0..) |name, i| if (std.mem.eql(u8, name, k)) return i;
+    return null;
+}
+
+/// Do `a` and `b` hold the same value for `key`? (Compared as written.)
+pub fn sameValue(a: *const Settings, b: *const Settings, key: []const u8) bool {
+    var x: [64]u8 = undefined;
+    var y: [64]u8 = undefined;
+    const fa = format(a, key, &x);
+    const fb = format(b, key, &y);
+    if (fa == null or fb == null) return (fa == null) == (fb == null);
+    return std.mem.eql(u8, fa.?, fb.?);
+}
+
+/// How many keys differ.
+pub fn changedCount(a: *const Settings, b: *const Settings) usize {
+    var n: usize = 0;
+    for (keys) |k| {
+        if (!sameValue(a, b, k)) n += 1;
+    }
+    return n;
+}
+
+/// The new file content: `original` with the keys that differ between `s`
+/// and `base` changed in place. See the top of this file for the rules.
+/// The result belongs to the caller (`gpa`).
 pub fn render(
     gpa: std.mem.Allocator,
     original: []const u8,
@@ -282,7 +469,6 @@ pub fn render(
 
     var seen = [_]bool{false} ** keys.len;
     var vbuf: [64]u8 = undefined;
-    var bbuf: [64]u8 = undefined;
 
     var lines = std.mem.splitScalar(u8, original, '\n');
     var first = true;
@@ -290,63 +476,58 @@ pub fn render(
         if (!first) try out.append(gpa, '\n');
         first = false;
 
-        const cs = commentStart(raw);
-        const body = std.mem.trim(u8, raw[0..cs], " \t\r");
-        const eq = std.mem.indexOfScalar(u8, body, '=');
-        if (body.len == 0 or eq == null) {
+        const l = splitLine(raw) orelse {
             try out.appendSlice(gpa, raw);
             continue;
-        }
-        const key = std.mem.trim(u8, body[0..eq.?], " \t");
-
-        const idx = keyIndex(key) orelse {
+        };
+        const idx = keyIndex(l.key) orelse {
             try out.appendSlice(gpa, raw);
             continue;
         };
         seen[idx] = true;
 
-        const new_v = format(s, key, &vbuf);
-        const old_v = format(base, key, &bbuf);
-        const changed = if (new_v == null or old_v == null)
-            (new_v == null) != (old_v == null)
-        else
-            !std.mem.eql(u8, new_v.?, old_v.?);
-
-        if (!changed or new_v == null) {
+        const name = keys[idx];
+        // Untouched by the user, or a value we must not write: byte-identical.
+        const new_v = format(s, name, &vbuf) orelse {
+            try out.appendSlice(gpa, raw);
+            continue;
+        };
+        if (sameValue(s, base, name)) {
             try out.appendSlice(gpa, raw);
             continue;
         }
 
-        // Rewrite line, preserving indentation + comment.
+        // Rewrite the line: indentation, key, value, then the old comment.
         const indent_len = raw.len - std.mem.trimStart(u8, raw, " \t").len;
         try out.appendSlice(gpa, raw[0..indent_len]);
-        try out.appendSlice(gpa, key);
+        try out.appendSlice(gpa, name);
         try out.appendSlice(gpa, " = ");
-        try out.appendSlice(gpa, new_v.?);
-        if (cs < raw.len) {
-            // Preserve comment along with preceding whitespace.
-            var ws = cs;
-            while (ws > 0 and (raw[ws - 1] == ' ' or raw[ws - 1] == '\t')) ws -= 1;
+        // A colour that was written as `#rrggbb` stays that way.
+        if (isColourKey(name) and std.mem.startsWith(u8, l.value, "#")) try out.append(gpa, '#');
+        try out.appendSlice(gpa, new_v);
+
+        if (l.comment < raw.len) {
             try out.appendSlice(gpa, "  ");
-            try out.appendSlice(gpa, raw[cs..]);
+            try out.appendSlice(gpa, raw[l.comment..]); // includes a trailing \r
+        } else if (raw.len > 0 and raw[raw.len - 1] == '\r') {
+            try out.append(gpa, '\r'); // keep CRLF files CRLF
         }
     }
 
-    // Append missing keys, but only if they differ from the default
-    // (otherwise saving would bloat a minimal config file).
+    // Keys that are not in the file: append the ones that differ from the
+    // default, so saving never bloats a minimal config.
     const def = Settings.init();
     var header_done = false;
-    for (keys, 0..) |key, i| {
+    for (keys, 0..) |name, i| {
         if (seen[i]) continue;
-        const new_v = format(s, key, &vbuf) orelse continue;
-        const def_v = format(&def, key, &bbuf) orelse continue;
-        if (std.mem.eql(u8, new_v, def_v)) continue;
+        const new_v = format(s, name, &vbuf) orelse continue;
+        if (sameValue(s, &def, name)) continue;
         if (!header_done) {
             if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
             try out.appendSlice(gpa, "\n# ---- set by wlprefs ----\n");
             header_done = true;
         }
-        try out.appendSlice(gpa, key);
+        try out.appendSlice(gpa, name);
         try out.appendSlice(gpa, " = ");
         try out.appendSlice(gpa, new_v);
         try out.append(gpa, '\n');
@@ -355,58 +536,132 @@ pub fn render(
     return out.toOwnedSlice(gpa);
 }
 
-fn keyIndex(key: []const u8) ?usize {
-    for (keys, 0..) |k, i| if (std.mem.eql(u8, k, key)) return i;
-    return null;
+fn isColourKey(name: []const u8) bool {
+    return std.mem.eql(u8, name, "border_focused") or
+        std.mem.eql(u8, name, "border_unfocused") or
+        std.mem.eql(u8, name, "border_floating");
 }
 
-// ---------------------------------------------------------------------------
-// File + Reload
-// ---------------------------------------------------------------------------
-
-/// Sends SIGHUP to all running `wmaker-wl` processes of the user
-/// (existing live-reload mechanism, see src/main.zig installSighupHandler).
-/// Deliberately using `pkill`: no IPC, no PID file required.
-pub fn signalReload() void {
-    const argv = [_:null]?[*:0]const u8{ "pkill", "-HUP", "-x", "wmaker-wl" };
-    const pid = std.os.linux.fork();
-    if (std.posix.errno(pid) != .SUCCESS) return;
-    if (pid == 0) {
-        _ = std.os.linux.execve("/usr/bin/pkill", &argv, @ptrCast(std.c.environ));
-        std.os.linux.exit(127);
+/// After a save: `base` is now what the file says (`new_base`). Everything
+/// the user did not change keeps following the file, so a value edited by
+/// hand in the meantime shows up instead of being shown stale.
+pub fn rebase(cur: *Settings, old_base: *const Settings, new_base: *const Settings) void {
+    var buf: [64]u8 = undefined;
+    for (keys) |k| {
+        if (!sameValue(cur, old_base, k)) continue; // the user's change: keep
+        if (sameValue(cur, new_base, k)) continue;
+        if (format(new_base, k, &buf)) |v| apply(cur, k, v);
     }
-    var status: u32 = 0;
-    _ = std.os.linux.wait4(@intCast(pid), &status, 0, null);
+    // `raw` mouse_mod has no text form; follow the file for that too.
+    if (sameValue(cur, old_base, "mouse_mod") and new_base.mouse_mod.raw) cur.mouse_mod = new_base.mouse_mod;
 }
 
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 
-test "parse reads values like config.zig" {
+const testing = std.testing;
+
+test "defaults are the compositor's shipped default_config.conf" {
+    const d = Settings.init();
+    try testing.expectEqualStrings("alacritty", d.terminal.get());
+    try testing.expectEqualStrings("fuzzel", d.launcher.get());
+    try testing.expectEqualStrings("firefox", d.browser.get());
+    try testing.expect(validPresets(d.width_presets.get()));
+    try testing.expectEqual(@as(i32, 8), d.gap);
+    try testing.expectEqual(DockEdge.right, d.dock_edge);
+    try testing.expectEqual(ClipCorner.top_left, d.clip_corner);
+    try testing.expect(d.dock_enabled and d.clip_enabled and d.dock_on_top and d.dock_reserve_space);
+    try testing.expect(!d.clip_collapsed);
+    try testing.expectEqual(@as(usize, 0), d.workspace_names.len);
+}
+
+test "the struct's own defaults agree with the shipped file (except the text fields)" {
+    // The struct defaults only matter for a key the shipped file does not
+    // set; this catches the two drifting apart.
+    const from_file = Settings.init();
+    const plain: Settings = .{};
+    for (keys) |k| {
+        if (std.mem.eql(u8, k, "terminal") or std.mem.eql(u8, k, "launcher") or
+            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets")) continue;
+        if (!sameValue(&from_file, &plain, k)) {
+            std.debug.print("default differs for `{s}`\n", .{k});
+            return error.DefaultsDiverged;
+        }
+    }
+}
+
+test "every key has a text form, and the key list has no duplicates" {
+    var s = Settings.init();
+    var buf: [64]u8 = undefined;
+    for (keys, 0..) |k, i| {
+        try testing.expect(format(&s, k, &buf) != null);
+        for (keys[i + 1 ..]) |other| try testing.expect(!std.mem.eql(u8, k, other));
+    }
+}
+
+test "parse follows config.zig, including what it ignores" {
     var s = Settings.init();
     parse(&s,
         \\gap = 12   # comment
         \\border_focused = #ff0000
         \\focus_follows_mouse = yes
         \\center_focused_column = always
-        \\terminal = foot -e "htop -d 5"
+        \\terminal = foot -e htop
         \\mouse_mod = Alt
         \\workspace_count = 99
+        \\dock_edge = left
+        \\clip_corner = bottom_right
+        \\dock_offset = -4
+        \\clip_corner = middle
         \\
     );
-    try std.testing.expectEqual(@as(i32, 12), s.gap);
-    try std.testing.expectEqual(@as(u32, 0xff0000), s.border_focused);
-    try std.testing.expect(s.focus_follows_mouse);
-    try std.testing.expectEqual(CenterMode.always, s.center_focused_column);
-    try std.testing.expectEqualStrings("foot -e \"htop -d 5\"", s.terminal.get());
-    try std.testing.expectEqual(MouseMod.alt, s.mouse_mod);
-    // invalid (>16) -> default remains
-    try std.testing.expectEqual(@as(u32, 4), s.workspace_count);
+    try testing.expectEqual(@as(i32, 12), s.gap);
+    try testing.expectEqual(@as(u32, 0xff0000), s.border_focused);
+    try testing.expect(s.focus_follows_mouse);
+    try testing.expectEqual(CenterMode.always, s.center_focused_column);
+    try testing.expectEqualStrings("foot -e htop", s.terminal.get());
+    try testing.expect(s.mouse_mod.alt and !s.mouse_mod.super);
+    try testing.expectEqual(@as(u32, 4), s.workspace_count); // 99: ignored
+    try testing.expectEqual(DockEdge.left, s.dock_edge);
+    try testing.expectEqual(@as(i32, 0), s.dock_offset); // -4: ignored
+    try testing.expectEqual(ClipCorner.bottom_right, s.clip_corner); // "middle": ignored
+}
+
+test "a trailing quote is trimmed from the value, exactly like the compositor does" {
+    var s = Settings.init();
+    parse(&s, "terminal = foot -e \"htop -d 5\"\n");
+    // config.zig trims quotes at both ends of the value; parseCommand then
+    // tolerates the unterminated one, so the argv is the same either way.
+    try testing.expectEqualStrings("foot -e \"htop -d 5", s.terminal.get());
+}
+
+test "renamed options of the old format are understood" {
+    var s = Settings.init();
+    parse(&s, "default_column_width_fraction = 0.4\nmin_column_width = 200\n");
+    try testing.expectApproxEqAbs(@as(f64, 0.4), s.default_column_width, 0.0001);
+    try testing.expectEqual(@as(i32, 200), s.min_window_size);
+}
+
+test "mouse_mod: combinations, order, and values the GUI cannot show" {
+    var m = MouseMods.parse("Super+Shift").?;
+    try testing.expect(m.super and m.shift and !m.alt and !m.ctrl and !m.raw);
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("Super+Shift", m.format(&buf).?);
+    m.alt = true;
+    m.ctrl = true;
+    try testing.expectEqualStrings("Super+Ctrl+Alt+Shift", m.format(&buf).?);
+    try testing.expect(MouseMods.parse("mod4").?.super);
+    try testing.expect(MouseMods.parse("Super+Mod5").?.raw);
+    try testing.expect(MouseMods.parse("nonsense") == null);
+    try testing.expect(MouseMods.parse("") == null);
+    // Nothing selected, or raw: no text form, so nothing gets written.
+    try testing.expect((MouseMods{ .super = false }).format(&buf) == null);
+    try testing.expect((MouseMods{ .raw = true }).format(&buf) == null);
 }
 
 test "render replaces only modified lines and preserves comments" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     const original =
         \\# my config
         \\gap = 8                          # between windows
@@ -424,7 +679,7 @@ test "render replaces only modified lines and preserves comments" {
 
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try std.testing.expectEqualStrings(
+    try testing.expectEqualStrings(
         \\# my config
         \\gap = 20  # between windows
         \\outer_gap = 8
@@ -436,60 +691,238 @@ test "render replaces only modified lines and preserves comments" {
 }
 
 test "render without changes is byte-identical" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     const original = "gap = 8 # x\r\nfoo\n\n  border_width = 3\n";
     var base = Settings.init();
     parse(&base, original);
     const out = try render(gpa, original, &base, &base);
     defer gpa.free(out);
-    try std.testing.expectEqualStrings(original, out);
+    try testing.expectEqualStrings(original, out);
 }
 
-test "render appends missing keys that differ from the default" {
-    const gpa = std.testing.allocator;
+test "render keeps CRLF line endings on rewritten lines" {
+    const gpa = testing.allocator;
+    const original = "gap = 8\r\nouter_gap = 8\r\n";
+    var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.gap = 9;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("gap = 9\r\nouter_gap = 8\r\n", out);
+}
+
+test "render keeps '#' colours as they were written, and writes plain hex otherwise" {
+    const gpa = testing.allocator;
+    const original = "border_focused = #112233\nborder_unfocused = 445566\n";
+    var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.border_focused = 0xaabbcc;
+    s.border_unfocused = 0x010203;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("border_focused = #aabbcc\nborder_unfocused = 010203\n", out);
+    var back = Settings.init();
+    parse(&back, out);
+    try testing.expectEqual(@as(u32, 0xaabbcc), back.border_focused);
+    try testing.expectEqual(@as(u32, 0x010203), back.border_unfocused);
+}
+
+test "render appends missing keys that differ from the default, only those" {
+    const gpa = testing.allocator;
     const original = "gap = 8\n";
     var base = Settings.init();
     parse(&base, original);
     var s = base;
     s.border_focused = 0x112233;
-    s.workspace_count = 6; // differs
+    s.workspace_count = 6;
+    s.dock_edge = .left;
     s.gap = 8; // same -> nothing
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "border_focused = 112233\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "workspace_count = 6\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "outer_gap") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "border_focused = 112233\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "workspace_count = 6\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dock_edge = left\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "outer_gap") == null);
+    try testing.expect(std.mem.startsWith(u8, out, "gap = 8\n"));
 }
 
-test "render round-trip: written file parses back to GUI values" {
-    const gpa = std.testing.allocator;
+test "render: a commented-out example line does not count as the key being set" {
+    const gpa = testing.allocator;
+    const original = "# workspace_names = Main, Web\ngap = 8\n";
     var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.workspace_names.set("Main, Web");
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    // The comment is untouched and a real line is appended.
+    try testing.expect(std.mem.startsWith(u8, out, "# workspace_names = Main, Web\ngap = 8\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\nworkspace_names = Main, Web\n") != null);
+}
+
+test "render: a renamed old key is rewritten in place, not duplicated" {
+    const gpa = testing.allocator;
+    const original = "min_column_width = 200\n";
+    var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.min_window_size = 300;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("min_window_size = 300\n", out);
+}
+
+test "render round-trip: the written file parses back to the GUI values" {
+    const gpa = testing.allocator;
+    const base = Settings.init();
     var s = base;
     s.gap = 3;
     s.border_focused = 0xabcdef;
     s.new_window = .stack;
-    s.mouse_mod = .ctrl;
+    s.mouse_mod = .{ .super = true, .shift = true };
     s.default_column_width = 0.667;
     s.terminal.set("foot");
+    s.workspace_names.set("Main, , Web");
+    s.width_presets.set("0.25, 0.5, 1");
+    s.dock_offset = 120;
+    s.dock_on_top = false;
+    s.clip_corner = .bottom_left;
+    s.clip_collapsed = true;
     const out = try render(gpa, "", &s, &base);
     defer gpa.free(out);
     var back = Settings.init();
     parse(&back, out);
-    try std.testing.expectEqual(@as(i32, 3), back.gap);
-    try std.testing.expectEqual(@as(u32, 0xabcdef), back.border_focused);
-    try std.testing.expectEqual(NewWindowMode.stack, back.new_window);
-    try std.testing.expectEqual(MouseMod.ctrl, back.mouse_mod);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.667), back.default_column_width, 0.0005);
-    try std.testing.expectEqualStrings("foot", back.terminal.get());
+    try testing.expectEqual(@as(usize, 0), changedCount(&s, &back));
 }
 
-test "unrecognized mouse_mod is not overwritten" {
-    const gpa = std.testing.allocator;
-    const original = "mouse_mod = Super+Shift\n";
+test "an unrecognised mouse_mod is never overwritten" {
+    const gpa = testing.allocator;
+    const original = "mouse_mod = Super+Mod5\nmouse_mod_x = 1\n";
     var base = Settings.init();
     parse(&base, original);
-    try std.testing.expect(base.mouse_mod_raw);
+    try testing.expect(base.mouse_mod.raw);
     const out = try render(gpa, original, &base, &base);
     defer gpa.free(out);
-    try std.testing.expectEqualStrings(original, out);
+    try testing.expectEqualStrings(original, out);
+    // Even with other changes made, that line stays.
+    var s = base;
+    s.gap = 9;
+    const out2 = try render(gpa, original, &s, &base);
+    defer gpa.free(out2);
+    try testing.expect(std.mem.startsWith(u8, out2, "mouse_mod = Super+Mod5\n"));
+}
+
+test "an invalid value in the file is left alone unless the user changes that key" {
+    const gpa = testing.allocator;
+    const original = "gap = banana\nouter_gap = 8\n";
+    var base = Settings.init();
+    parse(&base, original);
+    try testing.expectEqual(@as(i32, 8), base.gap); // default kept, like the compositor
+    var s = base;
+    s.outer_gap = 10;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("gap = banana\nouter_gap = 10\n", out);
+}
+
+test "a key that appears twice: both lines follow the change (the last one wins anyway)" {
+    const gpa = testing.allocator;
+    const original = "gap = 4\ngap = 6\n";
+    var base = Settings.init();
+    parse(&base, original);
+    try testing.expectEqual(@as(i32, 6), base.gap);
+    var s = base;
+    s.gap = 7;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("gap = 7\ngap = 7\n", out);
+}
+
+test "an edit made to the file in the meantime survives a save of other keys" {
+    const gpa = testing.allocator;
+    // The GUI was opened on this ...
+    const opened = "gap = 8\nouter_gap = 8\n";
+    var base = Settings.init();
+    parse(&base, opened);
+    var s = base;
+    s.gap = 12; // ... and the user changed `gap` only ...
+
+    // ... while someone edited `outer_gap` and added a bind by hand.
+    const on_disk_now = "gap = 8\nouter_gap = 30\nbind = Super+x, close\n";
+    const out = try render(gpa, on_disk_now, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("gap = 12\nouter_gap = 30\nbind = Super+x, close\n", out);
+
+    // And afterwards the GUI shows the file's value for the key it didn't touch.
+    var new_base = Settings.init();
+    parse(&new_base, out);
+    var shown = s;
+    rebase(&shown, &base, &new_base);
+    try testing.expectEqual(@as(i32, 12), shown.gap);
+    try testing.expectEqual(@as(i32, 30), shown.outer_gap);
+}
+
+test "text fields refuse what a config line cannot hold" {
+    var t: Text = .{};
+    for ("foot #x") |ch| t.append(ch);
+    // The '#' after a space would start a comment: not typed.
+    try testing.expectEqualStrings("foot x", t.get());
+    t.clear();
+    t.append('#');
+    try testing.expectEqual(@as(usize, 0), t.len);
+    t.append('a');
+    t.append('#'); // inside a word: fine (like a colour, or a URL fragment)
+    t.append('\n');
+    t.append(0x7f);
+    try testing.expectEqualStrings("a#", t.get());
+    // Full: further typing is ignored, never overflows.
+    for (0..400) |_| t.append('x');
+    try testing.expectEqual(t.buf.len, t.len);
+}
+
+test "problem(): what blocks a save" {
+    var st: [96]u8 = undefined;
+    var s = Settings.init();
+    try testing.expect(problem(&s, &st) == null);
+
+    s.terminal.set("   ");
+    try testing.expectEqualStrings("terminal", problem(&s, &st).?.key);
+    s.terminal.set("\"my term\" --x");
+    try testing.expectEqualStrings("terminal", problem(&s, &st).?.key);
+    s.terminal.set("foot -e \"htop -d 5\""); // a closing quote is fine
+    try testing.expect(problem(&s, &st) == null);
+
+    s.width_presets.set("0.5, 2");
+    try testing.expectEqualStrings("width_presets", problem(&s, &st).?.key);
+    s.width_presets.set("");
+    try testing.expect(problem(&s, &st) != null);
+    s.width_presets.set("0.5 1.0");
+    try testing.expect(problem(&s, &st) == null);
+
+    s.mouse_mod = .{ .super = false };
+    try testing.expectEqualStrings("mouse_mod", problem(&s, &st).?.key);
+    s.mouse_mod = .{ .raw = true, .super = false }; // not ours to judge
+    try testing.expect(problem(&s, &st) == null);
+}
+
+test "validPresets" {
+    try testing.expect(validPresets("0.333, 0.5, 0.667, 1.0"));
+    try testing.expect(validPresets("1"));
+    try testing.expect(!validPresets(""));
+    try testing.expect(!validPresets(" , "));
+    try testing.expect(!validPresets("0"));
+    try testing.expect(!validPresets("1.5"));
+    try testing.expect(!validPresets("half"));
+}
+
+test "changedCount counts keys, not bytes" {
+    const a = Settings.init();
+    var b = a;
+    try testing.expectEqual(@as(usize, 0), changedCount(&a, &b));
+    b.gap += 1;
+    b.dock_edge = .left;
+    b.terminal.set("foot");
+    try testing.expectEqual(@as(usize, 3), changedCount(&a, &b));
 }

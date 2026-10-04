@@ -1,29 +1,19 @@
-//! wlprefs — settings window skeleton for wmaker-wl.
+//! wlprefs -- the settings window of wmaker-wl, modelled on Window Maker's
+//! WPrefs.app.
 //!
-//! SCOPE OF THIS SKELETON
-//! -----------------------
-//! This only builds the window and its category sidebar. No individual
-//! setting is wired up yet -- each `Category.panel` is a stub that gets
-//! filled in later. What IS real:
-//!
-//!   * a plain xdg-shell toplevel window (Wayland core + xdg-shell only,
-//!     no river protocol needed -- wmaker-wl just tiles it like any
-//!     other app);
-//!   * an ARGB32 buffer drawn with the same cairo/pango helpers wmaker-wl
-//!     uses (`Canvas`), so the two look consistent;
-//!   * a sidebar listing the same 16 sections, in the same order, with
-//!     the same names and the same icons as upstream WPrefs.app's own
-//!     `Initialize()` (WPrefs.app/WPrefs.c in wmaker.git) -- each
-//!     currently rendering an empty placeholder panel; see `Category`
-//!     below for the section list itself;
-//!   * `configPath()`, which resolves to the exact same
-//!     `$XDG_CONFIG_HOME/wmaker-wl/config.conf` (falling back to
-//!     `~/.config/wmaker-wl/config.conf`) that wmaker-wl reads. Real
-//!     settings panels will read/write this file using the same
-//!     `key = value` line format wmaker-wl's parser expects.
-//!
-//! Everything under "wire up a control" is future work; the point of
-//! this file is the scaffolding those controls will slot into.
+//!   * a plain xdg-shell toplevel (Wayland core + xdg-shell only; wmaker-wl
+//!     tiles it like any other app);
+//!   * the same 16 sections, in the same order, with the same names and
+//!     icons as upstream WPrefs.app's `Initialize()` (see `Category`);
+//!   * REAL pages for everything wmaker-wl has a setting for: focus, window
+//!     handling, workspaces, appearance, mouse, default applications,
+//!     Dock and Clip, session; a read-only list of the key bindings in
+//!     effect. Sections without a counterpart say why instead of showing
+//!     dead controls;
+//!   * it edits exactly the file wmaker-wl reads (`$XDG_CONFIG_HOME/
+//!     wmaker-wl/config.conf`), touching only the lines of the keys the user
+//!     changed -- comments, binds and unknown keys stay (see prefs.zig and
+//!     settings.zig), and the compositor is told to reload afterwards.
 
 const std = @import("std");
 const wayland = @import("wayland");
@@ -33,15 +23,18 @@ const xdg = wayland.client.xdg;
 
 pub const gfx = @import("gfx.zig");
 pub const window = @import("window.zig");
+pub const settings = @import("settings.zig");
+pub const prefs = @import("prefs.zig");
+pub const configfile = @import("configfile.zig");
+pub const icons = @import("icons.zig");
+pub const binds = @import("binds.zig");
 
-pub const version_string = "0.1.0";
+pub const version_string = "0.2.0";
 
 /// The section list, 1:1 with upstream WPrefs.app/WPrefs.c's
 /// `Initialize()` -- same 16 sections (its `MAX_SECTIONS`), same order,
-/// same names, same icon files. Each currently renders an empty
-/// placeholder panel (see window.zig's `paintPanel`); wiring an actual
-/// section up to read/write wmaker-wl's config.conf is future work, one
-/// panel at a time.
+/// same names, same icon files. `window.zig`'s `runPanel` says which of them
+/// have a page; the others show why they have none.
 pub const Category = enum {
     focus,
     window_handling,
@@ -84,9 +77,7 @@ pub const Category = enum {
     }
 
     /// `panel->description` -- upstream shows this as balloon-help text
-    /// over the section's icon; wlprefs has no balloon-help widget yet
-    /// (see window.zig's `drawToggle` doc comment), so the placeholder
-    /// panel prints it directly instead of hiding it entirely.
+    /// over the section's icon; wlprefs has no balloon-help widget yet.
     pub fn description(cat: Category) [:0]const u8 {
         return switch (cat) {
             .focus => "Keyboard focus switching policy and related options.",
@@ -95,9 +86,9 @@ pub const Category = enum {
             .icons => "Icon/Miniwindow handling options. Icon positioning\narea, sizes of icons, miniaturization animation style.",
             .ergonomic => "Various settings like balloon text, geometry\ndisplays etc.",
             .paths => "Search paths to use when looking for pixmaps\nand icons.",
-            .docks => "Dock and clip features.\nEnable/disable the Dock and Clip, and tune some delays.",
+            .docks => "Dock and Clip features.\nShow or hide them, choose their edge or corner and level.",
             .workspace => "Workspace navigation features\nand workspace name display settings.",
-            .configurations => "Animation speeds, titlebar styles, various option\ntoggling and number of colors to reserve for\nWindow Maker on 8bit displays.",
+            .configurations => "Session and compatibility: DockApps, autostart script,\nreading Window Maker's own files.",
             .menu => "Edit the menu for launching applications.",
             .keyboard_shortcuts => "Change the keyboard shortcuts for actions such\nas changing workspaces and opening menus.",
             .hot_corner_shortcuts => "Choose actions to perform when you move the\nmouse pointer to the screen corners.",
@@ -137,36 +128,6 @@ pub const Category = enum {
     pub const all = std.enums.values(Category);
 };
 
-/// Resolve wmaker-wl's config file path -- identical rule to
-/// `config.userConfigPath()` in the main project, duplicated here so
-/// wlprefs has no build dependency on wmaker-wl's executable module.
-/// Returns null if neither XDG_CONFIG_HOME nor HOME is set (matches
-/// wmaker-wl's own fallback behaviour: caller should fall back to
-/// built-in defaults).
-pub fn configPath(a: std.mem.Allocator) !?[]const u8 {
-    if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
-        const dir = std.mem.span(x);
-        if (dir.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/config.conf", .{dir});
-    }
-    if (std.c.getenv("HOME")) |h| {
-        return try std.fmt.allocPrint(a, "{s}/.config/wmaker-wl/config.conf", .{std.mem.span(h)});
-    }
-    return null;
-}
-
-test "configPath prefers XDG_CONFIG_HOME" {
-    // Smoke test only: real env manipulation is left to integration
-    // testing since std.c.getenv reads the process-wide environment.
-    const a = std.testing.allocator;
-    const path = try configPath(a);
-    defer if (path) |p| a.free(p);
-    // Either resolves to something ending in the expected suffix, or is
-    // null on an environment with neither var set.
-    if (path) |p| {
-        try std.testing.expect(std.mem.endsWith(u8, p, "wmaker-wl/config.conf"));
-    }
-}
-
 test "every Category icon decodes to a real 48x48 image" {
     for (Category.all) |cat| {
         var img = try gfx.Image.fromPngBytes(cat.icon());
@@ -180,4 +141,10 @@ test {
     _ = gfx;
     _ = window;
     _ = @import("panel_menu.zig");
+    _ = @import("panels.zig");
+    _ = @import("settings.zig");
+    _ = @import("configfile.zig");
+    _ = @import("icons.zig");
+    _ = @import("binds.zig");
+    _ = @import("prefs.zig");
 }

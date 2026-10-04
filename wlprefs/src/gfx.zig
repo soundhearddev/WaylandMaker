@@ -242,6 +242,26 @@ pub const Image = struct {
         };
     }
 
+    /// Largest side we accept for an icon file.
+    pub const max_side: i32 = 512;
+
+    /// Load a PNG from disk (user-supplied icons, see icons.zig). null if
+    /// the file is missing, not a PNG, or implausibly large.
+    pub fn fromPngFile(path: [:0]const u8) ?Image {
+        const s = c.cairo_image_surface_create_from_png(path.ptr) orelse return null;
+        if (c.cairo_surface_status(s) != c.CAIRO_STATUS_SUCCESS) {
+            c.cairo_surface_destroy(s);
+            return null;
+        }
+        const w = c.cairo_image_surface_get_width(s);
+        const h = c.cairo_image_surface_get_height(s);
+        if (w <= 0 or h <= 0 or w > max_side or h > max_side) {
+            c.cairo_surface_destroy(s);
+            return null;
+        }
+        return .{ .surface = s, .width = w, .height = h };
+    }
+
     pub fn deinit(img: *Image) void {
         c.cairo_surface_destroy(img.surface);
     }
@@ -256,7 +276,7 @@ pub fn measureText(text: [:0]const u8, font: [:0]const u8) struct { w: i32, h: i
 }
 
 test "canvas draws into plain memory" {
-    var buf: [16 * 16 * 4]u8 = undefined;
+    var buf: [16 * 16 * 4]u8 align(16) = undefined; // cairo wants aligned memory
     @memset(&buf, 0);
     var cv = try Canvas.initForData(&buf, 16, 16, 16 * 4);
     defer cv.deinit();

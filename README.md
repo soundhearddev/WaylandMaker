@@ -34,4 +34,8 @@ Window Maker's **Dock** (a column of 64 px tiles on a screen edge) and **Clip** 
 plus per-workspace launchers) are built in; configure them with the `dock_*` / `clip_*` options in
 `config.conf` and the entries in `~/.config/wmaker-wl/dockapps.conf` (or an existing `WMState`).
 
+**wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`. It edits
+`~/.config/wmaker-wl/config.conf` in place -- only the keys you change, comments and `bind` lines stay -- and tells
+a running wmaker-wl to reload. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
+
 See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how to define DockApps (`~/.config/wmaker-wl/dockapps.conf`).

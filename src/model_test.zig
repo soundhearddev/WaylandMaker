@@ -864,3 +864,160 @@ test "hovering or clicking an unfocusable DockApp changes neither focus nor foll
     try std.testing.expect(f.wm.focus_request == null);
     try std.testing.expect(!f.wm.follow_request);
 }
+
+// ----------------------------------------------------------------------------
+// wlprefs and the compositor must agree. wlprefs writes config.conf lines; the
+// compositor reads them. Every key wlprefs knows is written with a value that
+// differs from the default, and read back by config.zig.
+// ----------------------------------------------------------------------------
+
+const prefs_settings = @import("wlprefs_settings");
+
+fn parseWithCompositor(gpa: std.mem.Allocator, text: []const u8) !config.Config {
+    var cfg: config.Config = .{ .arena = .init(gpa) };
+    errdefer cfg.deinit();
+    var binds: std.ArrayList(config.Bind) = .empty;
+    try config.parse(cfg.arena.allocator(), text, &cfg, &binds, "<wlprefs>");
+    return cfg;
+}
+
+test "wlprefs defaults are the compositor's defaults" {
+    const gpa = std.testing.allocator;
+    const d = prefs_settings.Settings.init();
+    var cfg = try parseWithCompositor(gpa, prefs_settings.default_config_text);
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(cfg.gap, d.gap);
+    try std.testing.expectEqual(cfg.outer_gap, d.outer_gap);
+    try std.testing.expectEqual(cfg.min_window_size, d.min_window_size);
+    try std.testing.expectEqual(cfg.border_width, d.border_width);
+    try std.testing.expectEqual(cfg.border_focused, d.border_focused);
+    try std.testing.expectEqual(cfg.workspace_count, d.workspace_count);
+    try std.testing.expectEqual(cfg.drag_threshold, d.drag_threshold);
+    try std.testing.expectEqual(cfg.dock_enabled, d.dock_enabled);
+    try std.testing.expectEqual(cfg.dock_on_top, d.dock_on_top);
+    try std.testing.expectEqual(cfg.clip_enabled, d.clip_enabled);
+    try std.testing.expectEqual(cfg.clip_collapsed, d.clip_collapsed);
+    try std.testing.expectEqualStrings(cfg.terminal[0], d.terminal.get());
+    try std.testing.expectEqualStrings(cfg.launcher[0], d.launcher.get());
+    try std.testing.expectEqualStrings(cfg.browser[0], d.browser.get());
+    try std.testing.expectEqual(@as(usize, cfg.width_presets.len), blk: {
+        var n: usize = 0;
+        var it = std.mem.tokenizeAny(u8, d.width_presets.get(), ", \t");
+        while (it.next()) |_| n += 1;
+        break :blk n;
+    });
+}
+
+test "everything wlprefs writes is read back by the compositor with the same value" {
+    const gpa = std.testing.allocator;
+    const base = prefs_settings.Settings.init();
+
+    // Every key different from the default.
+    var s = base;
+    s.gap = 13;
+    s.outer_gap = 5;
+    s.default_column_width = 0.4;
+    s.width_presets.set("0.25, 0.5, 0.75");
+    s.width_step = 0.05;
+    s.min_window_size = 200;
+    s.center_focused_column = .always;
+    s.new_window = .stack;
+    s.border_width = 4;
+    s.border_focused = 0x112233;
+    s.border_unfocused = 0x445566;
+    s.border_floating = 0x778899;
+    s.workspace_count = 7;
+    s.workspace_names.set("Main, , Code");
+    s.drag_threshold = 40;
+    s.floating_size = 0.7;
+    s.focus_follows_mouse = true;
+    s.mouse_mod = .{ .super = true, .alt = true, .ctrl = false, .shift = true };
+    s.terminal.set("foot -e \"htop -d 5\"");
+    s.launcher.set("wofi --show drun");
+    s.browser.set("/usr/bin/librewolf");
+    s.enable_wmaker_compat = true;
+    s.enable_autostart = false;
+    s.enable_dockapps = false;
+    s.dock_enabled = false;
+    s.dock_edge = .left;
+    s.dock_offset = 120;
+    s.dock_on_top = false;
+    s.dock_reserve_space = false;
+    s.clip_enabled = false;
+    s.clip_corner = .bottom_right;
+    s.clip_on_top = false;
+    s.clip_collapsed = true;
+
+    // Every key is covered by this test: if a key is added to wlprefs, it
+    // must be given a different value above.
+    try std.testing.expectEqual(prefs_settings.keys.len, prefs_settings.changedCount(&s, &base));
+
+    const text = try prefs_settings.render(gpa, "", &s, &base);
+    defer gpa.free(text);
+    var cfg = try parseWithCompositor(gpa, text);
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(s.gap, cfg.gap);
+    try std.testing.expectEqual(s.outer_gap, cfg.outer_gap);
+    try std.testing.expectApproxEqAbs(s.default_column_width, cfg.default_column_width, 0.0006);
+    try std.testing.expectEqual(@as(usize, 3), cfg.width_presets.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.75), cfg.width_presets[2], 0.0001);
+    try std.testing.expectApproxEqAbs(s.width_step, cfg.width_step, 0.0006);
+    try std.testing.expectEqual(s.min_window_size, cfg.min_window_size);
+    try std.testing.expectEqual(config.CenterMode.always, cfg.center_focused_column);
+    try std.testing.expectEqual(config.NewWindowMode.stack, cfg.new_window);
+    try std.testing.expectEqual(s.border_width, cfg.border_width);
+    try std.testing.expectEqual(s.border_focused, cfg.border_focused);
+    try std.testing.expectEqual(s.border_unfocused, cfg.border_unfocused);
+    try std.testing.expectEqual(s.border_floating, cfg.border_floating);
+    try std.testing.expectEqual(s.workspace_count, cfg.workspace_count);
+    try std.testing.expectEqual(@as(usize, 3), cfg.workspace_names.len);
+    try std.testing.expectEqualStrings("Main", cfg.workspace_names[0]);
+    try std.testing.expectEqualStrings("", cfg.workspace_names[1]);
+    try std.testing.expectEqualStrings("Code", cfg.workspace_names[2]);
+    try std.testing.expectEqual(s.drag_threshold, cfg.drag_threshold);
+    try std.testing.expectApproxEqAbs(s.floating_size, cfg.floating_size, 0.0006);
+    try std.testing.expect(cfg.focus_follows_mouse);
+    try std.testing.expect(cfg.mouse_mod.mod4 and cfg.mouse_mod.mod1 and cfg.mouse_mod.shift and !cfg.mouse_mod.ctrl);
+    // argv: foot, -e, "htop -d 5" (one argument, quotes group it).
+    try std.testing.expectEqual(@as(usize, 3), cfg.terminal.len);
+    try std.testing.expectEqualStrings("foot", cfg.terminal[0]);
+    try std.testing.expectEqualStrings("htop -d 5", cfg.terminal[2]);
+    try std.testing.expectEqualStrings("wofi", cfg.launcher[0]);
+    try std.testing.expectEqualStrings("/usr/bin/librewolf", cfg.browser[0]);
+    try std.testing.expect(cfg.enable_wmaker_compat);
+    try std.testing.expect(!cfg.enable_autostart);
+    try std.testing.expect(!cfg.enable_dockapps);
+    try std.testing.expect(!cfg.dock_enabled);
+    try std.testing.expectEqual(config.DockEdge.left, cfg.dock_edge);
+    try std.testing.expectEqual(@as(i32, 120), cfg.dock_offset);
+    try std.testing.expect(!cfg.dock_on_top);
+    try std.testing.expect(!cfg.dock_reserve_space);
+    try std.testing.expect(!cfg.clip_enabled);
+    try std.testing.expectEqual(config.ClipCorner.bottom_right, cfg.clip_corner);
+    try std.testing.expect(!cfg.clip_on_top);
+    try std.testing.expect(cfg.clip_collapsed);
+}
+
+test "the compositor accepts a config that wlprefs edited in place, binds included" {
+    const gpa = std.testing.allocator;
+    const original =
+        \\gap = 8
+        \\bind = Super+x, shell notify-send hi
+        \\unbind = Super+q
+        \\
+    ;
+    var base = prefs_settings.Settings.init();
+    prefs_settings.parse(&base, original);
+    var s = base;
+    s.gap = 20;
+    const text = try prefs_settings.render(gpa, original, &s, &base);
+    defer gpa.free(text);
+
+    var cfg = try parseWithCompositor(gpa, text);
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(i32, 20), cfg.gap);
+    try std.testing.expect(std.mem.indexOf(u8, text, "bind = Super+x, shell notify-send hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "unbind = Super+q") != null);
+}
