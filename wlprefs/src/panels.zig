@@ -268,17 +268,18 @@ pub const Ctx = struct {
 // ---------------------------------------------------------------------------
 
 pub fn focus(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 96, "Focus");
-    c.checkbox(ox + 40, oy + 40, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
-    c.hint(ox + 40, oy + 62, "Focus changes as soon as the mouse pointer enters a window.");
-    c.hint(ox + 40, oy + 80, "Off: focus only via click or keyboard shortcut.");
+    c.frame(ox + 20, oy + 6, 480, 122, "Focus");
+    c.checkbox(ox + 40, oy + 30, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
+    c.hint(ox + 40, oy + 52, "Focus changes as soon as the mouse pointer enters a window.");
+    c.hint(ox + 40, oy + 68, "Off: focus only via click or keyboard shortcut.");
+    c.checkbox(ox + 40, oy + 94, "New windows take the focus", &s.focus_new_windows);
 
-    c.frame(ox + 20, oy + 122, 480, 96, "Scrolling");
-    c.label(ox + 40, oy + 146, "Center focused column:");
+    c.frame(ox + 20, oy + 136, 480, 86, "Scrolling");
+    c.label(ox + 40, oy + 158, "Center focused column:");
     var m = s.center_focused_column;
-    if (c.radio(ox + 40, oy + 170, "on overflow", m == .on_overflow)) m = .on_overflow;
-    if (c.radio(ox + 190, oy + 170, "always", m == .always)) m = .always;
-    if (c.radio(ox + 300, oy + 170, "never", m == .never)) m = .never;
+    if (c.radio(ox + 40, oy + 184, "on overflow", m == .on_overflow)) m = .on_overflow;
+    if (c.radio(ox + 190, oy + 184, "always", m == .always)) m = .always;
+    if (c.radio(ox + 300, oy + 184, "never", m == .never)) m = .never;
     s.center_focused_column = m;
 }
 
@@ -390,12 +391,42 @@ pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 
 /// WPrefs' "Other Configurations": session and compatibility switches.
 pub fn configurations(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 160, "Session & Compatibility");
-    c.checkbox(ox + 40, oy + 42, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
-    c.checkbox(ox + 40, oy + 70, "Run the autostart script on launch", &s.enable_autostart);
-    c.checkbox(ox + 40, oy + 98, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
-    c.hint(ox + 40, oy + 130, "Files in ~/.config/wmaker-wl always take precedence over those.");
-    c.hint(ox + 40, oy + 148, "Autostart and autolaunch only run when wmaker-wl starts.");
+    c.frame(ox + 20, oy + 6, 480, 140, "Session & Compatibility");
+    c.checkbox(ox + 40, oy + 30, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
+    c.checkbox(ox + 40, oy + 54, "Run the autostart script on launch", &s.enable_autostart);
+    c.checkbox(ox + 40, oy + 78, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
+    c.hint(ox + 40, oy + 104, "Files in ~/.config/wmaker-wl always take precedence over those.");
+    c.hint(ox + 40, oy + 120, "Autostart and autolaunch only run when wmaker-wl starts.");
+
+    c.frame(ox + 20, oy + 154, 480, 68, "Workspace Switching");
+    c.checkbox(ox + 40, oy + 178, "Wrap around: next on the last workspace goes to the first", &s.workspace_wrap);
+    c.hint(ox + 40, oy + 200, "Off: next / previous stop at the last / first workspace.");
+}
+
+/// "Menu Preferences": what wmaker-wl's menus (and the Clip wheel) can do.
+pub fn menuPreferences(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
+    c.frame(ox + 20, oy + 14, 480, 96, "Submenus");
+    c.label(ox + 40, oy + 38, "A submenu opens on the:");
+    var a = s.menu_submenu_align;
+    if (c.radio(ox + 40, oy + 62, "right of its menu", a == .right)) a = .right;
+    if (c.radio(ox + 250, oy + 62, "left of its menu", a == .left)) a = .left;
+    s.menu_submenu_align = a;
+    c.hint(ox + 40, oy + 86, "It switches sides when it would leave the screen.");
+
+    c.frame(ox + 20, oy + 122, 480, 96, "Clip");
+    c.checkbox(ox + 40, oy + 146, "Mouse wheel over the Clip switches workspace", &s.clip_scroll_workspaces);
+    c.hint(ox + 40, oy + 172, "Scroll up: next workspace. Scroll down: previous.");
+}
+
+/// "Font Configuration": the Pango font descriptions of menus and Clip.
+pub fn fonts(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
+    c.frame(ox + 20, oy + 14, 480, 132, "Fonts");
+    c.textField(ox + 40, oy + 40, 440, "Menu title:", &s.font_menu_title);
+    c.textField(ox + 40, oy + 72, 440, "Menu rows:", &s.font_menu);
+    c.textField(ox + 40, oy + 104, 440, "Clip name:", &s.font_dock);
+    c.hint(ox + 40, oy + 158, "Pango font description: Family [Style] Size, e.g. Sans Bold 10.");
+    c.hint(ox + 40, oy + 176, "Applies to the menus and the Clip once wmaker-wl reloads (SIGHUP).");
+    c.hint(ox + 40, oy + 194, "An unknown family falls back to the default font.");
 }
 
 /// A section that has no counterpart (yet): the reason, not dead controls.

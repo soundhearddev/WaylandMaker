@@ -37,6 +37,7 @@ pub const CenterMode = enum { on_overflow, always, never };
 pub const NewWindowMode = enum { new_column, stack };
 pub const DockEdge = enum { left, right };
 pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
+pub const SubmenuAlign = enum { right, left };
 
 /// `mouse_mod`: any combination of the four common modifiers. `raw` marks a
 /// value the GUI cannot show faithfully (Mod3/Mod5, or something that does
@@ -139,6 +140,15 @@ pub const Settings = struct {
     min_window_size: i32 = 120,
     center_focused_column: CenterMode = .on_overflow,
     new_window: NewWindowMode = .new_column,
+    focus_new_windows: bool = true,
+
+    // ---- fonts (Pango descriptions)
+    font_menu_title: Text = .{},
+    font_menu: Text = .{},
+    font_dock: Text = .{},
+
+    // ---- menus
+    menu_submenu_align: SubmenuAlign = .right,
 
     // ---- look
     border_width: i32 = 2,
@@ -148,6 +158,8 @@ pub const Settings = struct {
 
     // ---- workspaces
     workspace_count: u32 = 4,
+    workspace_wrap: bool = true,
+    clip_scroll_workspaces: bool = true,
     /// As typed: "Main, Web, Code". An empty entry means "no name".
     workspace_names: Text = .{},
 
@@ -228,6 +240,13 @@ pub fn canonicalKey(key: []const u8) []const u8 {
     return key;
 }
 
+/// A Pango font description the compositor accepts (config.validFont).
+pub fn validFont(text: []const u8) bool {
+    if (text.len == 0 or text.len > 63) return false;
+    for (text) |ch| if (ch < 0x20 or ch == 0x7f) return false;
+    return true;
+}
+
 /// Is `text` a list the compositor accepts for width_presets: at least one
 /// number, each in (0, 1]?
 pub fn validPresets(text: []const u8) bool {
@@ -268,9 +287,10 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
         }
     }
     inline for (.{
-        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",         "clip_collapsed",
+        "focus_follows_mouse",    "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
+        "clip_scroll_workspaces",
     }) |name| {
         if (eql(u8, key, name)) {
             if (parseBool(value)) |b| @field(s, name) = b;
@@ -285,7 +305,17 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
         }
     }
 
-    if (eql(u8, key, "width_presets")) {
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
+        if (eql(u8, key, name)) {
+            // The compositor refuses an empty or over-long description.
+            if (validFont(value)) @field(s, name).set(value);
+            return;
+        }
+    }
+
+    if (eql(u8, key, "menu_submenu_align")) {
+        if (std.meta.stringToEnum(SubmenuAlign, value)) |m| s.menu_submenu_align = m;
+    } else if (eql(u8, key, "width_presets")) {
         if (validPresets(value)) s.width_presets.set(value);
     } else if (eql(u8, key, "workspace_names")) {
         s.workspace_names.set(value);
@@ -367,6 +397,15 @@ pub fn problem(s: *const Settings, storage: *[96]u8) ?Problem {
     if (commandProblem("terminal", "Terminal", &s.terminal, storage)) |p| return p;
     if (commandProblem("launcher", "Launcher", &s.launcher, storage)) |p| return p;
     if (commandProblem("browser", "Browser", &s.browser, storage)) |p| return p;
+    inline for (.{
+        .{ "font_menu_title", "Menu title font", &s.font_menu_title },
+        .{ "font_menu", "Menu font", &s.font_menu },
+        .{ "font_dock", "Clip font", &s.font_dock },
+    }) |f| {
+        if (!validFont(std.mem.trim(u8, f[2].get(), " \t"))) {
+            return .{ .key = f[0], .message = std.fmt.bufPrint(storage, "{s}: e.g. \"Sans 10\" (1-63 characters)", .{f[1]}) catch "invalid font" };
+        }
+    }
     if (!validPresets(s.width_presets.get())) {
         return .{ .key = "width_presets", .message = "Presets: numbers between 0 and 1, separated by commas" };
     }
@@ -397,15 +436,20 @@ pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{x:0>6}", .{@field(s, name)}) catch null;
     }
     inline for (.{
-        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",         "clip_collapsed",
+        "focus_follows_mouse",    "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
+        "clip_scroll_workspaces",
     }) |name| {
         if (eql(u8, key, name)) return if (@field(s, name)) "true" else "false";
     }
     inline for (.{ "terminal", "launcher", "browser" }) |name| {
         if (eql(u8, key, name)) return std.mem.trim(u8, @field(s, name).get(), " \t");
     }
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
+        if (eql(u8, key, name)) return std.mem.trim(u8, @field(s, name).get(), " \t");
+    }
+    if (eql(u8, key, "menu_submenu_align")) return @tagName(s.menu_submenu_align);
     if (eql(u8, key, "width_presets")) return std.mem.trim(u8, s.width_presets.get(), " \t");
     if (eql(u8, key, "workspace_names")) return std.mem.trim(u8, s.workspace_names.get(), " \t");
     if (eql(u8, key, "workspace_count")) return std.fmt.bufPrint(out, "{d}", .{s.workspace_count}) catch null;
@@ -427,7 +471,8 @@ pub const keys = [_][]const u8{
     "browser",             "enable_wmaker_compat", "enable_autostart",      "enable_dockapps",
     "dock_enabled",        "dock_edge",            "dock_offset",           "dock_on_top",
     "dock_reserve_space",  "clip_enabled",         "clip_corner",           "clip_on_top",
-    "clip_collapsed",
+    "clip_collapsed",      "focus_new_windows",    "workspace_wrap",        "clip_scroll_workspaces",
+    "font_menu_title",     "font_menu",            "font_dock",             "menu_submenu_align",
 };
 
 fn keyIndex(key: []const u8) ?usize {
@@ -583,7 +628,9 @@ test "the struct's own defaults agree with the shipped file (except the text fie
     const plain: Settings = .{};
     for (keys) |k| {
         if (std.mem.eql(u8, k, "terminal") or std.mem.eql(u8, k, "launcher") or
-            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets")) continue;
+            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets") or
+            std.mem.eql(u8, k, "font_menu_title") or std.mem.eql(u8, k, "font_menu") or
+            std.mem.eql(u8, k, "font_dock")) continue;
         if (!sameValue(&from_file, &plain, k)) {
             std.debug.print("default differs for `{s}`\n", .{k});
             return error.DefaultsDiverged;

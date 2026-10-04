@@ -948,6 +948,13 @@ test "everything wlprefs writes is read back by the compositor with the same val
     s.clip_corner = .bottom_right;
     s.clip_on_top = false;
     s.clip_collapsed = true;
+    s.focus_new_windows = false;
+    s.workspace_wrap = false;
+    s.clip_scroll_workspaces = false;
+    s.font_menu_title.set("Serif Bold 12");
+    s.font_menu.set("Monospace 9");
+    s.font_dock.set("Sans Italic 7");
+    s.menu_submenu_align = .left;
 
     // Every key is covered by this test: if a key is added to wlprefs, it
     // must be given a different value above.
@@ -998,6 +1005,25 @@ test "everything wlprefs writes is read back by the compositor with the same val
     try std.testing.expectEqual(config.ClipCorner.bottom_right, cfg.clip_corner);
     try std.testing.expect(!cfg.clip_on_top);
     try std.testing.expect(cfg.clip_collapsed);
+    try std.testing.expect(!cfg.focus_new_windows);
+    try std.testing.expect(!cfg.workspace_wrap);
+    try std.testing.expect(!cfg.clip_scroll_workspaces);
+    try std.testing.expectEqualStrings("Serif Bold 12", cfg.font_menu_title);
+    try std.testing.expectEqualStrings("Monospace 9", cfg.font_menu);
+    try std.testing.expectEqualStrings("Sans Italic 7", cfg.font_dock);
+    try std.testing.expectEqual(config.SubmenuAlign.left, cfg.menu_submenu_align);
+}
+
+test "the compositor refuses the fonts wlprefs refuses" {
+    const gpa = std.testing.allocator;
+    var cfg = try parseWithCompositor(gpa, "font_menu = \nfont_dock = Sans 9\n");
+    defer cfg.deinit();
+    // Empty: keeps the default. Valid: taken.
+    try std.testing.expectEqualStrings("Sans 10", cfg.font_menu);
+    try std.testing.expectEqualStrings("Sans 9", cfg.font_dock);
+    try std.testing.expect(!config.validFont(""));
+    try std.testing.expect(!prefs_settings.validFont(""));
+    try std.testing.expect(config.validFont("Sans 10") and prefs_settings.validFont("Sans 10"));
 }
 
 test "the compositor accepts a config that wlprefs edited in place, binds included" {

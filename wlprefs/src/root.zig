@@ -140,7 +140,6 @@ test "every Category icon decodes to a real 48x48 image" {
 test {
     _ = gfx;
     _ = window;
-    _ = @import("panel_menu.zig");
     _ = @import("panels.zig");
     _ = @import("settings.zig");
     _ = @import("configfile.zig");

@@ -36,7 +36,6 @@ const xkb = @import("xkbcommon");
 
 const gfx = @import("gfx.zig");
 const root = @import("root.zig");
-const panel_menu = @import("panel_menu.zig");
 const panels = @import("panels.zig");
 const settings = @import("settings.zig");
 const prefs_mod = @import("prefs.zig");
@@ -168,9 +167,6 @@ pub const Window = struct {
     icons_loaded: bool = false,
     /// Dock/Clip picker icons (or their fallbacks).
     icon_set: icons.Set = .{},
-
-    menu_imgs: panel_menu.Images = undefined,
-    menu_state: panel_menu.State = .{},
 
     // ---- shm buffers ------------------------------------------------------
     //
@@ -528,6 +524,8 @@ pub const Window = struct {
             .ergonomic => panels.ergonomic(ctx, ox, oy, s),
             .docks => panels.docks(ctx, ox, oy, s),
             .configurations => panels.configurations(ctx, ox, oy, s),
+            .menu_preferences => panels.menuPreferences(ctx, ox, oy, s),
+            .font_simple => panels.fonts(ctx, ox, oy, s),
             .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bind_list, &win.bind_scroll),
             else => return false,
         }
@@ -707,7 +705,6 @@ pub const Window = struct {
             win.icons[i] = try gfx.Image.fromPngBytes(cat.icon());
             loaded += 1;
         }
-        win.menu_imgs = try panel_menu.Images.load();
         win.icon_set = icons.Set.load();
         win.icons_loaded = true;
     }
@@ -759,7 +756,6 @@ pub const Window = struct {
         win.repeat_fd = -1;
         if (win.icons_loaded) {
             for (&win.icons) |*img| img.deinit();
-            win.menu_imgs.deinit();
             win.icon_set.deinit();
         }
         win.prefs.deinit();
@@ -924,11 +920,6 @@ pub const Window = struct {
         const x = frame_left + 2;
         const y = frame_top + 2;
 
-        if (cat == .menu_preferences) {
-            panel_menu.paint(cv, x + 2, y + 2, win.menu_state, &win.menu_imgs);
-            return;
-        }
-
         var ctx: panels.Ctx = .{ .mode = .paint, .cv = cv, .focused = win.focused_text, .icons = &win.icon_set };
         if (win.runPanel(cat, &ctx)) return;
 
@@ -949,31 +940,15 @@ pub const Window = struct {
             },
             .paths => .{
                 .headline = "Nothing to configure here",
-                .text = "wmaker-wl looks for tile icons in the icon theme directories\n" ++
-                    "(hicolor, pixmaps) and takes an explicit `icon =` path from\n" ++
-                    "dockapps.conf. There is no PixmapPath/FontPath list.",
             },
             .menu => .{
                 .headline = "Not part of wlprefs yet",
-                .text = "The applications menu is the file\n" ++
-                    "~/.config/wmaker-wl/RootMenu (text or property list format).\n" ++
-                    "Edit it by hand; it is reloaded together with config.conf.\n\n" ++
-                    "A menu editor is on the list in docs/TODO.md.",
             },
             .hot_corner_shortcuts => .{
                 .headline = "Not implemented in wmaker-wl",
-                .text = "Hot corners have no counterpart yet. Use a key binding\n" ++
-                    "instead (Keyboard Shortcuts).",
-            },
-            .font_simple => .{
-                .headline = "Not configurable yet",
-                .text = "wmaker-wl draws its menus with Pango's default \"Sans\".\n" ++
-                    "Fonts will arrive with themes (docs/WMPREFS.md, section 3.3).",
             },
             .expert => .{
                 .headline = "Nothing to configure here",
-                .text = "These are X11 rendering switches (dithering, backing store,\n" ++
-                    "colour reservation) that do not exist on Wayland.",
             },
             else => .{ .headline = "", .text = "" },
         };

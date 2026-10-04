@@ -56,6 +56,12 @@ pub const DockEdge = enum { left, right };
 /// Which screen corner the Clip (Window Maker's WMClip) sits in.
 pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
+/// Where a submenu opens relative to its parent menu.
+pub const SubmenuAlign = enum { right, left };
+
+/// Longest Pango font description accepted for the `font_*` options.
+pub const max_font_len = 63;
+
 /// Hard upper bound; Output holds workspaces in a fixed array.
 pub const max_workspaces = 16;
 
@@ -79,8 +85,31 @@ pub const Config = struct {
     border_unfocused: u32 = 0x3c3836,
     border_floating: u32 = 0x7daea3,
 
+    // ---- fonts (Pango font descriptions, e.g. "Sans Bold 10") --------------
+    /// Title bar of a menu.
+    font_menu_title: [:0]const u8 = "Sans Bold 10",
+    /// Rows of a menu.
+    font_menu: [:0]const u8 = "Sans 10",
+    /// The small workspace name under the number in the Clip.
+    font_dock: [:0]const u8 = "Sans 8",
+
+    // ---- menus ----------------------------------------------------------
+    /// Which side of its parent a submenu opens on first. It flips to the
+    /// other side when it would leave the screen.
+    menu_submenu_align: SubmenuAlign = .right,
+
+    // ---- windows / focus --------------------------------------------------
+    /// A new window takes the keyboard focus (and the view scrolls to it).
+    /// false: it opens in the background and the focus stays where it is.
+    focus_new_windows: bool = true,
+
     // ---- workspaces -----------------------------------------------------
     workspace_count: u32 = 4,
+    /// workspace_next on the last workspace goes to the first, and
+    /// workspace_prev on the first goes to the last. false: they stop.
+    workspace_wrap: bool = true,
+    /// The mouse wheel over the Clip switches workspace.
+    clip_scroll_workspaces: bool = true,
 
     // ---- floating / mouse -----------------------------------------------
     /// Pixels a tiled window must be dragged before it detaches into the
@@ -307,7 +336,18 @@ fn applyOption(
         }
     }
 
-    inline for (.{ "dock_enabled", "dock_on_top", "dock_reserve_space", "clip_enabled", "clip_on_top", "clip_collapsed" }) |name| {
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
+        if (eql(u8, key, name)) {
+            @field(cfg, name) = try parseFont(a, value);
+            return;
+        }
+    }
+
+    inline for (.{
+        "dock_enabled",           "dock_on_top",    "dock_reserve_space", "clip_enabled",
+        "clip_on_top",            "clip_collapsed", "focus_new_windows",  "workspace_wrap",
+        "clip_scroll_workspaces",
+    }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = try parseBool(value);
             return;
@@ -344,6 +384,8 @@ fn applyOption(
         cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
     } else if (eql(u8, key, "clip_corner")) {
         cfg.clip_corner = std.meta.stringToEnum(ClipCorner, value) orelse return error.Invalid;
+    } else if (eql(u8, key, "menu_submenu_align")) {
+        cfg.menu_submenu_align = std.meta.stringToEnum(SubmenuAlign, value) orelse return error.Invalid;
     } else if (eql(u8, key, "workspace_names")) {
         // Empty entries are kept (they mean "this workspace has no name"),
         // so the names stay aligned with the workspace numbers.
@@ -369,6 +411,20 @@ fn applyOption(
 
 fn mapCmdErr(e: anyerror) ParseError {
     return if (e == error.OutOfMemory) error.OutOfMemory else error.Invalid;
+}
+
+/// A Pango font description: not empty, not longer than `max_font_len`, no
+/// control characters. (Whether the family exists is Pango's business: an
+/// unknown family falls back to the default font.) Lives in `a`.
+fn parseFont(a: std.mem.Allocator, value: []const u8) ParseError![:0]const u8 {
+    if (!validFont(value)) return error.Invalid;
+    return a.dupeZ(u8, value) catch error.OutOfMemory;
+}
+
+pub fn validFont(s: []const u8) bool {
+    if (s.len == 0 or s.len > max_font_len) return false;
+    for (s) |ch| if (ch < 0x20 or ch == 0x7f) return false;
+    return true;
 }
 
 pub fn parseBool(s: []const u8) error{Invalid}!bool {

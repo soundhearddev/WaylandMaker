@@ -38,6 +38,7 @@ const wm_files = root.wm_files;
 const dockapp = root.dockapp;
 const proc = root.proc;
 const ui_mod = root.ui;
+const gfx = @import("gfx.zig");
 
 const WindowManager = types.WindowManager;
 
@@ -323,6 +324,8 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     // generation, so nothing outside this arena keeps pointing into it.
     wm.dockapps = files.dockapps;
     wm.dock_gen +%= 1;
+    // Copied, not borrowed: see gfx.Fonts.
+    gfx.fonts.set(wm.cfg.font_menu_title, wm.cfg.font_menu, wm.cfg.font_dock);
     return files;
 }
 

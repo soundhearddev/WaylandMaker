@@ -70,9 +70,6 @@ const KEY_DOWN: u32 = 108;
 // Look (Window Maker / NeXT)
 // ----------------------------------------------------------------------------
 
-const font_title: [:0]const u8 = "Sans Bold 10";
-const font_item: [:0]const u8 = "Sans 10";
-
 const title_h: i32 = 22;
 const item_h: i32 = 20;
 const pad_x: i32 = 10;
@@ -579,6 +576,7 @@ pub const Ui = struct {
     /// Mouse wheel over the Clip switches workspace. A touchpad sends many
     /// small steps, so they are summed up; one step per `scroll_step`.
     fn onScroll(ui: *Ui, value: f64) void {
+        if (!ui.wm.cfg.clip_scroll_workspaces) return;
         const s = ui.pointer_surface orelse return;
         const b = ui.barAt(s) orelse return;
         if (b.kind != .clip) return;
@@ -775,11 +773,18 @@ pub const Ui = struct {
         cl.hover = null;
         cl.dirty = true;
         cl.output = pl.output;
-        cl.x = pl.x + pl.w - 2;
+        const right_x = pl.x + pl.w - 2;
+        const left_x = pl.x - cl.w + 2;
+        const want_left = ui.wm.cfg.menu_submenu_align == .left;
+        cl.x = if (want_left) left_x else right_x;
         cl.y = pl.y + title_h + @as(i32, @intCast(row)) * item_h - title_h;
         if (cl.output) |out| {
-            // Flip to the left when it would leave the output.
-            if (cl.x + cl.w > out.rect.right()) cl.x = pl.x - cl.w + 2;
+            // Flip to the other side when it would leave the output.
+            if (want_left) {
+                if (cl.x < out.rect.x) cl.x = right_x;
+            } else if (cl.x + cl.w > out.rect.right()) {
+                cl.x = left_x;
+            }
             clampToOutput(cl, out);
         }
         cl.open = true;
@@ -950,10 +955,10 @@ pub const Ui = struct {
     // ---- geometry ----------------------------------------------------------
 
     fn measure(lvl: *Level) void {
-        var w: i32 = gfx.measureText(lvl.title, font_title).w + 2 * pad_x;
+        var w: i32 = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w + 2 * pad_x;
         for (lvl.rows) |r| {
-            var rw = gfx.measureText(r.label, font_item).w + 2 * pad_x;
-            if (r.shortcut) |s| rw += gfx.measureText(s, font_item).w + 2 * pad_x;
+            var rw = gfx.measureText(r.label, gfx.fonts.menuItem()).w + 2 * pad_x;
+            if (r.shortcut) |s| rw += gfx.measureText(s, gfx.fonts.menuItem()).w + 2 * pad_x;
             if (r.kind == .submenu) rw += arrow_w;
             w = @max(w, rw);
         }
@@ -1467,18 +1472,18 @@ pub const Ui = struct {
         cv.clear(col_bg);
 
         cv.vGradient(1, 1, lvl.w - 2, title_h - 1, col_title_top, col_title_bot);
-        const tw = gfx.measureText(lvl.title, font_title).w;
-        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, font_title, col_hi_text);
+        const tw = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w;
+        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, gfx.fonts.menuTitle(), col_hi_text);
 
         for (lvl.rows, 0..) |r, i| {
             const y = title_h + @as(i32, @intCast(i)) * item_h;
             const hot = r.enabled and lvl.hover != null and lvl.hover.? == i;
             if (hot) cv.fillRect(2, y, lvl.w - 4, item_h, col_hi_bg);
             const tc = if (hot) col_hi_text else if (r.enabled) col_text else col_disabled;
-            cv.drawText(r.label, pad_x, y + 2, font_item, tc);
+            cv.drawText(r.label, pad_x, y + 2, gfx.fonts.menuItem(), tc);
             if (r.shortcut) |s| {
-                const sw = gfx.measureText(s, font_item).w;
-                cv.drawText(s, lvl.w - sw - pad_x, y + 2, font_item, tc);
+                const sw = gfx.measureText(s, gfx.fonts.menuItem()).w;
+                cv.drawText(s, lvl.w - sw - pad_x, y + 2, gfx.fonts.menuItem(), tc);
             }
             if (r.kind == .submenu) {
                 const cx = lvl.w - pad_x;

@@ -128,6 +128,7 @@
       `src/wm_prefs.zig` liegt als reines Skelett (Typen + Signaturen, keine Implementierung)
       vor Phase 5/6, weil eine GUI erst sinnvoll wird, sobald Dock/Clip (Phase 5) und Themes
       (Phase 6) zumindest im Datenmodell existieren.
+- [ ] switch from ifreund/* to wlr custom interface
 
 ## Erledigt
 

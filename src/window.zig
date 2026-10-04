@@ -254,7 +254,7 @@ pub fn placeNew(wm: *WindowManager) void {
         if (!attrs.is("unfocusable")) {
             workspace.activate(win);
             // A window opened on another workspace must not steal the view.
-            if (ws == out.ws()) {
+            if (ws == out.ws() and wm.cfg.focus_new_windows) {
                 wm.focus_request = win;
                 wm.follow_request = true;
             }

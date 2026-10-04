@@ -275,8 +275,8 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 
         // ---- workspaces --------------------------------------------------------
         .workspace => |i| switchWorkspace(wm, out, i),
-        .workspace_next => switchWorkspace(wm, out, (out.active + 1) % out.workspace_count),
-        .workspace_prev => switchWorkspace(wm, out, (out.active + out.workspace_count - 1) % out.workspace_count),
+        .workspace_next => if (stepWorkspace(out.active, out.workspace_count, true, cfg.workspace_wrap)) |i| switchWorkspace(wm, out, i),
+        .workspace_prev => if (stepWorkspace(out.active, out.workspace_count, false, cfg.workspace_wrap)) |i| switchWorkspace(wm, out, i),
         .move_to_workspace => |i| sendToWorkspace(wm, out, i),
     }
 }
@@ -284,6 +284,30 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
+
+/// The workspace after (`forward`) or before `active`. At either end it
+/// wraps around, or (`wrap` = false) stays put: null, nothing to do.
+pub fn stepWorkspace(active: anytype, count: anytype, forward: bool, wrap: bool) ?@TypeOf(active) {
+    if (count <= 1) return null;
+    if (forward) {
+        if (active + 1 < count) return active + 1;
+        return if (wrap) 0 else null;
+    }
+    if (active > 0) return active - 1;
+    return if (wrap) count - 1 else null;
+}
+
+test "stepWorkspace wraps, or stops at the ends" {
+    const t = std.testing;
+    try t.expectEqual(@as(?u32, 1), stepWorkspace(@as(u32, 0), @as(u32, 4), true, true));
+    try t.expectEqual(@as(?u32, 0), stepWorkspace(@as(u32, 3), @as(u32, 4), true, true));
+    try t.expectEqual(@as(?u32, 3), stepWorkspace(@as(u32, 0), @as(u32, 4), false, true));
+    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 3), @as(u32, 4), true, false));
+    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 0), @as(u32, 4), false, false));
+    try t.expectEqual(@as(?u32, 2), stepWorkspace(@as(u32, 3), @as(u32, 4), false, false));
+    // One workspace: nothing to switch to.
+    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 0), @as(u32, 1), true, true));
+}
 
 /// Toggle between tiled and floating. Fullscreen is left first, because a
 /// fullscreen window has to be a normal window again before it can change

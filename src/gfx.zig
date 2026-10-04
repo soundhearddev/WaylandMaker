@@ -218,6 +218,46 @@ pub const Surface = struct {
     }
 };
 
+/// The fonts chosen in config.conf (`font_*`). They are copied here, not
+/// pointed to, so a config reload (which frees the old arena) can never
+/// leave a dangling font name behind; menu and Clip drawing read them
+/// through the getters below.
+pub const Fonts = struct {
+    menu_title: [64:0]u8 = [_:0]u8{0} ** 64,
+    menu: [64:0]u8 = [_:0]u8{0} ** 64,
+    dock: [64:0]u8 = [_:0]u8{0} ** 64,
+
+    fn put(dst: *[64:0]u8, src: []const u8) void {
+        const n = @min(src.len, 63);
+        @memcpy(dst[0..n], src[0..n]);
+        dst[n] = 0;
+    }
+
+    pub fn set(f: *Fonts, menu_title: []const u8, menu: []const u8, dock: []const u8) void {
+        put(&f.menu_title, menu_title);
+        put(&f.menu, menu);
+        put(&f.dock, dock);
+    }
+
+    pub fn menuTitle(f: *const Fonts) [:0]const u8 {
+        return std.mem.sliceTo(&f.menu_title, 0);
+    }
+    pub fn menuItem(f: *const Fonts) [:0]const u8 {
+        return std.mem.sliceTo(&f.menu, 0);
+    }
+    pub fn dockLabel(f: *const Fonts) [:0]const u8 {
+        return std.mem.sliceTo(&f.dock, 0);
+    }
+};
+
+/// Process-wide, set once per (re)load of the configuration. Defaults are
+/// those of default_config.conf.
+pub var fonts: Fonts = blk: {
+    var f: Fonts = .{};
+    f.set("Sans Bold 10", "Sans 10", "Sans 8");
+    break :blk f;
+};
+
 /// Pixel size of `text` in `font`, measured on a scratch surface.
 pub fn measureText(text: [:0]const u8, font: [:0]const u8) struct { w: i32, h: i32 } {
     var w: c_int = 0;
