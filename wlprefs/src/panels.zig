@@ -99,9 +99,13 @@ pub const Ctx = struct {
     pub fn radio(c: *Ctx, x: i32, y: i32, text: [:0]const u8, selected: bool) bool {
         const r: i32 = 7;
         if (c.cv) |cv| {
-            cv.fillRect(x, y, 2 * r, 2 * r, face);
-            cv.relief(x, y, 2 * r, 2 * r, .sunken);
-            if (selected) cv.fillCircle(x + r, y + r, 3, black);
+            // A round WINGs radio: sunken ring, dot when selected.
+            const cx = x + r;
+            const cy = y + r;
+            cv.fillCircle(cx, cy, r, face);
+            cv.strokeCircle(cx, cy, r - 1, 1.5, gfx.Color.rgb(0x848484));
+            cv.strokeCircle(cx, cy, r, 1.0, white);
+            if (selected) cv.fillCircle(cx, cy, 3, black);
             cv.drawText(text, x + 2 * r + 8, y - 1, font, black);
         }
         const w = 2 * r + 8 + (if (c.mode == .click) gfx.measureText(text, font).w else 0);
@@ -203,15 +207,18 @@ pub const Ctx = struct {
 
     pub fn colour(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: *u32) void {
         c.label(x, y + 2, text);
-        const bx = x + 150;
+        const bx = x + 110;
         if (c.cv) |cv| {
             cv.fillRect(bx, y, 44, 20, gfx.Color.rgb(v.*));
             cv.relief(bx, y, 44, 20, .sunken);
+            var buf: [16:0]u8 = undefined;
+            const s = std.fmt.bufPrintZ(&buf, "#{x:0>6}", .{v.* & 0xffffff}) catch "?";
+            cv.drawText(s, bx + 52, y + 2, font, dim);
         }
         const names = [_][:0]const u8{ "R", "G", "B" };
         inline for (names, 0..) |n, i| {
             const shift: u5 = @intCast(16 - 8 * i);
-            const px = bx + 56 + @as(i32, @intCast(i)) * 96;
+            const px = bx + 128 + @as(i32, @intCast(i)) * 78;
             c.label(px, y + 2, n);
             var ch: i64 = (v.* >> shift) & 0xff;
             if (c.stepBtn(px + 12, y, "-")) {
@@ -224,11 +231,6 @@ pub const Ctx = struct {
                 v.* = (v.* & ~(@as(u32, 0xff) << shift)) | (@as(u32, @intCast(ch)) << shift);
                 c.res.changed = true;
             }
-        }
-        if (c.cv) |cv| {
-            var buf: [16:0]u8 = undefined;
-            const s = std.fmt.bufPrintZ(&buf, "#{x:0>6}", .{v.*}) catch "?";
-            cv.drawText(s, bx + 56 + 3 * 96 - 6, y + 2, font, dim);
         }
     }
 
@@ -247,7 +249,10 @@ pub const Ctx = struct {
             buf[n] = 0;
             // Show the END of a long value, where the typing happens.
             var start: usize = 0;
-            while (start < n and gfx.measureText(buf[start..n :0], font).w > fw - 12) start += 1;
+            while (start < n and gfx.measureText(buf[start..n :0], font).w > fw - 12) {
+                start += 1;
+                while (start < n and (buf[start] & 0xC0) == 0x80) start += 1;
+            }
             cv.drawText(buf[start..n :0], fx + 5, y + 4, font, black);
             if (c.focused == t) {
                 const tw = gfx.measureText(buf[start..n :0], font).w;
@@ -352,7 +357,7 @@ pub fn ergonomic(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.textField(ox + 40, oy + 72, 440, "Launcher:", &s.launcher);
     c.textField(ox + 40, oy + 104, 440, "Browser:", &s.browser);
     c.hint(ox + 40, oy + 158, "A program and its arguments, separated by spaces (no shell).");
-    c.hint(ox + 40, oy + 176, "Started by the spawn_terminal / spawn_launcher / spawn_browser keys.");
+    c.hint(ox + 40, oy + 176, "Used by the spawn_terminal / spawn_launcher / spawn_browser keys.");
 }
 
 /// Dock and Clip.

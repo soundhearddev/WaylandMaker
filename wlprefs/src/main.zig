@@ -79,7 +79,13 @@ pub fn main(init: std.process.Init) !void {
     // Read the config BEFORE anything else: if that goes wrong we want to say
     // so, not discover it after a window is already open.
     var win = try Window.init(gpa, config_path);
-    defer win.deinit();
+    // Defers run last-to-first, and the window's Wayland objects must be
+    // destroyed BEFORE the connection is closed (destroying a proxy of a
+    // disconnected display crashes in libwayland). So the window is torn
+    // down by the defer declared after `display.disconnect()` below; this
+    // one only covers the paths that never open a connection.
+    var win_owned = true;
+    defer if (win_owned) win.deinit();
 
     if (shot_dir) |dir| {
         win.snapshotAll(dir) catch |err| {
@@ -94,6 +100,10 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer display.disconnect();
+    defer {
+        win.deinit();
+        win_owned = false;
+    }
 
     installExitSignalHandlers();
 
@@ -130,32 +140,52 @@ pub fn main(init: std.process.Init) !void {
 /// The documented libwayland loop for poll(2). A plain `display.dispatch()`
 /// would not do: libwayland retries its internal poll after EINTR, so a
 /// SIGTERM/SIGINT would never get the loop to look at `should_exit`.
+///
+/// Two fds: the Wayland socket and the key-repeat timer of the window.
 fn runLoop(display: *wl.Display, win: *Window) !void {
     while (!win.closed and !should_exit.load(.monotonic)) {
         // Nothing may be left in the queue when we go to sleep.
         while (!display.prepareRead()) {
-            if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
+            if (display.dispatchPending() != .SUCCESS) return connectionLost(display);
         }
         const flushed = display.flush();
         if (flushed != .SUCCESS and flushed != .AGAIN) {
             display.cancelRead();
-            return error.FlushFailed;
+            return connectionLost(display);
         }
 
-        var pfd: c.struct_pollfd = .{
-            .fd = display.getFd(),
-            .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
-            .revents = 0,
+        var fds = [2]c.struct_pollfd{
+            .{
+                .fd = display.getFd(),
+                .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
+                .revents = 0,
+            },
+            .{ .fd = win.repeatFd(), .events = c.POLLIN, .revents = 0 },
         };
-        const rc = c.poll(&pfd, 1, -1);
+        // A negative fd is ignored by poll(2).
+        const rc = c.poll(&fds, 2, -1);
 
-        if (rc > 0 and pfd.revents & c.POLLIN != 0) {
-            if (display.readEvents() != .SUCCESS) return error.DispatchFailed;
+        if (rc > 0 and fds[0].revents & c.POLLIN != 0) {
+            if (display.readEvents() != .SUCCESS) return connectionLost(display);
         } else {
             display.cancelRead();
             // The compositor went away.
-            if (rc > 0 and pfd.revents & (c.POLLERR | c.POLLHUP) != 0) return;
+            if (rc > 0 and fds[0].revents & (c.POLLERR | c.POLLHUP) != 0) return;
         }
-        if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
+        if (display.dispatchPending() != .SUCCESS) return connectionLost(display);
+
+        if (rc > 0 and fds[1].revents & c.POLLIN != 0) win.onRepeatTimer();
     }
+}
+
+/// The connection broke or the compositor reported a protocol error: say
+/// which, once, and leave with a failure code instead of an error trace.
+fn connectionLost(display: *wl.Display) error{ConnectionLost} {
+    const code = display.getError();
+    if (code == 0) {
+        std.log.err("lost the connection to the Wayland compositor", .{});
+    } else {
+        std.log.err("Wayland connection error (errno {d}: {t})", .{ code, @as(posix.E, @enumFromInt(code)) });
+    }
+    return error.ConnectionLost;
 }

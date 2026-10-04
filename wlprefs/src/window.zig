@@ -43,6 +43,11 @@ const prefs_mod = @import("prefs.zig");
 const icons = @import("icons.zig");
 const Category = root.Category;
 
+const tc = @cImport({
+    @cInclude("sys/timerfd.h");
+    @cInclude("time.h");
+});
+
 // ---- NeXTSTEP palette -------------------------------------------------------
 
 const widget_face = gfx.Color.rgb(0xaeaeae);
@@ -51,7 +56,7 @@ const text_dim = gfx.Color.rgb(0x505050);
 
 const font = "Sans 10";
 const font_bold_title = "Sans Bold 18";
-const font_small = "Sans 8";
+const font_small = "Sans 7";
 
 // ---- geometry, ported 1:1 from WPrefs.app/WPrefs.c's createMainWindow -----
 
@@ -106,6 +111,17 @@ fn thumb() Thumb {
     return .{ .w = std.math.clamp(w, 20, strip_w - 4) };
 }
 
+const buffer_count = 3;
+/// Each slot starts on its own page.
+const slot_stride: usize = std.mem.alignForward(usize, @as(usize, @intCast(win_width * 4 * win_height)), 4096);
+
+const Slot = struct {
+    win: ?*Window = null,
+    buf: ?*wl.Buffer = null,
+    /// The compositor holds this buffer (attached, no `release` yet).
+    busy: bool = false,
+};
+
 pub const Window = struct {
     gpa: std.mem.Allocator,
 
@@ -127,6 +143,13 @@ pub const Window = struct {
     xkb_keymap: ?*xkb.Keymap = null,
     xkb_state: ?*xkb.State = null,
     focused_text: ?*settings.Text = null,
+    /// Key repeat: the compositor only sends press and release. A timerfd
+    /// (polled by main.zig's loop, see `repeatFd`) re-types the held key.
+    repeat_fd: c_int = -1,
+    repeat_rate: i32 = 25,
+    repeat_delay: i32 = 600,
+    /// xkb keycode of the key being repeated, 0 = none.
+    repeat_code: u32 = 0,
 
     // ---- window state -------------------------------------------------------
     surface: ?*wl.Surface = null,
@@ -149,11 +172,16 @@ pub const Window = struct {
     menu_imgs: panel_menu.Images = undefined,
     menu_state: panel_menu.State = .{},
 
-    // ---- the one shm buffer -----------------------------------------------
+    // ---- shm buffers ------------------------------------------------------
+    //
+    // Several wl_buffers in ONE pool. A compositor may keep a buffer until it
+    // has a newer one (wlroots does for some paths) and never sends `release`
+    // for the buffer that is still on screen. With a single buffer that made
+    // every redraw wait forever: the clicks arrived, the window never changed.
+    // So: draw into any slot that is not held, and when all are held, remember
+    // to redraw on the next `release`.
     shm_data: []align(std.heap.page_size_min) u8 = &.{},
-    buffer: ?*wl.Buffer = null,
-    /// The compositor still holds the buffer (no `release` yet).
-    buf_busy: bool = false,
+    slots: [buffer_count]Slot = [_]Slot{.{}} ** buffer_count,
     redraw_pending: bool = false,
 
     // ---- settings -----------------------------------------------------------
@@ -215,15 +243,30 @@ pub const Window = struct {
     fn seatListener(seat: *wl.Seat, ev: wl.Seat.Event, win: *Window) void {
         switch (ev) {
             .capabilities => |c| {
-                if (c.capabilities.pointer and win.pointer == null) {
-                    const ptr = seat.getPointer() catch return;
-                    win.pointer = ptr;
-                    ptr.setListener(*Window, pointerListener, win);
+                if (c.capabilities.pointer) {
+                    if (win.pointer == null) {
+                        const ptr = seat.getPointer() catch return;
+                        win.pointer = ptr;
+                        ptr.setListener(*Window, pointerListener, win);
+                    }
+                } else if (win.pointer) |ptr| {
+                    // The device went away (unplugged, virtual device gone).
+                    if (seat.getVersion() >= 3) ptr.release() else ptr.destroy();
+                    win.pointer = null;
+                    win.dragging = false;
                 }
-                if (c.capabilities.keyboard and win.keyboard == null) {
-                    const kb = seat.getKeyboard() catch return;
-                    win.keyboard = kb;
-                    kb.setListener(*Window, keyboardListener, win);
+                if (c.capabilities.keyboard) {
+                    if (win.keyboard == null) {
+                        const kb = seat.getKeyboard() catch return;
+                        win.keyboard = kb;
+                        kb.setListener(*Window, keyboardListener, win);
+                    }
+                } else if (win.keyboard) |kb| {
+                    if (seat.getVersion() >= 3) kb.release() else kb.destroy();
+                    // The text field keeps its focus: a keyboard that comes
+                    // back (unplugged, or a virtual one) continues typing there.
+                    win.keyboard = null;
+                    win.stopRepeat();
                 }
             },
             else => {},
@@ -242,52 +285,173 @@ pub const Window = struct {
                     win.xkb_ctx = c;
                     break :blk c;
                 };
+                // The keymap is NUL-terminated text; the size includes the NUL.
                 const km = xkb.Keymap.newFromBuffer(ctx, map.ptr, k.size - 1, .text_v1, .no_flags) orelse return;
                 const st = xkb.State.new(km) orelse {
                     km.unref();
                     return;
                 };
-                if (win.xkb_state) |s| s.unref();
-                if (win.xkb_keymap) |m| m.unref();
+                if (win.xkb_state) |old| old.unref();
+                if (win.xkb_keymap) |old| old.unref();
                 win.xkb_keymap = km;
                 win.xkb_state = st;
             },
+            .enter => {},
+            .leave => win.stopRepeat(),
             .modifiers => |m| {
                 if (win.xkb_state) |s| _ = s.updateMask(m.mods_depressed, m.mods_latched, m.mods_locked, 0, 0, m.group);
             },
+            .repeat_info => |r| {
+                win.repeat_rate = r.rate;
+                win.repeat_delay = r.delay;
+                if (r.rate <= 0) win.stopRepeat();
+            },
             .key => |k| {
-                if (k.state != .pressed) return;
-                const st = win.xkb_state orelse return;
                 const code: u32 = @as(u32, k.key) + 8; // evdev -> xkb
-                const sym = st.keyGetOneSym(code);
-
-                // Ctrl+S saves, wherever the focus is.
-                const ctrl = st.modNameIsActive(xkb.names.mod.ctrl, @enumFromInt(xkb.State.Component.mods_effective)) > 0;
-                if (ctrl and (sym == xkb.Keysym.s or sym == xkb.Keysym.S)) {
-                    win.save();
-                    win.redraw();
+                if (k.state != .pressed) {
+                    if (code == win.repeat_code) win.stopRepeat();
                     return;
                 }
-
-                const t = win.focused_text orelse return;
-                switch (sym) {
-                    .BackSpace => t.backspace(),
-                    .Return, .KP_Enter, .Escape => win.focused_text = null,
-                    else => {
-                        if (ctrl) return;
-                        var buf: [8]u8 = undefined;
-                        const n = st.keyGetUtf8(code, &buf);
-                        if (n != 1) return;
-                        // Text.append refuses control characters and a '#'
-                        // that would start a comment.
-                        t.append(buf[0]);
-                    },
-                }
-                win.close_armed = false;
-                win.redraw();
+                win.onKey(code, false);
             },
-            else => {},
         }
+    }
+
+    /// A key went down (`repeating`: the timer typed it again).
+    fn onKey(win: *Window, code: u32, repeating: bool) void {
+        const st = win.xkb_state orelse return;
+        const sym = st.keyGetOneSym(code);
+        const ctrl = st.modNameIsActive(xkb.names.mod.ctrl, @enumFromInt(xkb.State.Component.mods_effective)) > 0;
+        const shift = st.modNameIsActive(xkb.names.mod.shift, @enumFromInt(xkb.State.Component.mods_effective)) > 0;
+
+        // Ctrl+S saves, wherever the focus is.
+        if (ctrl and (sym == xkb.Keysym.s or sym == xkb.Keysym.S)) {
+            if (!repeating) {
+                win.save();
+                win.redraw();
+            }
+            return;
+        }
+
+        const t = win.focused_text orelse return;
+        var edited = false;
+        switch (sym) {
+            .BackSpace => {
+                textBackspace(t);
+                edited = true;
+            },
+            .Return, .KP_Enter, .Escape => {
+                if (!repeating) win.focused_text = null;
+            },
+            xkb.Keysym.Tab, xkb.Keysym.ISO_Left_Tab => {
+                if (!repeating) win.moveFocus(sym == xkb.Keysym.ISO_Left_Tab or shift);
+            },
+            else => {
+                if (ctrl) return;
+                var buf: [8]u8 = undefined;
+                const n = st.keyGetUtf8(code, &buf);
+                if (n == 0 or n > buf.len) return;
+                // Whole characters only (umlauts too); control characters
+                // and a comment-starting '#' are refused by textAppend.
+                textAppend(t, buf[0..n]);
+                edited = true;
+            },
+        }
+        if (edited) {
+            win.status[0] = 0;
+            if (!repeating) win.startRepeat(code);
+        }
+        win.close_armed = false;
+        win.redraw();
+    }
+
+    // ---- text editing (UTF-8 aware) -------------------------------------------
+
+    /// Type `s` (one character as UTF-8) into `t`. A single byte goes through
+    /// `Text.append` (control characters, `#` comments); a multi-byte
+    /// sequence is added whole or not at all.
+    fn textAppend(t: *settings.Text, s: []const u8) void {
+        // A lone byte >= 0x80 is half a character: refuse it.
+        if (s.len == 1) return if (s[0] < 0x80) t.append(s[0]);
+        if (s.len == 0 or t.len + s.len > t.buf.len) return;
+        if (!std.unicode.utf8ValidateSlice(s)) return;
+        @memcpy(t.buf[t.len..][0..s.len], s);
+        t.len += s.len;
+    }
+
+    /// Delete one CHARACTER (not one byte).
+    fn textBackspace(t: *settings.Text) void {
+        if (t.len == 0) return;
+        t.len -= 1;
+        while (t.len > 0 and (t.buf[t.len] & 0xC0) == 0x80) t.len -= 1;
+    }
+
+    /// Tab / Shift+Tab: the next text field of the page.
+    fn moveFocus(win: *Window, backwards: bool) void {
+        const cat = win.selected orelse return;
+        const s = win.cur();
+        var list: [3]*settings.Text = undefined;
+        const n: usize = switch (cat) {
+            .workspace => blk: {
+                list[0] = &s.workspace_names;
+                list[1] = &s.width_presets;
+                break :blk 2;
+            },
+            .ergonomic => blk: {
+                list[0] = &s.terminal;
+                list[1] = &s.launcher;
+                list[2] = &s.browser;
+                break :blk 3;
+            },
+            else => 0,
+        };
+        if (n == 0) return;
+        var at: usize = 0;
+        for (list[0..n], 0..) |f, i| {
+            if (f == win.focused_text) at = i;
+        }
+        const next = if (backwards) (at + n - 1) % n else (at + 1) % n;
+        win.focused_text = list[next];
+    }
+
+    // ---- key repeat -------------------------------------------------------------
+
+    /// The fd main.zig has to poll (-1: no repeat available).
+    pub fn repeatFd(win: *const Window) c_int {
+        return win.repeat_fd;
+    }
+
+    fn startRepeat(win: *Window, code: u32) void {
+        if (win.repeat_fd < 0 or win.repeat_rate <= 0) return;
+        win.repeat_code = code;
+        const interval_ns: i64 = @divTrunc(1_000_000_000, @as(i64, win.repeat_rate));
+        const delay_ns: i64 = @as(i64, @max(win.repeat_delay, 1)) * 1_000_000;
+        win.armTimer(delay_ns, interval_ns);
+    }
+
+    fn stopRepeat(win: *Window) void {
+        win.repeat_code = 0;
+        win.armTimer(0, 0);
+    }
+
+    fn armTimer(win: *Window, first_ns: i64, interval_ns: i64) void {
+        if (win.repeat_fd < 0) return;
+        var spec: tc.struct_itimerspec = .{
+            .it_interval = .{ .tv_sec = @divTrunc(interval_ns, 1_000_000_000), .tv_nsec = @rem(interval_ns, 1_000_000_000) },
+            .it_value = .{ .tv_sec = @divTrunc(first_ns, 1_000_000_000), .tv_nsec = @rem(first_ns, 1_000_000_000) },
+        };
+        _ = tc.timerfd_settime(win.repeat_fd, 0, &spec, null);
+    }
+
+    /// main.zig: the repeat timer is readable.
+    pub fn onRepeatTimer(win: *Window) void {
+        if (win.repeat_fd < 0) return;
+        var expirations: u64 = 0;
+        const rc = std.os.linux.read(win.repeat_fd, @ptrCast(&expirations), @sizeOf(u64));
+        if (std.posix.errno(rc) != .SUCCESS or win.repeat_code == 0) return;
+        // A slow redraw must not turn into a burst of characters.
+        var n = @min(expirations, 4);
+        while (n > 0 and win.repeat_code != 0) : (n -= 1) win.onKey(win.repeat_code, true);
     }
 
     fn pointerListener(_: *wl.Pointer, ev: wl.Pointer.Event, win: *Window) void {
@@ -528,6 +692,8 @@ pub const Window = struct {
         toplevel.setMinSize(win_width, win_height);
         toplevel.setMaxSize(win_width, win_height);
 
+        win.repeat_fd = tc.timerfd_create(tc.CLOCK_MONOTONIC, tc.TFD_NONBLOCK | tc.TFD_CLOEXEC);
+
         try win.loadIcons();
         try win.createBuffer();
 
@@ -546,34 +712,40 @@ pub const Window = struct {
         win.icons_loaded = true;
     }
 
-    /// The window's single buffer: a memfd, mapped for the whole life of the
-    /// window, wrapped in one wl_buffer. The pool is released at once; the
-    /// buffer keeps the memory alive.
+    /// The window's buffers: one memfd, mapped for the whole life of the
+    /// window, wrapped in `buffer_count` wl_buffers. The pool is destroyed at
+    /// once; the buffers keep the memory alive.
     fn createBuffer(win: *Window) !void {
         const shm = win.shm orelse return error.MissingGlobal;
         const stride = win_width * 4;
-        const size: usize = @intCast(stride * win_height);
+        const total: usize = slot_stride * buffer_count;
 
         const fd = try std.posix.memfd_create("wlprefs-buffer", 0);
         defer _ = std.os.linux.close(fd);
-        switch (std.posix.errno(std.os.linux.ftruncate(fd, @intCast(size)))) {
+        switch (std.posix.errno(std.os.linux.ftruncate(fd, @intCast(total)))) {
             .SUCCESS => {},
             else => return error.SystemResources,
         }
-        win.shm_data = try std.posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
-        errdefer std.posix.munmap(win.shm_data);
+        win.shm_data = try std.posix.mmap(null, total, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+        errdefer {
+            std.posix.munmap(win.shm_data);
+            win.shm_data = &.{};
+        }
 
-        const pool = try shm.createPool(fd, @intCast(size));
+        const pool = try shm.createPool(fd, @intCast(total));
         defer pool.destroy();
-        const buf = try pool.createBuffer(0, win_width, win_height, stride, .argb8888);
-        buf.setListener(*Window, bufferListener, win);
-        win.buffer = buf;
+        for (&win.slots, 0..) |*slot, i| {
+            const buf = try pool.createBuffer(@intCast(i * slot_stride), win_width, win_height, stride, .argb8888);
+            slot.* = .{ .win = win, .buf = buf };
+            buf.setListener(*Slot, bufferListener, slot);
+        }
     }
 
-    fn bufferListener(_: *wl.Buffer, ev: wl.Buffer.Event, win: *Window) void {
+    fn bufferListener(_: *wl.Buffer, ev: wl.Buffer.Event, slot: *Slot) void {
         switch (ev) {
             .release => {
-                win.buf_busy = false;
+                slot.busy = false;
+                const win = slot.win orelse return;
                 if (win.redraw_pending) {
                     win.redraw_pending = false;
                     win.redraw();
@@ -583,14 +755,32 @@ pub const Window = struct {
     }
 
     pub fn deinit(win: *Window) void {
+        if (win.repeat_fd >= 0) _ = std.os.linux.close(win.repeat_fd);
+        win.repeat_fd = -1;
         if (win.icons_loaded) {
             for (&win.icons) |*img| img.deinit();
             win.menu_imgs.deinit();
             win.icon_set.deinit();
         }
         win.prefs.deinit();
-        if (win.buffer) |b| b.destroy();
+        if (win.pointer) |ptr| {
+            if (win.seat) |seat| {
+                if (seat.getVersion() >= 3) ptr.release() else ptr.destroy();
+            }
+            win.pointer = null;
+        }
+        if (win.keyboard) |kb| {
+            if (win.seat) |seat| {
+                if (seat.getVersion() >= 3) kb.release() else kb.destroy();
+            }
+            win.keyboard = null;
+        }
+        for (&win.slots) |*slot| {
+            if (slot.buf) |b| b.destroy();
+            slot.buf = null;
+        }
         if (win.shm_data.len > 0) std.posix.munmap(win.shm_data);
+        win.shm_data = &.{};
         if (win.xkb_state) |s| s.unref();
         if (win.xkb_keymap) |m| m.unref();
         if (win.xkb_ctx) |c| c.unref();
@@ -603,20 +793,23 @@ pub const Window = struct {
     fn draw(win: *Window) !void {
         if (!win.configured) return;
         const surface = win.surface orelse return error.MissingGlobal;
-        const buffer = win.buffer orelse return error.MissingGlobal;
 
-        // The compositor still reads the buffer: draw when it lets go.
-        if (win.buf_busy) {
+        // A buffer the compositor does not hold.
+        const idx = for (win.slots, 0..) |slot, i| {
+            if (!slot.busy and slot.buf != null) break i;
+        } else {
+            // All held: draw when one comes back.
             win.redraw_pending = true;
             return;
-        }
+        };
 
-        try win.paintAll(win.shm_data.ptr);
+        try win.paintAll(win.shm_data[idx * slot_stride ..].ptr);
 
-        surface.attach(buffer, 0, 0);
+        surface.attach(win.slots[idx].buf, 0, 0);
         surface.damageBuffer(0, 0, win_width, win_height);
         surface.commit();
-        win.buf_busy = true;
+        win.slots[idx].busy = true;
+        win.redraw_pending = false;
     }
 
     /// The whole window into `data` (win_width x win_height ARGB32).
@@ -794,18 +987,150 @@ pub const Window = struct {
         drawButton(cv, close_x, button_y, save_close_w, button_h, "Close", true);
 
         if (win.status[0] != 0) {
-            cv.drawText(&win.status, balloon_x, button_y + @divTrunc(button_h, 2) - 5, font_small, text_dim);
+            drawStatus(cv, std.mem.sliceTo(&win.status, 0));
         } else if (dirty) {
-            var buf: [48:0]u8 = undefined;
+            var buf: [48]u8 = undefined;
             const n = win.prefs.changed();
-            const t = std.fmt.bufPrintZ(&buf, "{d} unsaved change{s}", .{ n, if (n == 1) "" else "s" }) catch "";
-            cv.drawText(t, balloon_x, button_y + @divTrunc(button_h, 2) - 5, font_small, text_dim);
+            const t = std.fmt.bufPrint(&buf, "{d} unsaved change{s}", .{ n, if (n == 1) "" else "s" }) catch "";
+            drawStatus(cv, t);
+        }
+    }
+
+    /// Room for the status text: between the left edge and "Revert Page".
+    const status_w: i32 = revert_page_x - balloon_x - 8;
+    const status_lines = 3;
+    const status_line_h: i32 = 9;
+
+    /// Word-wraps `text` into at most `status_lines` lines of `status_w`
+    /// pixels; what does not fit ends in "...". (A long message used to run
+    /// straight across the buttons.)
+    fn drawStatus(cv: *gfx.Canvas, text: []const u8) void {
+        var lines: [status_lines][112:0]u8 = undefined;
+        var len = [_]usize{0} ** status_lines;
+        for (&lines) |*l| l[0] = 0;
+        var li: usize = 0;
+        var cut = false;
+
+        var it = std.mem.tokenizeScalar(u8, text, ' ');
+        words: while (it.next()) |word| {
+            while (true) {
+                const sep: usize = if (len[li] > 0) 1 else 0;
+                if (len[li] + sep + word.len < lines[li].len) {
+                    var trial = lines[li];
+                    if (sep == 1) trial[len[li]] = ' ';
+                    @memcpy(trial[len[li] + sep ..][0..word.len], word);
+                    const end = len[li] + sep + word.len;
+                    trial[end] = 0;
+                    if (gfx.measureText(trial[0..end :0], font_small).w <= status_w) {
+                        lines[li] = trial;
+                        len[li] = end;
+                        continue :words;
+                    }
+                }
+                // Does not fit on this line.
+                if (len[li] == 0) {
+                    // One word wider than a whole line: take what fits.
+                    var k = @min(word.len, lines[li].len - 1);
+                    while (k > 0) : (k -= 1) {
+                        if (k < word.len and (word[k] & 0xC0) == 0x80) continue;
+                        @memcpy(lines[li][0..k], word[0..k]);
+                        lines[li][k] = 0;
+                        if (gfx.measureText(lines[li][0..k :0], font_small).w <= status_w) break;
+                    }
+                    len[li] = k;
+                    cut = true;
+                    break :words;
+                }
+                if (li + 1 >= status_lines) {
+                    cut = true;
+                    break :words;
+                }
+                li += 1;
+            }
+        }
+        // Words left over after the last line.
+        if (!cut and it.next() != null) cut = true;
+
+        if (cut) {
+            // Make room for the dots on the last used line.
+            while (len[li] > 0) {
+                if (len[li] + 4 > lines[li].len) {
+                    len[li] -= 1;
+                    continue;
+                }
+                var trial = lines[li];
+                @memcpy(trial[len[li]..][0..3], "...");
+                trial[len[li] + 3] = 0;
+                if (gfx.measureText(trial[0 .. len[li] + 3 :0], font_small).w <= status_w) {
+                    lines[li] = trial;
+                    len[li] += 3;
+                    break;
+                }
+                len[li] -= 1;
+                while (len[li] > 0 and (lines[li][len[li]] & 0xC0) == 0x80) len[li] -= 1;
+            }
+        }
+
+        const used = li + 1;
+        const total_h: i32 = @as(i32, @intCast(used)) * status_line_h;
+        var y = button_y + @divTrunc(button_h - total_h, 2) - 1;
+        for (0..used) |i| {
+            if (len[i] == 0) continue;
+            lines[i][len[i]] = 0;
+            cv.drawText(lines[i][0..len[i] :0], balloon_x, y, font_small, text_dim);
+            y += status_line_h;
         }
     }
 
     fn drawButton(cv: *gfx.Canvas, x: i32, y: i32, w: i32, h: i32, label: [:0]const u8, enabled: bool) void {
         cv.relief(x, y, w, h, .raised);
-        const col = if (enabled) text_black else text_dim;
-        cv.drawTextCentered(label, x + @divTrunc(w, 2), y + @divTrunc(h, 2) - 4, font, col);
+        const text_col = if (enabled) text_black else text_dim;
+        const tx = x + @divTrunc(w - @as(i32, @intCast(label.len * 7)), 2);
+        const ty = y + @divTrunc(h, 2) - 5;
+        cv.drawText(label, tx, ty, font, text_col);
     }
 };
+
+// ----------------------------------------------------------------------------
+// Tests: the text-field editing that used to work on bytes
+// ----------------------------------------------------------------------------
+
+test "typing and deleting work on whole characters (umlauts)" {
+    var t: settings.Text = .{};
+    Window.textAppend(&t, "B");
+    Window.textAppend(&t, "\xc3\xbc"); // ü
+    Window.textAppend(&t, "r");
+    Window.textAppend(&t, "o");
+    try std.testing.expectEqualStrings("B\xc3\xbcro", t.get());
+    Window.textBackspace(&t);
+    Window.textBackspace(&t);
+    try std.testing.expectEqualStrings("B\xc3\xbc", t.get());
+    // One backspace removes the whole ü, not half of it.
+    Window.textBackspace(&t);
+    try std.testing.expectEqualStrings("B", t.get());
+    Window.textBackspace(&t);
+    Window.textBackspace(&t); // empty: no underflow
+    try std.testing.expectEqual(@as(usize, 0), t.len);
+}
+
+test "a multi-byte character is added whole or not at all" {
+    var t: settings.Text = .{};
+    t.len = settings.Text.capacity - 1;
+    @memset(t.buf[0..t.len], 'a');
+    Window.textAppend(&t, "\xc3\xbc"); // needs 2 bytes, 1 is left
+    try std.testing.expectEqual(settings.Text.capacity - 1, t.len);
+    Window.textAppend(&t, "\xc3"); // not valid UTF-8 on its own
+    try std.testing.expectEqual(settings.Text.capacity - 1, t.len);
+    Window.textAppend(&t, "z");
+    try std.testing.expectEqual(settings.Text.capacity, t.len);
+}
+
+test "a comment-starting '#' and control characters are refused" {
+    var t: settings.Text = .{};
+    Window.textAppend(&t, "#");
+    Window.textAppend(&t, "\x01");
+    try std.testing.expectEqual(@as(usize, 0), t.len);
+    Window.textAppend(&t, "a");
+    Window.textAppend(&t, "#"); // inside a word is fine
+    try std.testing.expectEqualStrings("a#", t.get());
+}
