@@ -940,15 +940,19 @@ pub const Window = struct {
             },
             .paths => .{
                 .headline = "Nothing to configure here",
+                .text = "",
             },
             .menu => .{
                 .headline = "Not part of wlprefs yet",
+                .text = "",
             },
             .hot_corner_shortcuts => .{
                 .headline = "Not implemented in wmaker-wl",
+                .text = "",
             },
             .expert => .{
                 .headline = "Nothing to configure here",
+                .text = "",
             },
             else => .{ .headline = "", .text = "" },
         };
