@@ -38,7 +38,7 @@ const wm_files = root.wm_files;
 const dockapp = root.dockapp;
 const proc = root.proc;
 const ui_mod = root.ui;
-const gfx = @import("gfx.zig");
+const gfx = root.gfx;
 
 const WindowManager = types.WindowManager;
 
@@ -56,6 +56,8 @@ test {
     _ = @import("wm_attr.zig");
     _ = @import("dockapp.zig");
     _ = @import("dock.zig");
+    _ = @import("xpm.zig");
+    _ = @import("fsmenu.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
     _ = @import("wm_prefs.zig");
@@ -536,6 +538,10 @@ fn onManage(wm: *WindowManager) void {
     // 8. Send management state (propose_dimensions, tiled, fullscreen) and
     //    rendering state (position, borders, visibility) in one pass.
     const focus_target = resolveFocus(wm);
+    // Whatever gets the focus is where the user is working now.
+    if (focus_target) |w| if (w.workspace) |ws| {
+        wm.active_output = ws.output;
+    };
     var wit = wm.windows.first();
     while (wit) |w| : (wit = types.nextWindow(w, wm)) {
         window_mod.applyManage(wm, w);
@@ -561,12 +567,29 @@ fn onManage(wm: *WindowManager) void {
 fn runUiAction(wm: *WindowManager, req: types.UiAction) void {
     switch (req) {
         .focus => |w| {
-            if (w.closed or w.workspace == null) return;
+            if (w.closed) return;
+            if (w.minimized) {
+                // From the Windows menu or a Dock tile: bring it back to
+                // where the user is (and focus it).
+                const out = types.workingOutput(wm) orelse return;
+                action.restoreWindow(wm, w, out);
+                return;
+            }
+            if (w.workspace == null) return;
             if (w.workspace) |ws| ws.output.active = ws.index;
             workspace.activate(w);
             wm.focus_request = w;
             wm.follow_request = true;
         },
+        .shutdown => {
+            var it = wm.windows.first();
+            while (it) |w| : (it = types.nextWindow(w, wm)) {
+                if (!w.closed) w.obj.close();
+            }
+            wm.quit = true;
+        },
+        .show_all => action.run(wm, .show_all),
+        .hide_others => action.run(wm, .hide_others),
         .workspace => |i| action.run(wm, .{ .workspace = i }),
         .workspace_next => action.run(wm, .workspace_next),
         .workspace_prev => action.run(wm, .workspace_prev),
@@ -595,26 +618,19 @@ fn resolveFocus(wm: *WindowManager) ?*types.Window {
     // 1. An explicit request wins.
     if (wm.focus_request) |w| if (focusable(w)) return w;
 
-    // 2. Keep the current focus while it is still valid.
+    // 2. Keep the current focus while it is still valid -- and still on the
+    //    output the user works on (focus_output_next moves that to an output
+    //    whose own window should get the focus, or none if it is empty).
     const current: ?*types.Window = if (wm.seats.first()) |s| s.focused else null;
-    if (current) |w| if (focusable(w)) return w;
+    const out = types.workingOutput(wm);
+    if (current) |w| {
+        if (focusable(w) and (wm.active_output == null or (w.workspace != null and w.workspace.?.output == out))) return w;
+    }
 
     // 3. Fall back on the output the user was working on (where the last
     //    focused window is, even if that window just went away), so a second
     //    monitor does not suddenly steal focus onto the first.
-    const out = activeOutput(wm, current) orelse return null;
-    return workspace.defaultFocus(out.ws());
-}
-
-/// The output the user is working on: the focused window's output if it
-/// still exists, otherwise the first live output.
-fn activeOutput(wm: *WindowManager, focused: ?*types.Window) ?*types.Output {
-    if (focused) |w| if (w.workspace) |ws| if (!ws.output.removed) return ws.output;
-    var it = wm.outputs.first();
-    while (it) |o| : (it = types.nextOutput(o, wm)) {
-        if (!o.removed and o.ready()) return o;
-    }
-    return null;
+    return workspace.defaultFocus((out orelse return null).ws());
 }
 
 fn layoutAll(wm: *WindowManager) void {

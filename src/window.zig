@@ -254,7 +254,7 @@ pub fn placeNew(wm: *WindowManager) void {
         if (!attrs.is("unfocusable")) {
             workspace.activate(win);
             // A window opened on another workspace must not steal the view.
-            if (ws == out.ws() and wm.cfg.focus_new_windows) {
+            if (ws == out.ws()) {
                 wm.focus_request = win;
                 wm.follow_request = true;
             }
@@ -264,14 +264,7 @@ pub fn placeNew(wm: *WindowManager) void {
 
 /// Output new windows go to: the one with the focused window, else first.
 fn targetOutput(wm: *WindowManager) ?*Output {
-    if (wm.seats.first()) |s| {
-        if (s.focused) |w| if (w.workspace) |ws| return ws.output;
-    }
-    var it = wm.outputs.first();
-    while (it) |o| : (it = types.nextOutput(o, wm)) {
-        if (o.ready() and !o.removed) return o;
-    }
-    return null;
+    return types.workingOutput(wm);
 }
 
 // ----------------------------------------------------------------------------

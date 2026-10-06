@@ -65,6 +65,11 @@ pub const Builtin = enum {
             .windows_menu,
             .workspace_next,
             .workspace_prev,
+            .show_all,
+            .hide_others,
+            .shutdown,
+            .info_panel,
+            .legal_panel,
             => true,
             else => false,
         };
@@ -91,9 +96,11 @@ pub const Item = struct {
 
     pub fn enabled(i: Item) bool {
         return switch (i.action) {
-            .exec, .shexec, .submenu => true,
+            // OPEN_MENU is expanded when the menu opens (fsmenu.zig); if that
+            // yields nothing the row is shown disabled there.
+            .exec, .shexec, .submenu, .open_menu => true,
             .builtin => |b| b.isImplemented(),
-            .open_menu, .unknown => false,
+            .unknown => false,
         };
     }
 };
@@ -661,8 +668,14 @@ test "builtinDefault has the entries a user needs" {
 test "which builtins are implemented" {
     try std.testing.expect(Builtin.exit.isImplemented());
     try std.testing.expect(Builtin.workspace_menu.isImplemented());
-    try std.testing.expect(!Builtin.info_panel.isImplemented());
-    try std.testing.expect(!Builtin.shutdown.isImplemented());
+    try std.testing.expect(Builtin.info_panel.isImplemented());
+    try std.testing.expect(Builtin.legal_panel.isImplemented());
+    try std.testing.expect(Builtin.shutdown.isImplemented());
+    try std.testing.expect(Builtin.show_all.isImplemented());
+    try std.testing.expect(Builtin.hide_others.isImplemented());
+    // Still not: a restart would cut the connection to river (docs/TODO.md).
+    try std.testing.expect(!Builtin.restart.isImplemented());
+    try std.testing.expect(!Builtin.save_session.isImplemented());
 }
 
 test "parseDiag says where the menu is broken" {

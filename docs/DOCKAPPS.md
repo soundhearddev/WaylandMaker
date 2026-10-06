@@ -102,7 +102,7 @@ autolaunch = yes
 | Feld | Bedeutung | Pflicht |
 |---|---|---|
 | `command` | Befehlszeile, die beim Start ausgeführt wird | ja |
-| `icon` | PNG-Pfad, oder ein Name, der in `/usr/share/icons/hicolor/*/apps` und `/usr/share/pixmaps` gesucht wird (Default: Programmname) | nein |
+| `icon` | PNG- oder **XPM**-Pfad, oder ein Name, der in `/usr/share/icons/hicolor/*/apps` und `/usr/share/pixmaps` (erst `.png`, dann `.xpm`) gesucht wird (Default: Programmname) | nein |
 | `position` | Grid-Position `x,y` (Kachel-Koordinaten, nicht Pixel); im Dock zählt nur `y`, im Clip `x`, dann `y` | nein, Default `0,0` |
 | `place` | `dock` oder `clip` | nein, Default `dock` |
 | `workspace` | nur Clip: 1-basierter Workspace, oder `all` | nein, Default `all` |

@@ -135,15 +135,15 @@ fn twoInts(s: []const u8) ParseError![2]i32 {
 /// The output actions apply to: the one that holds the focused window,
 /// otherwise the first.
 fn currentOutput(wm: *WindowManager) ?*Output {
-    if (wm.seats.first()) |s| {
-        if (s.focused) |w| if (w.workspace) |ws| return ws.output;
-    }
-    return wm.outputs.first();
+    return types.workingOutput(wm);
 }
 
 fn focusedWindow(wm: *WindowManager) ?*Window {
-    const s = wm.seats.first() orelse return null;
-    if (s.focused) |w| if (!w.closed and w.workspace != null) return w;
+    // No seat yet (start-up) or nothing focused: the workspace's own idea of
+    // its active window is the best answer.
+    if (wm.seats.first()) |s| {
+        if (s.focused) |w| if (!w.closed and w.workspace != null) return w;
+    }
     const out = currentOutput(wm) orelse return null;
     return workspace.defaultFocus(out.ws());
 }
@@ -162,6 +162,30 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .exit => wm.quit = true,
 
         .close => if (focusedWindow(wm)) |w| w.obj.close(),
+
+        // ---- minimize / hide (Window Maker's miniaturize, HIDE, HIDE_OTHERS) ---
+        .minimize => if (focusedWindow(wm)) |w| {
+            workspace.minimize(wm, w);
+            // The next window gets the focus (see resolveFocus); the strip
+            // follows it.
+            wm.follow_request = true;
+        },
+        .hide_app => if (focusedWindow(wm)) |w| {
+            hideMatching(wm, w, .same_app);
+            wm.follow_request = true;
+        },
+        .hide_others => if (focusedWindow(wm)) |w| {
+            hideMatching(wm, w, .other_apps);
+            wm.follow_request = true;
+        },
+        // ---- several monitors -----------------------------------------------------
+        .focus_output_next => focusOutput(wm, out, true),
+        .focus_output_prev => focusOutput(wm, out, false),
+        .move_to_output_next => moveToOutput(wm, out, true),
+        .move_to_output_prev => moveToOutput(wm, out, false),
+
+        .restore => if (workspace.lastMinimized(wm)) |w| restoreWindow(wm, w, out),
+        .show_all => showAll(wm, out),
 
         // ---- mode changes ---------------------------------------------------
         .toggle_floating => if (focusedWindow(wm)) |w| toggleFloating(wm, w),
@@ -275,8 +299,8 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 
         // ---- workspaces --------------------------------------------------------
         .workspace => |i| switchWorkspace(wm, out, i),
-        .workspace_next => if (stepWorkspace(out.active, out.workspace_count, true, cfg.workspace_wrap)) |i| switchWorkspace(wm, out, i),
-        .workspace_prev => if (stepWorkspace(out.active, out.workspace_count, false, cfg.workspace_wrap)) |i| switchWorkspace(wm, out, i),
+        .workspace_next => switchWorkspace(wm, out, (out.active + 1) % out.workspace_count),
+        .workspace_prev => switchWorkspace(wm, out, (out.active + out.workspace_count - 1) % out.workspace_count),
         .move_to_workspace => |i| sendToWorkspace(wm, out, i),
     }
 }
@@ -285,33 +309,89 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 // Helpers
 // ----------------------------------------------------------------------------
 
-/// The workspace after (`forward`) or before `active`. At either end it
-/// wraps around, or (`wrap` = false) stays put: null, nothing to do.
-pub fn stepWorkspace(active: anytype, count: anytype, forward: bool, wrap: bool) ?@TypeOf(active) {
-    if (count <= 1) return null;
-    if (forward) {
-        if (active + 1 < count) return active + 1;
-        return if (wrap) 0 else null;
-    }
-    if (active > 0) return active - 1;
-    return if (wrap) count - 1 else null;
-}
-
-test "stepWorkspace wraps, or stops at the ends" {
-    const t = std.testing;
-    try t.expectEqual(@as(?u32, 1), stepWorkspace(@as(u32, 0), @as(u32, 4), true, true));
-    try t.expectEqual(@as(?u32, 0), stepWorkspace(@as(u32, 3), @as(u32, 4), true, true));
-    try t.expectEqual(@as(?u32, 3), stepWorkspace(@as(u32, 0), @as(u32, 4), false, true));
-    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 3), @as(u32, 4), true, false));
-    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 0), @as(u32, 4), false, false));
-    try t.expectEqual(@as(?u32, 2), stepWorkspace(@as(u32, 3), @as(u32, 4), false, false));
-    // One workspace: nothing to switch to.
-    try t.expectEqual(@as(?u32, null), stepWorkspace(@as(u32, 0), @as(u32, 1), true, true));
-}
-
 /// Toggle between tiled and floating. Fullscreen is left first, because a
 /// fullscreen window has to be a normal window again before it can change
 /// layer.
+/// Work on the next/previous output. Focus goes to the window that was
+/// active there, or nowhere if the output is empty: the point is that the
+/// next workspace/spawn/move command then applies to THAT output.
+fn focusOutput(wm: *WindowManager, from: *Output, forward: bool) void {
+    const target = types.cycleOutput(wm, from, forward) orelse return;
+    if (target == from) return;
+    wm.active_output = target;
+    wm.focus_request = workspace.defaultFocus(target.ws());
+    wm.follow_request = true;
+}
+
+/// Send the focused window to the next/previous output's current workspace
+/// and follow it there.
+fn moveToOutput(wm: *WindowManager, from: *Output, forward: bool) void {
+    const w = focusedWindow(wm) orelse return;
+    const target = types.cycleOutput(wm, from, forward) orelse return;
+    if (target == from) return;
+    workspace.moveToWorkspace(wm, w, target.ws()) catch |err| {
+        std.log.warn("cannot move window to the other output: {t}", .{err});
+        return;
+    };
+    wm.active_output = target;
+    wm.focus_request = w;
+    wm.follow_request = true;
+}
+
+const HideWhich = enum { same_app, other_apps };
+
+/// Is `w` a window the user would call "an application window" -- not a
+/// DockApp (they live in the Dock and have no title bar to restore from)?
+fn hideable(w: *const Window) bool {
+    if (w.closed or w.minimized or w.workspace == null) return false;
+    return !(w.attrs.is("unfocusable") or w.attrs.is("skip_window_list"));
+}
+
+/// Window Maker's HIDE / HIDE_OTHERS. Applications are told apart by app_id;
+/// a window without one counts as an application of its own.
+fn hideMatching(wm: *WindowManager, keep: *Window, which: HideWhich) void {
+    var it = wm.windows.first();
+    while (it) |w| : (it = types.nextWindow(w, wm)) {
+        if (!hideable(w)) continue;
+        const same = w == keep or (w.app_id != null and keep.app_id != null and
+            std.mem.eql(u8, w.app_id.?, keep.app_id.?));
+        const hide = switch (which) {
+            .same_app => same,
+            .other_apps => !same,
+        };
+        if (hide) workspace.minimize(wm, w);
+    }
+}
+
+/// Put a minimized window onto the workspace the user is on, and focus it.
+pub fn restoreWindow(wm: *WindowManager, w: *Window, out: *Output) void {
+    workspace.restore(wm, w, out.ws()) catch |err| {
+        std.log.warn("cannot restore window: {t}", .{err});
+        return;
+    };
+    wm.focus_request = w;
+    wm.follow_request = true;
+}
+
+fn showAll(wm: *WindowManager, out: *Output) void {
+    // Oldest first, so the one minimized last ends up focused.
+    var n: usize = 0;
+    var it = wm.windows.first();
+    while (it) |w| : (it = types.nextWindow(w, wm)) {
+        if (w.minimized and !w.closed) n += 1;
+    }
+    while (n > 0) : (n -= 1) {
+        var oldest: ?*Window = null;
+        var it2 = wm.windows.first();
+        while (it2) |w| : (it2 = types.nextWindow(w, wm)) {
+            if (!w.minimized or w.closed) continue;
+            if (oldest == null or w.min_order < oldest.?.min_order) oldest = w;
+        }
+        const w = oldest orelse break;
+        restoreWindow(wm, w, out);
+    }
+}
+
 pub fn toggleFloating(wm: *WindowManager, w: *Window) void {
     workspace.leaveFullscreen(w);
     switch (w.mode) {

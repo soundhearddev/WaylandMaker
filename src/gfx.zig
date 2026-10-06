@@ -171,6 +171,33 @@ pub const Icon = struct {
         return .{ .surface = s, .w = w, .h = h };
     }
 
+    /// An icon from decoded pixels: `width * height` premultiplied ARGB32
+    /// (what the XPM reader produces). The data is copied.
+    pub fn fromPixels(width: u32, height: u32, pixels: []const u32) ?Icon {
+        if (width == 0 or height == 0 or width > max_side or height > max_side) return null;
+        if (pixels.len != @as(usize, width) * height) return null;
+        const w: c_int = @intCast(width);
+        const h: c_int = @intCast(height);
+        const s = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, w, h) orelse return null;
+        if (c.cairo_surface_status(s) != c.CAIRO_STATUS_SUCCESS) {
+            c.cairo_surface_destroy(s);
+            return null;
+        }
+        c.cairo_surface_flush(s);
+        const data = c.cairo_image_surface_get_data(s) orelse {
+            c.cairo_surface_destroy(s);
+            return null;
+        };
+        const stride: usize = @intCast(c.cairo_image_surface_get_stride(s));
+        var y: usize = 0;
+        while (y < height) : (y += 1) {
+            const row: [*]u32 = @ptrCast(@alignCast(data + y * stride));
+            @memcpy(row[0..width], pixels[y * width ..][0..width]);
+        }
+        c.cairo_surface_mark_dirty(s);
+        return .{ .surface = s, .w = w, .h = h };
+    }
+
     pub fn deinit(i: *Icon) void {
         c.cairo_surface_destroy(i.surface);
     }

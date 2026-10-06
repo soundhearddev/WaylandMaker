@@ -153,6 +153,9 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
         node.* = .{ .obj = binding, .command = i };
         seat.xkb_bindings.append(node);
         binding.setListener(*types.XkbBinding, xkbListener, node);
+        // `bind_layout = N`: translate with layout N whatever is active, so
+        // Super+q is the same physical key on `us` and on `de`.
+        if (wm.cfg.bind_layout) |layout_index| binding.setLayoutOverride(layout_index);
         binding.enable();
         ok += 1;
     }

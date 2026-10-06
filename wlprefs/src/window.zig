@@ -36,6 +36,7 @@ const xkb = @import("xkbcommon");
 
 const gfx = @import("gfx.zig");
 const root = @import("root.zig");
+const panel_menu = @import("panel_menu.zig");
 const panels = @import("panels.zig");
 const settings = @import("settings.zig");
 const prefs_mod = @import("prefs.zig");
@@ -55,7 +56,7 @@ const text_dim = gfx.Color.rgb(0x505050);
 
 const font = "Sans 10";
 const font_bold_title = "Sans Bold 18";
-const font_small = "Sans 7";
+const font_small = "Sans 8";
 
 // ---- geometry, ported 1:1 from WPrefs.app/WPrefs.c's createMainWindow -----
 
@@ -80,6 +81,8 @@ const frame_height: i32 = 235; // FRAME_HEIGHT
 const button_y: i32 = 350;
 const button_h: i32 = 28;
 const balloon_x: i32 = 15;
+const defaults_x: i32 = 15;
+const defaults_w: i32 = 80;
 const revert_page_x: i32 = 135;
 const revert_all_x: i32 = 235;
 const save_x: i32 = 335;
@@ -162,11 +165,19 @@ pub const Window = struct {
     scroll_x: i32 = 0,
     /// First visible row of the key binding list.
     bind_scroll: i32 = 0,
+    /// The key binding editor's state.
+    bind_ui: panels.BindUi = .{},
+    /// The text fields of the page last drawn, in order (Tab walks them).
+    page_fields: [panels.max_fields]*settings.Text = undefined,
+    page_nfields: usize = 0,
 
     icons: [Category.all.len]gfx.Image = undefined,
     icons_loaded: bool = false,
     /// Dock/Clip picker icons (or their fallbacks).
     icon_set: icons.Set = .{},
+
+    menu_imgs: panel_menu.Images = undefined,
+    menu_state: panel_menu.State = .{},
 
     // ---- shm buffers ------------------------------------------------------
     //
@@ -287,8 +298,8 @@ pub const Window = struct {
                     km.unref();
                     return;
                 };
-                if (win.xkb_state) |old| old.unref();
-                if (win.xkb_keymap) |old| old.unref();
+                if (win.xkb_state) |s| s.unref();
+                if (win.xkb_keymap) |m| m.unref();
                 win.xkb_keymap = km;
                 win.xkb_state = st;
             },
@@ -318,7 +329,6 @@ pub const Window = struct {
         const st = win.xkb_state orelse return;
         const sym = st.keyGetOneSym(code);
         const ctrl = st.modNameIsActive(xkb.names.mod.ctrl, @enumFromInt(xkb.State.Component.mods_effective)) > 0;
-        const shift = st.modNameIsActive(xkb.names.mod.shift, @enumFromInt(xkb.State.Component.mods_effective)) > 0;
 
         // Ctrl+S saves, wherever the focus is.
         if (ctrl and (sym == xkb.Keysym.s or sym == xkb.Keysym.S)) {
@@ -329,18 +339,41 @@ pub const Window = struct {
             return;
         }
 
+        // Recording a key combination for a binding.
+        if (win.bind_ui.recording) {
+            if (!repeating) {
+                win.recordKey(st, code, sym);
+                win.redraw();
+            }
+            return;
+        }
+
         const t = win.focused_text orelse return;
-        var edited = false;
+        // Only keys that edit the text repeat.
+        var repeatable = false;
         switch (sym) {
             .BackSpace => {
                 textBackspace(t);
-                edited = true;
+                repeatable = true;
             },
+            .Delete, .KP_Delete => {
+                textDelete(t);
+                repeatable = true;
+            },
+            .Left, .KP_Left => {
+                textLeft(t);
+                repeatable = true;
+            },
+            .Right, .KP_Right => {
+                textRight(t);
+                repeatable = true;
+            },
+            .Home, .KP_Home => t.home(),
+            .End, .KP_End => t.end(),
+            .Tab => if (!repeating) win.nextField(true),
+            .ISO_Left_Tab => if (!repeating) win.nextField(false),
             .Return, .KP_Enter, .Escape => {
                 if (!repeating) win.focused_text = null;
-            },
-            xkb.Keysym.Tab, xkb.Keysym.ISO_Left_Tab => {
-                if (!repeating) win.moveFocus(sym == xkb.Keysym.ISO_Left_Tab or shift);
             },
             else => {
                 if (ctrl) return;
@@ -348,66 +381,60 @@ pub const Window = struct {
                 const n = st.keyGetUtf8(code, &buf);
                 if (n == 0 or n > buf.len) return;
                 // Whole characters only (umlauts too); control characters
-                // and a comment-starting '#' are refused by textAppend.
+                // and a comment-starting '#' are refused by Text.append.
                 textAppend(t, buf[0..n]);
-                edited = true;
+                repeatable = true;
             },
         }
-        if (edited) {
-            win.status[0] = 0;
-            if (!repeating) win.startRepeat(code);
-        }
+        if (repeatable and !repeating) win.startRepeat(code);
         win.close_armed = false;
         win.redraw();
     }
 
     // ---- text editing (UTF-8 aware) -------------------------------------------
+    //
+    // settings.Text works on bytes (caret = byte index). These keep a
+    // multi-byte character (umlauts) whole.
 
-    /// Type `s` (one character as UTF-8) into `t`. A single byte goes through
-    /// `Text.append` (control characters, `#` comments); a multi-byte
+    fn isCont(b: u8) bool {
+        return (b & 0xC0) == 0x80;
+    }
+
+    /// Type `s` (one character as UTF-8) at the caret. A single byte goes
+    /// through `Text.append` (control characters, `#` comments); a multi-byte
     /// sequence is added whole or not at all.
     fn textAppend(t: *settings.Text, s: []const u8) void {
         // A lone byte >= 0x80 is half a character: refuse it.
         if (s.len == 1) return if (s[0] < 0x80) t.append(s[0]);
         if (s.len == 0 or t.len + s.len > t.buf.len) return;
         if (!std.unicode.utf8ValidateSlice(s)) return;
-        @memcpy(t.buf[t.len..][0..s.len], s);
-        t.len += s.len;
+        for (s) |b| t.append(b);
     }
 
-    /// Delete one CHARACTER (not one byte).
+    /// Backspace: one CHARACTER before the caret.
     fn textBackspace(t: *settings.Text) void {
-        if (t.len == 0) return;
-        t.len -= 1;
-        while (t.len > 0 and (t.buf[t.len] & 0xC0) == 0x80) t.len -= 1;
+        while (@min(t.pos, t.len) > 0) {
+            const b = t.buf[@min(t.pos, t.len) - 1];
+            t.backspace();
+            if (!isCont(b)) break;
+        }
     }
 
-    /// Tab / Shift+Tab: the next text field of the page.
-    fn moveFocus(win: *Window, backwards: bool) void {
-        const cat = win.selected orelse return;
-        const s = win.cur();
-        var list: [3]*settings.Text = undefined;
-        const n: usize = switch (cat) {
-            .workspace => blk: {
-                list[0] = &s.workspace_names;
-                list[1] = &s.width_presets;
-                break :blk 2;
-            },
-            .ergonomic => blk: {
-                list[0] = &s.terminal;
-                list[1] = &s.launcher;
-                list[2] = &s.browser;
-                break :blk 3;
-            },
-            else => 0,
-        };
-        if (n == 0) return;
-        var at: usize = 0;
-        for (list[0..n], 0..) |f, i| {
-            if (f == win.focused_text) at = i;
-        }
-        const next = if (backwards) (at + n - 1) % n else (at + 1) % n;
-        win.focused_text = list[next];
+    /// Delete: one CHARACTER at the caret.
+    fn textDelete(t: *settings.Text) void {
+        if (t.pos >= t.len) return;
+        t.delete();
+        while (t.pos < t.len and isCont(t.buf[t.pos])) t.delete();
+    }
+
+    fn textLeft(t: *settings.Text) void {
+        t.left();
+        while (t.pos > 0 and t.pos < t.len and isCont(t.buf[t.pos])) t.left();
+    }
+
+    fn textRight(t: *settings.Text) void {
+        t.right();
+        while (t.pos < t.len and isCont(t.buf[t.pos])) t.right();
     }
 
     // ---- key repeat -------------------------------------------------------------
@@ -481,7 +508,7 @@ pub const Window = struct {
                 // The key binding list scrolls three rows per wheel click.
                 if (win.selected == .keyboard_shortcuts and win.py >= frame_top) {
                     const step: i32 = if (v > 0) 3 else if (v < 0) -3 else 0;
-                    const max = panels.bindMaxScroll(win.prefs.bind_list.len);
+                    const max = panels.bindMaxScroll(win.prefs.bindList().len);
                     const next = std.math.clamp(win.bind_scroll + step, 0, max);
                     if (next != win.bind_scroll) {
                         win.bind_scroll = next;
@@ -496,6 +523,12 @@ pub const Window = struct {
     fn panelClick(win: *Window, cat: Category, x: i32, y: i32) void {
         var ctx: panels.Ctx = .{ .mode = .click, .cx = x, .cy = y, .focused = win.focused_text, .icons = &win.icon_set };
         if (!win.runPanel(cat, &ctx)) return;
+        win.rememberFields(&ctx);
+        if (ctx.res.bind) |cmd| {
+            win.handleBindCmd(cmd);
+            win.redraw();
+            return;
+        }
         win.focused_text = ctx.res.focus;
         if (ctx.res.changed) {
             win.status[0] = 0;
@@ -507,6 +540,165 @@ pub const Window = struct {
             win.focused_text = null;
             win.redraw();
         }
+    }
+
+    fn rememberFields(win: *Window, ctx: *const panels.Ctx) void {
+        win.page_nfields = ctx.nfields;
+        for (0..ctx.nfields) |i| win.page_fields[i] = ctx.fields[i];
+    }
+
+    /// Tab / Shift+Tab: the next text field of the page.
+    fn nextField(win: *Window, forward: bool) void {
+        const n = win.page_nfields;
+        if (n == 0) return;
+        var idx: usize = 0;
+        for (win.page_fields[0..n], 0..) |f, i| {
+            if (f == win.focused_text) idx = i;
+        }
+        const next = if (forward) (idx + 1) % n else (idx + n - 1) % n;
+        win.focused_text = win.page_fields[next];
+        win.focused_text.?.end();
+    }
+
+    // ---- key binding editor ---------------------------------------------------------
+
+    fn handleBindCmd(win: *Window, cmd: panels.BindCmd) void {
+        const b = &win.bind_ui;
+        const list = win.prefs.bindList();
+        switch (cmd) {
+            .select => |i| b.sel = i,
+            .add => {
+                b.* = .{ .sel = b.sel, .editing = true };
+                win.focused_text = &b.keys;
+            },
+            .edit => if (b.sel) |i| if (i < list.len) {
+                const e = list[i];
+                b.keys.set(e.combo);
+                b.action.set(e.action);
+                b.editing = true;
+                b.edit_index = i;
+                b.recording = false;
+                b.setMessage("");
+                win.focused_text = &b.action;
+            },
+            .remove => if (b.sel) |i| {
+                win.prefs.bindRemove(i) catch {
+                    win.setStatus("Out of memory");
+                    return;
+                };
+                b.sel = null;
+                win.close_armed = false;
+            },
+            .record => {
+                b.recording = true;
+                win.focused_text = null;
+                win.setStatus("Press the key combination now (Esc cancels)");
+            },
+            .cancel => {
+                b.editing = false;
+                b.recording = false;
+                win.focused_text = null;
+            },
+            .ok => {
+                const problem = win.prefs.bindSet(b.edit_index, b.keys.get(), b.action.get()) catch {
+                    b.setMessage("Out of memory");
+                    return;
+                };
+                if (problem) |m| {
+                    b.setMessage(m);
+                    return;
+                }
+                b.editing = false;
+                b.sel = null;
+                win.focused_text = null;
+                win.close_armed = false;
+            },
+        }
+    }
+
+    extern fn xkb_keysym_get_name(keysym: u32, buffer: [*]u8, size: usize) c_int;
+
+    /// A key was pressed while recording: turn it into "Super+Shift+q".
+    fn recordKey(win: *Window, st: *xkb.State, code: u32, sym: xkb.Keysym) void {
+        const b = &win.bind_ui;
+        if (sym == xkb.Keysym.Escape) {
+            b.recording = false;
+            win.setStatus("");
+            return;
+        }
+        // A modifier on its own is just the start of a chord.
+        const raw: u32 = @intFromEnum(sym);
+        if ((raw >= 0xffe1 and raw <= 0xffee) or raw == 0xfe03 or raw == 0xff7f) return;
+
+        // The key as written without modifiers: shift level of the first
+        // layout, so Shift+q is recorded as "Shift+q", not "Q".
+        var base: u32 = raw;
+        if (win.xkb_keymap) |km| {
+            const syms = km.keyGetSymsByLevel(code, 0, 0);
+            if (syms.len > 0) base = @intFromEnum(syms[0]);
+        }
+        var name_buf: [64]u8 = undefined;
+        const n = xkb_keysym_get_name(base, &name_buf, name_buf.len);
+        if (n <= 0) return;
+
+        const eff: xkb.State.Component = @enumFromInt(xkb.State.Component.mods_effective);
+        var combo: [128]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&combo);
+        const mods = [_]struct { name: [*:0]const u8, text: []const u8 }{
+            .{ .name = xkb.names.mod.mod4, .text = "Super" },
+            .{ .name = xkb.names.mod.ctrl, .text = "Ctrl" },
+            .{ .name = xkb.names.mod.mod1, .text = "Alt" },
+            .{ .name = xkb.names.mod.shift, .text = "Shift" },
+        };
+        for (mods) |m| {
+            if (st.modNameIsActive(m.name, eff) > 0) {
+                w.writeAll(m.text) catch return;
+                w.writeByte('+') catch return;
+            }
+        }
+        w.writeAll(name_buf[0..@intCast(n)]) catch return;
+
+        b.keys.set(w.buffered());
+        b.recording = false;
+        win.setStatus("");
+        win.focused_text = &b.action;
+        b.setMessage("");
+    }
+
+    /// The config keys a page edits (for its Defaults button).
+    fn pageKeys(cat: Category) []const []const u8 {
+        return switch (cat) {
+            .focus => &.{ "focus_follows_mouse", "center_focused_column" },
+            .window_handling => &.{ "new_window", "gap", "outer_gap", "min_window_size" },
+            .workspace => &.{ "workspace_count", "workspace_names", "default_column_width", "width_step", "width_presets" },
+            .appearance => &.{ "border_width", "border_focused", "border_unfocused", "border_floating", "theme" },
+            .mouse_settings => &.{ "mouse_mod", "drag_threshold", "floating_size" },
+            .ergonomic => &.{ "terminal", "launcher", "browser" },
+            .docks => &.{
+                "dock_enabled", "dock_edge",   "dock_offset", "dock_on_top",    "dock_reserve_space",
+                "clip_enabled", "clip_corner", "clip_on_top", "clip_collapsed",
+            },
+            .configurations => &.{ "enable_dockapps", "enable_autostart", "enable_wmaker_compat" },
+            .keyboard_shortcuts => &.{"bind_layout"},
+            else => &.{},
+        };
+    }
+
+    fn onDefaults(win: *Window) void {
+        const cat = win.selected orelse return;
+        const keys = pageKeys(cat);
+        if (keys.len == 0) return;
+        win.prefs.defaultsFor(keys);
+        if (cat == .keyboard_shortcuts) {
+            win.prefs.bindsToDefaults() catch {
+                win.setStatus("Out of memory");
+                return;
+            };
+            win.bind_ui = .{};
+        }
+        win.focused_text = null;
+        win.close_armed = false;
+        win.setStatus("Defaults restored. Save to keep them");
     }
 
     /// Run the page of `cat` in `ctx`. false: the section has no page of
@@ -524,9 +716,7 @@ pub const Window = struct {
             .ergonomic => panels.ergonomic(ctx, ox, oy, s),
             .docks => panels.docks(ctx, ox, oy, s),
             .configurations => panels.configurations(ctx, ox, oy, s),
-            .menu_preferences => panels.menuPreferences(ctx, ox, oy, s),
-            .font_simple => panels.fonts(ctx, ox, oy, s),
-            .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bind_list, &win.bind_scroll),
+            .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bindList(), &win.bind_scroll, &win.bind_ui, s),
             else => return false,
         }
         return true;
@@ -578,6 +768,7 @@ pub const Window = struct {
                 if (win.toplevel) |t| t.setTitle(cat.label());
             }
             win.focused_text = null;
+            win.bind_ui = .{};
             win.prefs.snapshotPage();
             win.close_armed = false;
             win.redraw();
@@ -604,6 +795,7 @@ pub const Window = struct {
             } else if (x >= revert_all_x and x < revert_all_x + cmd_button_w) {
                 if (win.prefs.dirty()) {
                     win.prefs.revertAll();
+                    win.bind_ui = .{};
                     win.focused_text = null;
                     win.close_armed = false;
                     win.setStatus("Reverted all");
@@ -612,8 +804,15 @@ pub const Window = struct {
             } else if (x >= revert_page_x and x < revert_page_x + cmd_button_w) {
                 if (win.selected != null and win.prefs.dirty()) {
                     win.prefs.revertPage();
+                    if (win.selected == .keyboard_shortcuts) win.prefs.revertBinds();
+                    win.bind_ui = .{};
                     win.focused_text = null;
                     win.setStatus("Reverted page");
+                    win.redraw();
+                }
+            } else if (x >= defaults_x and x < defaults_x + defaults_w) {
+                if (win.selected != null) {
+                    win.onDefaults();
                     win.redraw();
                 }
             }
@@ -705,6 +904,7 @@ pub const Window = struct {
             win.icons[i] = try gfx.Image.fromPngBytes(cat.icon());
             loaded += 1;
         }
+        win.menu_imgs = try panel_menu.Images.load();
         win.icon_set = icons.Set.load();
         win.icons_loaded = true;
     }
@@ -756,6 +956,7 @@ pub const Window = struct {
         win.repeat_fd = -1;
         if (win.icons_loaded) {
             for (&win.icons) |*img| img.deinit();
+            win.menu_imgs.deinit();
             win.icon_set.deinit();
         }
         win.prefs.deinit();
@@ -920,8 +1121,16 @@ pub const Window = struct {
         const x = frame_left + 2;
         const y = frame_top + 2;
 
+        if (cat == .menu_preferences) {
+            panel_menu.paint(cv, x + 2, y + 2, win.menu_state, &win.menu_imgs);
+            return;
+        }
+
         var ctx: panels.Ctx = .{ .mode = .paint, .cv = cv, .focused = win.focused_text, .icons = &win.icon_set };
-        if (win.runPanel(cat, &ctx)) return;
+        if (win.runPanel(cat, &ctx)) {
+            win.rememberFields(&ctx);
+            return;
+        }
 
         const why = unavailableReason(cat);
         panels.unavailable(&ctx, x, y, why.headline, why.text);
@@ -940,19 +1149,31 @@ pub const Window = struct {
             },
             .paths => .{
                 .headline = "Nothing to configure here",
-                .text = "",
+                .text = "wmaker-wl looks for tile icons in the icon theme directories\n" ++
+                    "(hicolor, pixmaps) and takes an explicit `icon =` path from\n" ++
+                    "dockapps.conf. There is no PixmapPath/FontPath list.",
             },
             .menu => .{
                 .headline = "Not part of wlprefs yet",
-                .text = "",
+                .text = "The applications menu is the file\n" ++
+                    "~/.config/wmaker-wl/RootMenu (text or property list format).\n" ++
+                    "Edit it by hand; it is reloaded together with config.conf.\n\n" ++
+                    "A menu editor is on the list in docs/TODO.md.",
             },
             .hot_corner_shortcuts => .{
                 .headline = "Not implemented in wmaker-wl",
-                .text = "",
+                .text = "Hot corners have no counterpart yet. Use a key binding\n" ++
+                    "instead (Keyboard Shortcuts).",
+            },
+            .font_simple => .{
+                .headline = "Not configurable yet",
+                .text = "wmaker-wl draws its menus with Pango's default \"Sans\".\n" ++
+                    "Fonts will arrive with themes (docs/WMPREFS.md, section 3.3).",
             },
             .expert => .{
                 .headline = "Nothing to configure here",
-                .text = "",
+                .text = "These are X11 rendering switches (dithering, backing store,\n" ++
+                    "colour reservation) that do not exist on Wayland.",
             },
             else => .{ .headline = "", .text = "" },
         };
@@ -960,104 +1181,19 @@ pub const Window = struct {
 
     fn paintButtons(cv: *gfx.Canvas, win: *Window) void {
         const dirty = win.prefs.dirty();
+        drawButton(cv, defaults_x, button_y, defaults_w, button_h, "Defaults", win.selected != null and pageKeys(win.selected.?).len > 0);
         drawButton(cv, revert_page_x, button_y, cmd_button_w, button_h, "Revert Page", win.selected != null and dirty);
         drawButton(cv, revert_all_x, button_y, cmd_button_w, button_h, "Revert All", dirty);
         drawButton(cv, save_x, button_y, save_close_w, button_h, "Save", dirty and win.prefs.canSave());
         drawButton(cv, close_x, button_y, save_close_w, button_h, "Close", true);
 
         if (win.status[0] != 0) {
-            drawStatus(cv, std.mem.sliceTo(&win.status, 0));
+            cv.drawText(&win.status, balloon_x, button_y + button_h + 1, font_small, text_dim);
         } else if (dirty) {
-            var buf: [48]u8 = undefined;
+            var buf: [48:0]u8 = undefined;
             const n = win.prefs.changed();
-            const t = std.fmt.bufPrint(&buf, "{d} unsaved change{s}", .{ n, if (n == 1) "" else "s" }) catch "";
-            drawStatus(cv, t);
-        }
-    }
-
-    /// Room for the status text: between the left edge and "Revert Page".
-    const status_w: i32 = revert_page_x - balloon_x - 8;
-    const status_lines = 3;
-    const status_line_h: i32 = 9;
-
-    /// Word-wraps `text` into at most `status_lines` lines of `status_w`
-    /// pixels; what does not fit ends in "...". (A long message used to run
-    /// straight across the buttons.)
-    fn drawStatus(cv: *gfx.Canvas, text: []const u8) void {
-        var lines: [status_lines][112:0]u8 = undefined;
-        var len = [_]usize{0} ** status_lines;
-        for (&lines) |*l| l[0] = 0;
-        var li: usize = 0;
-        var cut = false;
-
-        var it = std.mem.tokenizeScalar(u8, text, ' ');
-        words: while (it.next()) |word| {
-            while (true) {
-                const sep: usize = if (len[li] > 0) 1 else 0;
-                if (len[li] + sep + word.len < lines[li].len) {
-                    var trial = lines[li];
-                    if (sep == 1) trial[len[li]] = ' ';
-                    @memcpy(trial[len[li] + sep ..][0..word.len], word);
-                    const end = len[li] + sep + word.len;
-                    trial[end] = 0;
-                    if (gfx.measureText(trial[0..end :0], font_small).w <= status_w) {
-                        lines[li] = trial;
-                        len[li] = end;
-                        continue :words;
-                    }
-                }
-                // Does not fit on this line.
-                if (len[li] == 0) {
-                    // One word wider than a whole line: take what fits.
-                    var k = @min(word.len, lines[li].len - 1);
-                    while (k > 0) : (k -= 1) {
-                        if (k < word.len and (word[k] & 0xC0) == 0x80) continue;
-                        @memcpy(lines[li][0..k], word[0..k]);
-                        lines[li][k] = 0;
-                        if (gfx.measureText(lines[li][0..k :0], font_small).w <= status_w) break;
-                    }
-                    len[li] = k;
-                    cut = true;
-                    break :words;
-                }
-                if (li + 1 >= status_lines) {
-                    cut = true;
-                    break :words;
-                }
-                li += 1;
-            }
-        }
-        // Words left over after the last line.
-        if (!cut and it.next() != null) cut = true;
-
-        if (cut) {
-            // Make room for the dots on the last used line.
-            while (len[li] > 0) {
-                if (len[li] + 4 > lines[li].len) {
-                    len[li] -= 1;
-                    continue;
-                }
-                var trial = lines[li];
-                @memcpy(trial[len[li]..][0..3], "...");
-                trial[len[li] + 3] = 0;
-                if (gfx.measureText(trial[0 .. len[li] + 3 :0], font_small).w <= status_w) {
-                    lines[li] = trial;
-                    len[li] += 3;
-                    break;
-                }
-                len[li] -= 1;
-                while (len[li] > 0 and (lines[li][len[li]] & 0xC0) == 0x80) len[li] -= 1;
-            }
-        }
-
-        const used = li + 1;
-        const total_h: i32 = @as(i32, @intCast(used)) * status_line_h;
-        var y = button_y + @divTrunc(button_h - total_h, 2) - 1;
-        for (0..used) |i| {
-            if (len[i] == 0) continue;
-            lines[i][len[i]] = 0;
-            cv.drawText(lines[i][0..len[i] :0], balloon_x, y, font_small, text_dim);
-            y += status_line_h;
+            const t = std.fmt.bufPrintZ(&buf, "{d} unsaved change{s}", .{ n, if (n == 1) "" else "s" }) catch "";
+            cv.drawText(t, balloon_x, button_y + button_h + 1, font_small, text_dim);
         }
     }
 

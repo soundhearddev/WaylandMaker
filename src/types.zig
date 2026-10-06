@@ -129,6 +129,16 @@ pub const Window = struct {
     /// output's top-left). Remembered across tiled<->floating toggles.
     float_rect: Rect = .{},
     has_float_rect: bool = false,
+    /// Minimized (Window Maker "miniaturized" / "hidden"): taken out of the
+    /// layout entirely -- so `workspace == null` like any unplaced window --
+    /// and hidden. It is brought back to the CURRENT workspace by `restore`
+    /// (workspace.zig), or from the Windows menu / a Dock tile.
+    minimized: bool = false,
+    /// Where it came from, for putting it back the same way.
+    min_floating: bool = false,
+    /// Counts up: the highest is the one `restore` brings back first.
+    min_order: u64 = 0,
+
     /// A fixed-size DockApp window sitting in its Dock tile (ui.zig's
     /// placeDocked sets this every manage pass and also owns `float_rect`
     /// while it is true). Docked windows are raised above the Dock itself.
@@ -413,6 +423,14 @@ pub const WindowManager = struct {
     ui: ?*@import("ui.zig").Ui = null,
     pending_ui: ?UiAction = null,
 
+    /// Source of `Window.min_order`.
+    min_counter: u64 = 0,
+
+    /// The output the user is working on. Set whenever focus lands on a
+    /// window (that window's output) and by focus_output_next/prev, which
+    /// is what lets an EMPTY output be chosen. null until the first focus.
+    active_output: ?*Output = null,
+
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),
     seats: wl.list.Head(Seat, .link),
@@ -496,12 +514,36 @@ pub const Command = union(enum) {
     workspace_next,
     workspace_prev,
     move_to_workspace: u32,
+
+    /// Window Maker's miniaturize / hide. See workspace.minimize.
+    minimize,
+    /// Bring back the window minimized last (onto the current workspace).
+    restore,
+    /// Window Maker's SHOW_ALL: bring back every minimized window.
+    show_all,
+    /// Window Maker's HIDE_OTHERS: minimize every other application.
+    hide_others,
+    /// Window Maker's HIDE: minimize every window of the focused application.
+    hide_app,
+
+    /// Make the next / previous output the one the user works on (focus goes
+    /// to the window that was active there; an empty output is fine).
+    focus_output_next,
+    focus_output_prev,
+    /// Move the focused window to the next / previous output.
+    move_to_output_next,
+    move_to_output_prev,
 };
 
 /// What a root-menu click asks for. Executed in manage (focus and
 /// workspace changes are management state).
 pub const UiAction = union(enum) {
+    /// Focus `win`; a minimized one is brought back first.
     focus: *Window,
+    show_all,
+    hide_others,
+    /// Window Maker's SHUTDOWN: ask every window to close, then leave.
+    shutdown,
     workspace: u32,
     workspace_next,
     workspace_prev,
@@ -568,6 +610,45 @@ pub fn nextWindow(w: *Window, wm: *WindowManager) ?*Window {
     const n = w.link.next orelse return null;
     if (n == &wm.windows.link) return null;
     return @fieldParentPtr("link", n);
+}
+
+/// An output windows can be put on.
+pub fn liveOutput(o: *const Output) bool {
+    return !o.removed and o.ready();
+}
+
+/// The output the user is working on: `wm.active_output` while it exists,
+/// else the focused window's output, else the first live one. Everything
+/// that says "the current output" (actions, where new windows open) asks
+/// this one place.
+pub fn workingOutput(wm: *WindowManager) ?*Output {
+    if (wm.active_output) |o| if (liveOutput(o)) return o;
+    if (wm.seats.first()) |s| {
+        if (s.focused) |w| if (w.workspace) |ws| if (liveOutput(ws.output)) return ws.output;
+    }
+    var it = wm.outputs.first();
+    while (it) |o| : (it = nextOutput(o, wm)) {
+        if (liveOutput(o)) return o;
+    }
+    return null;
+}
+
+/// The live output after (`forward`) or before `from` in the output list,
+/// wrapping around. `from` itself if it is the only live one.
+pub fn cycleOutput(wm: *WindowManager, from: *Output, forward: bool) ?*Output {
+    var live: [16]*Output = undefined;
+    var n: usize = 0;
+    var from_idx: ?usize = null;
+    var it = wm.outputs.first();
+    while (it) |o| : (it = nextOutput(o, wm)) {
+        if (!liveOutput(o) or n == live.len) continue;
+        if (o == from) from_idx = n;
+        live[n] = o;
+        n += 1;
+    }
+    if (n == 0) return null;
+    const i = from_idx orelse return live[0];
+    return live[if (forward) (i + 1) % n else (i + n - 1) % n];
 }
 
 pub fn nextOutput(o: *Output, wm: *WindowManager) ?*Output {

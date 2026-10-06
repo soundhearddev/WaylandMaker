@@ -18,15 +18,23 @@
       selbstgemalter Icons (`docs/WLPREFS-ICONS.md`) und eine `poll`-Schleife, die SIGTERM sauber
       beendet (libwayland wiederholt `poll` bei EINTR, ein blockierendes `dispatch()` hätte nie
       zurückgekehrt).
+      Danach nachgerüstet: **Tastenkürzel bearbeiten** (Auswahl, Add/Edit/Remove, Aufnahme per Tastendruck
+      mit Prüfung von Taste *und* Aktion; geschrieben wird die kleinste Menge `bind`/`unbind`-Zeilen, die
+      aus den Standardwerten die bearbeitete Liste macht), `bind_layout` und `theme` als Felder,
+      **Defaults**-Knopf je Seite, Cursor-Bearbeitung (Pfeile, Pos1/Ende, Entf, Klick setzt den Cursor),
+      Tab/Shift+Tab zwischen Feldern, Status unter den Knöpfen statt über ihnen.
       *Noch offen in wlprefs:*
       - Tastenkürzel **bearbeiten** (Tabelle mit Aufnahme per Tastendruck; die Anzeige gibt es);
       - Fensterregeln (`attributes.conf`) und DockApp-Editor (`dockapps.conf`) als eigene Seiten;
       - Root-Menü-Editor (`RootMenu`);
       - die 6 Dock-/Clip-Icons (`docs/WLPREFS-ICONS.md`), bis dahin Platzhalter;
-      - Schrift- und Theme-Seite (hängt an Phase 6);
-      - „Defaults“-Knopf je Seite; Tab-Navigation zwischen Textfeldern; Cursor-Position in Textfeldern;
+      - Schriftseite (hängt an Titelleisten); Theme-Auswahl aus der Liste statt Textfeld;
       - HiDPI/Skalierung (das Fenster ist fest 520×390 wie WPrefs);
       - Live-Vorschau der Änderungen (heute: Speichern → SIGHUP);
+      - Mehrfachauswahl und Verschieben von Zeilen in der Kürzelliste; Aufnahme von Kürzeln mit Zeichen
+        aus höheren Ebenen (AltGr) ist ungetestet;
+      - ein gleichzeitig von Hand geänderter `bind`-Block wird beim Speichern der Kürzel ersetzt (alles
+        andere bleibt, siehe `settings.render`);
       - die Menü-Seite wird erst echt, wenn wmaker-wl diese Optionen hat.
 - [x] **Phase 5**: Dock und Clip (`dock.zig`, `ui.zig`; `WMState`, 64-px-Kacheln, `app_id`-Zuordnung).
       *Dock:* Spalte aus 64-px-Kacheln am linken/rechten Rand (`dock_edge`, `dock_offset`), erste Kachel
@@ -57,7 +65,11 @@
       Sekunde, `poll`-Schleife ohne Leerlauf-CPU, `--snapshot` ohne Compositor. Passend dazu ignoriert
       `action.requestFocus` unfokussierbare Fenster (Hover/Klick auf eine DockApp verschiebt weder Fokus
       noch Streifen).
-      *Noch offen:* XPM-Icons; Dock/Clip per Maus verschieben (Position kommt nur aus der Config);
+      *XPM-Icons* (`xpm.zig`): Window Makers eigenes Icon-Format wird gelesen (1-4 Zeichen je Pixel,
+      `None`, `#RGB`…`#RRRRGGGGBBBB`, `grayNN`, übliche X11-Namen; unbekannte Farbe = Magenta, damit ein
+      falsches Icon auffällt). Größen werden vor jeder Allokation geprüft; kaputte Dateien lassen das Dock
+      nie scheitern (die Kachel zeigt dann den Buchstaben).
+      *Noch offen:* SVG-Icons; Dock/Clip per Maus verschieben (Position kommt nur aus der Config);
       Einträge per Drag & Drop hinzufügen/entfernen und Zustand zurückschreiben (wmaker-wl schreibt nie
       in Nutzerdateien); „Collapse“ für das Dock; Attract-Icons des Clips; Mehr-Monitor (Dock/Clip
       sitzen auf der ersten Ausgabe).
@@ -77,9 +89,33 @@
       kappen; ob/wie river danach einen neuen WM-Client akzeptiert, ohne dass alle verwalteten Fenster
       unverwaltet zurückbleiben, ist ungeklärt (siehe Phase 7 unten) — SIGHUP-Reload deckt den eigentlichen
       Bedarf ("neue Config ohne Sitzung neu zu starten") inzwischen ab.
-- [ ] **Phase 6**: Themes, `~/GNUstep/Defaults/WindowMaker`-Schlüssel
-- [ ] **Phase 7**: Minimieren/Shade/Verstecken, Session speichern, Workspace-Namen
-- [ ] Menüpunkte ohne Funktion: `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`
+- [x] **Phase 6 (der machbare Teil): Themes und `include`.** `theme = NAME` liest `Themes/NAME.conf`
+      (neben der `config.conf`, sonst `/usr/local/share/` und `/usr/share/wmaker-wl/Themes/`), `include = DATEI`
+      liest eine beliebige Datei an dieser Stelle (spätere Zeilen überschreiben, Tiefe höchstens 4, relativ zur
+      einbindenden Datei, `~/` geht). Ein Theme darf **nur** Farben, `border_width` und Gaps setzen; alles
+      andere (Tastenkürzel, Programme, `include`) wird mit Warnung ignoriert, ein heruntergeladenes Theme
+      kann also nichts ausführen. Namen sind Dateinamen (kein `/`, kein `..`). Drei Beispiele in
+      `src/share/Themes/` (`gruvbox` = das eingebaute Aussehen, `nord`, `next`); `Config.parse_warnings`
+      zählt übersprungene Zeilen, die eingebaute Config und die Themes sind darauf getestet.
+      *Noch offen:* Schriften in Themes (hängt an Titelleisten); Window-Maker-Themes (`.themed`-Archive,
+      `~/GNUstep/Defaults/WindowMaker`) lesen; Theme-Liste/Auswahl in wlprefs (heute ein Textfeld); wlprefs
+      zeigt Werte, die nur ein `include`/`theme` setzt, nicht an (es schreibt aber nie darüber).
+- [x] **Phase 7 (Teil): Minimieren und Verstecken.** `minimize`, `restore` (zuletzt minimiertes),
+      `show_all`, `hide_others`, `hide_app` als Tastenkürzel (Standard: `Super+n`, `Super+Shift+n`,
+      `Super+Ctrl+n`, `Super+o`) und als Menüpunkte `HIDE_OTHERS`/`SHOW_ALL`. Ein minimiertes Fenster
+      verlässt den Streifen (`workspace == null`, wird dadurch von der Render-Runde versteckt), merkt sich
+      Spalte, Breite bzw. Rechteck und kommt auf den **aktuellen** Workspace zurück. Im Fenster-Menü steht es
+      als `(Titel)`; Auswählen oder ein Klick auf seine Dock-/Clip-Kachel holt es zurück. DockApps werden nie
+      versteckt. Workspace-Namen: `workspace_names` / `WMState`, im Clip und im Workspace-Menü.
+      *Noch offen:* Shade (braucht Titelleisten); Session speichern (siehe unten); Miniwindows als Icons.
+- [x] **Menüpunkte `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`** (`fsmenu.zig`, `ui.zig`):
+      SHUTDOWN bittet alle Fenster zu schließen und beendet wmaker-wl; Info/Legal sind Untermenüs mit
+      Text (Version, Config-Pfad, 0BSD). `OPEN_MENU` macht aus einem **Verzeichnis** ein Menü (Ordner zuerst,
+      Dateien öffnen mit `WITH Programm` oder `xdg-open`, Pfade korrekt gequotet, Tiefe 3, höchstens
+      200 Einträge je Ordner und 1000 insgesamt, Dotfiles ausgelassen) oder bindet eine **Menüdatei** ein;
+      aufgebaut beim Öffnen, nie veraltet. `OPEN_MENU | befehl` wird bewusst nicht ausgeführt (ein
+      langsames Programm würde beim Menüöffnen den ganzen Desktop anhalten) und erscheint ausgegraut.
+      *Noch offen:* `RESTART` und `SAVE_SESSION` (siehe `--restart` oben).
 - [x] **DockApp-Erkennung & -Format** (`dockapp.zig`): zwei unabhängige Wege.
       **Primär, ohne jede Konfigurationsdatei:** ein Fenster mit `app_id` `dockapp:<name>` oder
       `dockapp-<name>` wird automatisch erkannt (`isSelfDeclared`, eingehängt in `window.zig`s
@@ -102,14 +138,20 @@
 ### Root-Menü: bekannte Lücken
 - [ ] Menü läuft ausschließlich über den ersten gebundenen `wl_seat`; bei mehreren Seats bekommen weitere
       keinen Zeiger/keine Tastatur fürs Menü.
-- [ ] Kein Scrollen bei einem Menü, das höher als der Output ist (wird an den oberen Rand geklemmt, der
-      untere Teil ragt ggf. heraus).
+- [x] Menüs, die höher als der Output sind, **scrollen**: sie werden auf das gekürzt, was passt (Pfeile
+      oben/unten zeigen, wo es weitergeht), Mausrad/Touchpad scrollt drei Zeilen je Raste, die Pfeiltasten
+      holen die Auswahl in den sichtbaren Bereich.
 - [x] Fenster, die während offenem Menü geschlossen werden, entfernen ihre Zeile korrekt (`forgetWindow`)
       und das Menü redrawt sich noch in derselben manage-Sequenz (`window_mod.reap()` läuft vor `u.sync()`
       in `onManage()`, mit Reihenfolge-Regressionstest abgesichert). War bereits so, nur nicht verifiziert.
 
 ### Sonstiges
-- [ ] Mehrere Outputs: Fokus zwischen Monitoren, Fenster verschieben
+- [x] Mehrere Outputs: `focus_output_next/prev` (Standard `Super+Alt+←/→`) wechselt den Monitor, auf dem
+      gearbeitet wird -- auch auf einen **leeren** (`wm.active_output`); `move_to_output_next/prev`
+      (`Super+Alt+Shift+←/→`) nimmt das fokussierte Fenster mit. Wo neue Fenster aufgehen und was
+      „aktueller Output“ ist, entscheidet jetzt eine Stelle (`types.workingOutput`). Das Clip wirkt auf den
+      Output, auf dem es sitzt. *Noch offen:* Dock/Clip nur auf dem ersten Output; Fenster per Maus über die
+      Monitorkante ziehen ist getestet nur im Modell.
 - [x] Attribute mit später eintreffender `app_id`/Größen-Hint/Parent: `floating`/`Omnipresent` werden jetzt
       bei jedem dieser Events neu geprüft (`window.zig`s `recheckFloating`), nicht mehr nur beim allerersten
       Platzieren -- genau der Fall, der eine DockApp sonst dauerhaft gekachelt mit vollem Rahmen stehen
@@ -121,14 +163,33 @@
 - [ ] Optional: Animationen beim Scrollen
 - [ ] Lauf gegen ein echtes river ist weiterhin unbestätigt für die UI-Schicht (`ui.zig`, `shm.zig`,
       `gfx.zig`); nur `zig build`/`zig build test` sind bisher verifiziert.
-- [ ] de layout integration!!
+- [x] **Tastaturlayout (de)**: Tasten lassen sich als Zeichen schreiben (`bind = Super+ü, ...`, `Super+ß`),
+      und `bind_layout = 0..3` legt alle Kürzel auf ein Layout der Tastatur fest
+      (`river_xkb_binding_v1.set_layout_override`), damit `Super+q` nach dem Umschalten us ↔ de dieselbe
+      Taste bleibt; `current` (Standard) folgt dem aktiven Layout. In wlprefs unter Keyboard Shortcuts.
 - [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
       `process.spawnShell`)
 - [ ] **WPrefs-Äquivalent**: Plan und Bestandsaufnahme in `docs/WPREFS.md`. Grundgerüst
       `src/wm_prefs.zig` liegt als reines Skelett (Typen + Signaturen, keine Implementierung)
       vor Phase 5/6, weil eine GUI erst sinnvoll wird, sobald Dock/Clip (Phase 5) und Themes
       (Phase 6) zumindest im Datenmodell existieren.
-- [ ] switch from ifreund/* to wlr custom interface
+
+### Ideen, noch nicht begonnen (nach Nutzen sortiert)
+- [ ] **Titelleisten** (Phase 3): braucht `river_decoration_v1`-Flächen pro Fenster, eine reservierte Höhe im
+      Layout (`layout.zig` rechnet heute mit der ganzen Zelle) und Eingabe auf den Dekorationsflächen --
+      lässt sich ohne laufendes river nicht verlässlich prüfen. Reihenfolge: Zeichnen als reine Funktion
+      (testbar, wie `dock.zig`), dann Layout-Höhe, dann Eingabe. Danach: Shade, Schriften in Themes.
+- [ ] **Session speichern** (`SAVE_SESSION`, Fenster + Workspaces + Spalten): nur sinnvoll, wenn Programme
+      wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
+- [ ] **Mehrere Seats**: Menü und Dock gehören heute dem ersten Seat.
+- [ ] **Dock/Clip mit der Maus verschieben, Drag & Drop von Einträgen**: ohne Zurückschreiben nutzlos
+      (wmaker-wl schreibt nie in Nutzerdateien); denkbar über wlprefs.
+- [ ] **Dock/Clip auf jedem Output** (oder pro Output wählbar).
+- [ ] **`--check` für wlprefs/wmaker-wl**: Config laden, `parse_warnings` und unlesbare Dateien melden, mit
+      Exit-Code (für Dotfile-Pipelines).
+- [ ] **Fuzzing** der Parser (`plist`, `xpm`, `wm_menu`, `config`): die Schleifen sind begrenzt und getestet,
+      ein Fuzz-Lauf fehlt.
+- [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).
 
 ## Erledigt
 

@@ -98,35 +98,84 @@ pub const Text = struct {
     pub const capacity = 256;
     buf: [capacity]u8 = undefined,
     len: usize = 0,
+    /// The caret: a byte index, 0..len. Not part of the value.
+    pos: usize = 0,
 
     pub fn set(t: *Text, s: []const u8) void {
         t.len = @min(s.len, t.buf.len);
         @memcpy(t.buf[0..t.len], s[0..t.len]);
+        t.pos = t.len;
     }
 
     pub fn get(t: *const Text) []const u8 {
         return t.buf[0..t.len];
     }
 
-    /// Typing. Refuses what a config line cannot hold: control characters,
-    /// and a `#` that would start a comment (at the start or after
-    /// whitespace -- the compositor cuts the line there).
+    /// Typing at the caret. Refuses what a config line cannot hold: control
+    /// characters, and a `#` that would start a comment (at the start or
+    /// after whitespace -- the compositor cuts the line there).
     pub fn append(t: *Text, ch: u8) void {
         if (t.len >= t.buf.len) return;
         if (ch < 0x20 or ch == 0x7f) return;
-        if (ch == '#' and (t.len == 0 or t.buf[t.len - 1] == ' ' or t.buf[t.len - 1] == '\t')) return;
-        t.buf[t.len] = ch;
+        const p = @min(t.pos, t.len);
+        if (ch == '#' and (p == 0 or t.buf[p - 1] == ' ' or t.buf[p - 1] == '\t')) return;
+        // A '#' typed in front of what is already there would also become
+        // a comment start if that is whitespace-led -- the caret check above
+        // covers the character before; the one after is not the typist's
+        // problem (a `#` never turns a following char into a comment).
+        std.mem.copyBackwards(u8, t.buf[p + 1 .. t.len + 1], t.buf[p..t.len]);
+        t.buf[p] = ch;
         t.len += 1;
+        t.pos = p + 1;
     }
 
+    /// Backspace: the character before the caret.
     pub fn backspace(t: *Text) void {
-        if (t.len > 0) t.len -= 1;
+        const p = @min(t.pos, t.len);
+        if (p == 0) return;
+        std.mem.copyForwards(u8, t.buf[p - 1 .. t.len - 1], t.buf[p..t.len]);
+        t.len -= 1;
+        t.pos = p - 1;
+    }
+
+    /// Delete: the character at the caret.
+    pub fn delete(t: *Text) void {
+        const p = @min(t.pos, t.len);
+        if (p >= t.len) return;
+        std.mem.copyForwards(u8, t.buf[p .. t.len - 1], t.buf[p + 1 .. t.len]);
+        t.len -= 1;
+    }
+
+    pub fn left(t: *Text) void {
+        if (t.pos > 0) t.pos = @min(t.pos, t.len) - 1;
+    }
+
+    pub fn right(t: *Text) void {
+        if (t.pos < t.len) t.pos += 1;
+    }
+
+    pub fn home(t: *Text) void {
+        t.pos = 0;
+    }
+
+    pub fn end(t: *Text) void {
+        t.pos = t.len;
     }
 
     pub fn clear(t: *Text) void {
         t.len = 0;
+        t.pos = 0;
     }
 };
+
+/// A theme name is a file name (config.zig has the same rule).
+pub fn validThemeName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or name[0] == '.') return false;
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-' and ch != '.') return false;
+    }
+    return std.mem.indexOf(u8, name, "..") == null;
+}
 
 /// Every key edited by wlprefs.
 pub const Settings = struct {
@@ -178,6 +227,12 @@ pub const Settings = struct {
     enable_wmaker_compat: bool = false,
     enable_autostart: bool = true,
     enable_dockapps: bool = true,
+
+    // ---- keyboard / theme
+    /// -1: bindings follow the active layout ("current"); 0..3: pinned.
+    bind_layout: i32 = -1,
+    /// Theme name ("" = none). `theme = NAME` includes Themes/NAME.conf.
+    theme: Text = .{},
 
     // ---- Dock and Clip
     dock_enabled: bool = true,
@@ -287,10 +342,9 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
         }
     }
     inline for (.{
-        "focus_follows_mouse",    "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
-        "clip_scroll_workspaces",
+        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",         "clip_collapsed",
     }) |name| {
         if (eql(u8, key, name)) {
             if (parseBool(value)) |b| @field(s, name) = b;
@@ -305,17 +359,7 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
         }
     }
 
-    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
-        if (eql(u8, key, name)) {
-            // The compositor refuses an empty or over-long description.
-            if (validFont(value)) @field(s, name).set(value);
-            return;
-        }
-    }
-
-    if (eql(u8, key, "menu_submenu_align")) {
-        if (std.meta.stringToEnum(SubmenuAlign, value)) |m| s.menu_submenu_align = m;
-    } else if (eql(u8, key, "width_presets")) {
+    if (eql(u8, key, "width_presets")) {
         if (validPresets(value)) s.width_presets.set(value);
     } else if (eql(u8, key, "workspace_names")) {
         s.workspace_names.set(value);
@@ -326,6 +370,16 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
         if (std.meta.stringToEnum(CenterMode, value)) |m| s.center_focused_column = m;
     } else if (eql(u8, key, "new_window")) {
         if (std.meta.stringToEnum(NewWindowMode, value)) |m| s.new_window = m;
+    } else if (eql(u8, key, "bind_layout")) {
+        if (eql(u8, value, "current") or eql(u8, value, "active")) {
+            s.bind_layout = -1;
+        } else if (std.fmt.parseInt(i32, value, 10)) |n| {
+            if (n >= 0 and n < 4) s.bind_layout = n;
+        } else |_| {}
+    } else if (eql(u8, key, "theme")) {
+        // An invalid name is ignored by the compositor (a warning): keep it
+        // out of the GUI state too.
+        if (validThemeName(value)) s.theme.set(value);
     } else if (eql(u8, key, "dock_edge")) {
         if (std.meta.stringToEnum(DockEdge, value)) |m| s.dock_edge = m;
     } else if (eql(u8, key, "clip_corner")) {
@@ -412,6 +466,10 @@ pub fn problem(s: *const Settings, storage: *[96]u8) ?Problem {
     if (!s.mouse_mod.raw and !s.mouse_mod.any()) {
         return .{ .key = "mouse_mod", .message = "Mouse: select at least one modifier" };
     }
+    const th = std.mem.trim(u8, s.theme.get(), " \t");
+    if (th.len > 0 and !validThemeName(th)) {
+        return .{ .key = "theme", .message = "Theme: letters, digits, - _ . only (a file name)" };
+    }
     return null;
 }
 
@@ -436,10 +494,9 @@ pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{x:0>6}", .{@field(s, name)}) catch null;
     }
     inline for (.{
-        "focus_follows_mouse",    "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
-        "clip_scroll_workspaces",
+        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
+        "clip_on_top",         "clip_collapsed",
     }) |name| {
         if (eql(u8, key, name)) return if (@field(s, name)) "true" else "false";
     }
@@ -455,6 +512,11 @@ pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
     if (eql(u8, key, "workspace_count")) return std.fmt.bufPrint(out, "{d}", .{s.workspace_count}) catch null;
     if (eql(u8, key, "center_focused_column")) return @tagName(s.center_focused_column);
     if (eql(u8, key, "new_window")) return @tagName(s.new_window);
+    if (eql(u8, key, "bind_layout")) {
+        if (s.bind_layout < 0) return "current";
+        return std.fmt.bufPrint(out, "{d}", .{s.bind_layout}) catch null;
+    }
+    if (eql(u8, key, "theme")) return std.mem.trim(u8, s.theme.get(), " \t");
     if (eql(u8, key, "dock_edge")) return @tagName(s.dock_edge);
     if (eql(u8, key, "clip_corner")) return @tagName(s.clip_corner);
     if (eql(u8, key, "mouse_mod")) return s.mouse_mod.format(out);
@@ -469,10 +531,9 @@ pub const keys = [_][]const u8{
     "workspace_count",     "workspace_names",      "drag_threshold",        "floating_size",
     "focus_follows_mouse", "mouse_mod",            "terminal",              "launcher",
     "browser",             "enable_wmaker_compat", "enable_autostart",      "enable_dockapps",
-    "dock_enabled",        "dock_edge",            "dock_offset",           "dock_on_top",
-    "dock_reserve_space",  "clip_enabled",         "clip_corner",           "clip_on_top",
-    "clip_collapsed",      "focus_new_windows",    "workspace_wrap",        "clip_scroll_workspaces",
-    "font_menu_title",     "font_menu",            "font_dock",             "menu_submenu_align",
+    "bind_layout",         "theme",                "dock_enabled",          "dock_edge",
+    "dock_offset",         "dock_on_top",          "dock_reserve_space",    "clip_enabled",
+    "clip_corner",         "clip_on_top",          "clip_collapsed",
 };
 
 fn keyIndex(key: []const u8) ?usize {
@@ -542,6 +603,16 @@ pub fn render(
             continue;
         }
 
+        // `theme =` with nothing after it is an error for the compositor;
+        // clearing the theme comments the line out instead.
+        if (new_v.len == 0 and isRemovable(name)) {
+            const ind = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+            try out.appendSlice(gpa, raw[0..ind]);
+            try out.appendSlice(gpa, "# ");
+            try out.appendSlice(gpa, std.mem.trimStart(u8, raw, " \t"));
+            continue;
+        }
+
         // Rewrite the line: indentation, key, value, then the old comment.
         const indent_len = raw.len - std.mem.trimStart(u8, raw, " \t").len;
         try out.appendSlice(gpa, raw[0..indent_len]);
@@ -579,6 +650,11 @@ pub fn render(
     }
 
     return out.toOwnedSlice(gpa);
+}
+
+/// Keys whose empty value means "not set": they cannot be written as `key =`.
+fn isRemovable(name: []const u8) bool {
+    return std.mem.eql(u8, name, "theme");
 }
 
 fn isColourKey(name: []const u8) bool {
@@ -628,9 +704,7 @@ test "the struct's own defaults agree with the shipped file (except the text fie
     const plain: Settings = .{};
     for (keys) |k| {
         if (std.mem.eql(u8, k, "terminal") or std.mem.eql(u8, k, "launcher") or
-            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets") or
-            std.mem.eql(u8, k, "font_menu_title") or std.mem.eql(u8, k, "font_menu") or
-            std.mem.eql(u8, k, "font_dock")) continue;
+            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets")) continue;
         if (!sameValue(&from_file, &plain, k)) {
             std.debug.print("default differs for `{s}`\n", .{k});
             return error.DefaultsDiverged;
@@ -972,4 +1046,106 @@ test "changedCount counts keys, not bytes" {
     b.dock_edge = .left;
     b.terminal.set("foot");
     try testing.expectEqual(@as(usize, 3), changedCount(&a, &b));
+}
+
+test "bind_layout: current, pinned, invalid" {
+    var s = Settings.init();
+    try testing.expectEqual(@as(i32, -1), s.bind_layout);
+    parse(&s, "bind_layout = 1\n");
+    try testing.expectEqual(@as(i32, 1), s.bind_layout);
+    parse(&s, "bind_layout = current\n");
+    try testing.expectEqual(@as(i32, -1), s.bind_layout);
+    parse(&s, "bind_layout = 2\nbind_layout = 9\nbind_layout = de\n");
+    try testing.expectEqual(@as(i32, 2), s.bind_layout);
+
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("2", format(&s, "bind_layout", &buf).?);
+    s.bind_layout = -1;
+    try testing.expectEqualStrings("current", format(&s, "bind_layout", &buf).?);
+}
+
+test "theme: written, validated, and clearing it comments the line out" {
+    const gpa = testing.allocator;
+    var base = Settings.init();
+    var s = base;
+    s.theme.set("nord");
+    var out = try render(gpa, "gap = 8\n", &s, &base);
+    try testing.expect(std.mem.indexOf(u8, out, "theme = nord\n") != null);
+    gpa.free(out);
+
+    // The file has a theme, the user clears the field.
+    const original = "theme = nord   # my look\ngap = 8\n";
+    base = Settings.init();
+    parse(&base, original);
+    try testing.expectEqualStrings("nord", base.theme.get());
+    s = base;
+    s.theme.clear();
+    out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings("# theme = nord   # my look\ngap = 8\n", out);
+    var back = Settings.init();
+    parse(&back, out);
+    try testing.expectEqual(@as(usize, 0), back.theme.len);
+
+    // A name that is not a file name is refused before it is written.
+    var st: [96]u8 = undefined;
+    s.theme.set("../etc");
+    try testing.expectEqualStrings("theme", problem(&s, &st).?.key);
+    s.theme.set("my theme");
+    try testing.expect(problem(&s, &st) != null);
+    s.theme.set("good-theme_2");
+    try testing.expect(problem(&s, &st) == null);
+}
+
+test "Text caret: insert in the middle, backspace, delete, movement" {
+    var t: Text = .{};
+    for ("hello") |ch| t.append(ch);
+    try testing.expectEqualStrings("hello", t.get());
+    try testing.expectEqual(@as(usize, 5), t.pos);
+
+    t.left();
+    t.left();
+    t.append('X'); // hel|lo -> helXlo
+    try testing.expectEqualStrings("helXlo", t.get());
+    try testing.expectEqual(@as(usize, 4), t.pos);
+
+    t.backspace(); // removes X
+    try testing.expectEqualStrings("hello", t.get());
+    t.delete(); // removes the l after the caret
+    try testing.expectEqualStrings("helo", t.get());
+
+    t.home();
+    t.backspace(); // nothing before the caret
+    t.left(); // and nowhere to go
+    try testing.expectEqualStrings("helo", t.get());
+    t.end();
+    t.delete(); // nothing after
+    t.right();
+    try testing.expectEqualStrings("helo", t.get());
+    try testing.expectEqual(@as(usize, 4), t.pos);
+
+    // The comment rule uses the character before the CARET.
+    t.set("a b");
+    t.home();
+    t.append('#'); // at the start: refused
+    try testing.expectEqualStrings("a b", t.get());
+    t.right();
+    t.right(); // a |b ... after the space
+    t.append('#');
+    try testing.expectEqualStrings("a b", t.get());
+    t.end();
+    t.append('#'); // after a non-space
+    try testing.expectEqualStrings("a b#", t.get());
+}
+
+test "Text: set puts the caret at the end; a full field takes no more in the middle either" {
+    var t: Text = .{};
+    t.set("abc");
+    try testing.expectEqual(@as(usize, 3), t.pos);
+    for (0..400) |_| t.append('x');
+    try testing.expectEqual(Text.capacity, t.len);
+    t.home();
+    t.append('y'); // full: refused, nothing shifted off the end
+    try testing.expectEqual(Text.capacity, t.len);
+    try testing.expectEqual(@as(u8, 'a'), t.get()[0]);
 }

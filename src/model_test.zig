@@ -17,6 +17,7 @@ const types = @import("types.zig");
 const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const config = @import("config.zig");
+const action_mod = @import("action.zig");
 
 const Window = types.Window;
 const Workspace = types.Workspace;
@@ -948,13 +949,8 @@ test "everything wlprefs writes is read back by the compositor with the same val
     s.clip_corner = .bottom_right;
     s.clip_on_top = false;
     s.clip_collapsed = true;
-    s.focus_new_windows = false;
-    s.workspace_wrap = false;
-    s.clip_scroll_workspaces = false;
-    s.font_menu_title.set("Serif Bold 12");
-    s.font_menu.set("Monospace 9");
-    s.font_dock.set("Sans Italic 7");
-    s.menu_submenu_align = .left;
+    s.bind_layout = 1;
+    s.theme.set("nord");
 
     // Every key is covered by this test: if a key is added to wlprefs, it
     // must be given a different value above.
@@ -1005,25 +1001,39 @@ test "everything wlprefs writes is read back by the compositor with the same val
     try std.testing.expectEqual(config.ClipCorner.bottom_right, cfg.clip_corner);
     try std.testing.expect(!cfg.clip_on_top);
     try std.testing.expect(cfg.clip_collapsed);
-    try std.testing.expect(!cfg.focus_new_windows);
-    try std.testing.expect(!cfg.workspace_wrap);
-    try std.testing.expect(!cfg.clip_scroll_workspaces);
-    try std.testing.expectEqualStrings("Serif Bold 12", cfg.font_menu_title);
-    try std.testing.expectEqualStrings("Monospace 9", cfg.font_menu);
-    try std.testing.expectEqualStrings("Sans Italic 7", cfg.font_dock);
-    try std.testing.expectEqual(config.SubmenuAlign.left, cfg.menu_submenu_align);
+    try std.testing.expectEqual(@as(?u32, 1), cfg.bind_layout);
+    // `theme` needs an Includer to do anything; here it is only a line that
+    // must not stop the parse.
+    try std.testing.expect(std.mem.indexOf(u8, text, "theme = nord\n") != null);
 }
 
-test "the compositor refuses the fonts wlprefs refuses" {
-    const gpa = std.testing.allocator;
-    var cfg = try parseWithCompositor(gpa, "font_menu = \nfont_dock = Sans 9\n");
-    defer cfg.deinit();
-    // Empty: keeps the default. Valid: taken.
-    try std.testing.expectEqualStrings("Sans 10", cfg.font_menu);
-    try std.testing.expectEqualStrings("Sans 9", cfg.font_dock);
-    try std.testing.expect(!config.validFont(""));
-    try std.testing.expect(!prefs_settings.validFont(""));
-    try std.testing.expect(config.validFont("Sans 10") and prefs_settings.validFont("Sans 10"));
+test "wlprefs' action list is exactly what the compositor knows" {
+    const actions = @import("wlprefs_actions");
+    // Every command of types.Command (but `none`) is known to wlprefs ...
+    inline for (@typeInfo(types.Command).@"union".fields) |f| {
+        if (!std.mem.eql(u8, f.name, "none")) {
+            if (!actions.known(f.name)) {
+                std.debug.print("wlprefs does not know the command `{s}`; add it to wlprefs/src/actions.zig\n", .{f.name});
+                return error.ActionMissingInWlprefs;
+            }
+        }
+    }
+    // ... and the three spellings the parser adds, and no command exists only there.
+    for ([_][]const u8{ "spawn_terminal", "spawn_launcher", "spawn_browser", "exec", "shexec" }) |n| {
+        try std.testing.expect(actions.known(n));
+    }
+    for (actions.simple) |n| {
+        const extra = std.mem.startsWith(u8, n, "spawn_");
+        if (extra) continue;
+        var found = false;
+        inline for (@typeInfo(types.Command).@"union".fields) |f| {
+            if (std.mem.eql(u8, f.name, n)) found = true;
+        }
+        if (!found) {
+            std.debug.print("wlprefs lists `{s}`, which the compositor does not have\n", .{n});
+            return error.ActionOnlyInWlprefs;
+        }
+    }
 }
 
 test "the compositor accepts a config that wlprefs edited in place, binds included" {
@@ -1046,4 +1056,279 @@ test "the compositor accepts a config that wlprefs edited in place, binds includ
     try std.testing.expectEqual(@as(i32, 20), cfg.gap);
     try std.testing.expect(std.mem.indexOf(u8, text, "bind = Super+x, shell notify-send hi") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "unbind = Super+q") != null);
+}
+
+// ----------------------------------------------------------------------------
+// Minimize / restore (Window Maker's miniaturize, HIDE, HIDE_OTHERS, SHOW_ALL)
+// ----------------------------------------------------------------------------
+
+test "minimize takes a tiled window out of the layout, restore puts it back where it was" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    const c = try f.newWindow();
+    for ([_]*Window{ a, b, c }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+    const strip = &f.cur().strip;
+    const mid = b.column.?;
+    mid.width = 777;
+
+    workspace.minimize(&f.wm, b);
+    try check(f);
+    try std.testing.expect(b.minimized);
+    // Not placed anywhere: this is what hides it (applyRender hides every unplaced window).
+    try std.testing.expect(b.workspace == null and b.column == null);
+    try std.testing.expectEqual(@as(usize, 2), workspace.columnIndex(strip, c.column.?) + 1);
+
+    try workspace.restore(&f.wm, b, f.cur());
+    try check(f);
+    try std.testing.expect(!b.minimized);
+    try std.testing.expectEqual(@as(usize, 1), workspace.columnIndex(strip, b.column.?)); // its old slot
+    try std.testing.expectEqual(@as(i32, 777), b.column.?.width); // and old width
+    try std.testing.expect(strip.active == b.column.?);
+}
+
+test "a floating window keeps its rectangle across minimize and restore" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    workspace.placeFloating(f.cur(), a);
+    a.float_rect = .{ .x = 40, .y = 50, .w = 300, .h = 200 };
+    a.has_float_rect = true;
+
+    workspace.minimize(&f.wm, a);
+    try check(f);
+    try std.testing.expect(a.workspace == null and a.minimized and a.min_floating);
+
+    try workspace.restore(&f.wm, a, f.cur());
+    try check(f);
+    try std.testing.expect(a.mode == .floating);
+    try std.testing.expectEqual(types.Rect{ .x = 40, .y = 50, .w = 300, .h = 200 }, a.float_rect);
+}
+
+test "a fullscreen window is minimized cleanly and comes back as what it was" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    workspace.setFullscreen(&f.wm, a);
+    try std.testing.expect(f.cur().fullscreen == a);
+
+    workspace.minimize(&f.wm, a);
+    try check(f);
+    try std.testing.expect(f.cur().fullscreen == null);
+    try workspace.restore(&f.wm, a, f.cur());
+    try check(f);
+    try std.testing.expect(a.mode == .tiled);
+}
+
+test "minimize and restore do nothing where they cannot, and survive a window closing" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    // Unplaced: nothing to minimize.
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(!a.minimized);
+    // Not minimized: nothing to restore.
+    try workspace.restore(&f.wm, a, f.cur());
+    try std.testing.expect(a.workspace == null);
+
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    workspace.minimize(&f.wm, a);
+    workspace.minimize(&f.wm, a); // twice is fine
+    try std.testing.expectEqual(@as(u64, 1), a.min_order);
+    // A minimized window that closes is just unplaced: restore refuses it.
+    a.closed = true;
+    try workspace.restore(&f.wm, a, f.cur());
+    try std.testing.expect(a.workspace == null);
+    try check(f);
+}
+
+test "restore brings back the window minimized last; show_all brings back all" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    const c = try f.newWindow();
+    for ([_]*Window{ a, b, c }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+
+    workspace.minimize(&f.wm, b);
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(workspace.lastMinimized(&f.wm) == a);
+
+    // `restore` as a key binding.
+    action_mod.run(&f.wm, .restore);
+    try std.testing.expect(!a.minimized and b.minimized);
+    try std.testing.expect(f.wm.focus_request == a);
+    try check(f);
+
+    workspace.minimize(&f.wm, a);
+    action_mod.run(&f.wm, .show_all);
+    try std.testing.expect(!a.minimized and !b.minimized);
+    try std.testing.expect(workspace.lastMinimized(&f.wm) == null);
+    // The one minimized last (a) is restored last, so it is the focused one.
+    try std.testing.expect(f.wm.focus_request == a);
+    try check(f);
+}
+
+test "hide_others minimizes other applications only; hide_app the focused one's" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const t1 = try f.newWindow();
+    const t2 = try f.newWindow();
+    const web = try f.newWindow();
+    const clock = try f.newWindow();
+    t1.app_id = try std.testing.allocator.dupe(u8, "foot");
+    t2.app_id = try std.testing.allocator.dupe(u8, "foot");
+    web.app_id = try std.testing.allocator.dupe(u8, "firefox");
+    clock.app_id = try std.testing.allocator.dupe(u8, "dockapp:clock");
+    defer for ([_]*Window{ t1, t2, web, clock }) |w| std.testing.allocator.free(w.app_id.?);
+    clock.attrs = dockapp_mod.defaultAttrs();
+    for ([_]*Window{ t1, t2, web }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+    workspace.placeFloating(f.cur(), clock);
+    workspace.activate(t1);
+
+    // Nothing is focused through a seat in the fixture: `focusedWindow` falls
+    // back on the workspace's last focused window, which is t1.
+    action_mod.run(&f.wm, .hide_others);
+    try std.testing.expect(!t1.minimized and !t2.minimized); // same application
+    try std.testing.expect(web.minimized);
+    try std.testing.expect(!clock.minimized); // a DockApp is never "hidden"
+    try check(f);
+
+    action_mod.run(&f.wm, .show_all);
+    try std.testing.expect(!web.minimized);
+
+    action_mod.run(&f.wm, .hide_app);
+    try std.testing.expect(t1.minimized and t2.minimized);
+    try std.testing.expect(!web.minimized and !clock.minimized);
+    try check(f);
+}
+
+// ----------------------------------------------------------------------------
+// Several outputs
+// ----------------------------------------------------------------------------
+
+/// A second output next to the fixture's first one.
+fn addSecondOutput(f: *Fixture) !*Output {
+    const a = std.testing.allocator;
+    const out = try a.create(Output);
+    out.* = .{ .obj = @ptrCast(&dummy_byte) };
+    out.rect = .{ .x = 1920, .y = 0, .w = 1280, .h = 1024 };
+    out.workspace_count = 2;
+    for (0..2) |i| out.workspaces[i].init(out, @intCast(i));
+    f.wm.outputs.append(out);
+    return out;
+}
+
+fn destroySecondOutput(out: *Output) void {
+    const a = std.testing.allocator;
+    for (0..out.workspace_count) |i| {
+        const ws = &out.workspaces[i];
+        while (ws.strip.columns.first()) |c| {
+            while (c.windows.first()) |w| types.unlink(&w.column_link);
+            types.unlink(&c.link);
+            a.destroy(c);
+        }
+    }
+    types.unlink(&out.link);
+    a.destroy(out);
+}
+
+test "cycleOutput wraps around and skips outputs that are gone" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+
+    try std.testing.expect(types.cycleOutput(&f.wm, f.out, true) == second);
+    try std.testing.expect(types.cycleOutput(&f.wm, second, true) == f.out);
+    try std.testing.expect(types.cycleOutput(&f.wm, f.out, false) == second);
+    try std.testing.expect(types.cycleOutput(&f.wm, second, false) == f.out);
+
+    second.removed = true;
+    try std.testing.expect(types.cycleOutput(&f.wm, f.out, true) == f.out);
+    second.removed = false;
+}
+
+test "focus_output_next works on an empty output, and commands then apply there" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    workspace.activate(a);
+    f.wm.active_output = f.out;
+
+    action_mod.run(&f.wm, .focus_output_next);
+    try std.testing.expect(f.wm.active_output == second);
+    // The second output is empty: nothing to focus there.
+    try std.testing.expect(f.wm.focus_request == null);
+    try std.testing.expect(types.workingOutput(&f.wm) == second);
+
+    // "workspace_next" now switches the workspace of the second output.
+    action_mod.run(&f.wm, .workspace_next);
+    try std.testing.expectEqual(@as(u32, 1), second.active);
+    try std.testing.expectEqual(@as(u32, 0), f.out.active);
+
+    action_mod.run(&f.wm, .focus_output_prev);
+    try std.testing.expect(f.wm.active_output == f.out);
+    try std.testing.expect(f.wm.focus_request == a);
+}
+
+test "move_to_output_next takes the focused window along, tiled or floating" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+
+    const t = try f.newWindow();
+    const fl = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), t);
+    workspace.placeFloating(f.cur(), fl);
+    fl.float_rect = .{ .x = 10, .y = 20, .w = 300, .h = 200 };
+    fl.has_float_rect = true;
+    f.wm.active_output = f.out;
+
+    workspace.activate(t);
+    action_mod.run(&f.wm, .move_to_output_next);
+    try std.testing.expect(t.workspace == second.ws());
+    try std.testing.expect(t.mode == .tiled);
+    try std.testing.expect(f.wm.active_output == second);
+    try std.testing.expect(f.wm.focus_request == t);
+
+    f.wm.focus_request = null;
+    f.wm.active_output = f.out;
+    workspace.activate(fl);
+    f.cur().last_focused = fl;
+    action_mod.run(&f.wm, .move_to_output_next);
+    try std.testing.expect(fl.workspace == second.ws());
+    try std.testing.expect(fl.mode == .floating);
+    try std.testing.expectEqual(@as(i32, 300), fl.float_rect.w);
+}
+
+test "with one output the output commands do nothing" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    f.wm.active_output = f.out;
+    action_mod.run(&f.wm, .focus_output_next);
+    action_mod.run(&f.wm, .move_to_output_prev);
+    try std.testing.expect(a.workspace == f.cur());
+    try std.testing.expect(f.wm.active_output == f.out);
+}
+
+test "a removed active output is never returned as the working output" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+    f.wm.active_output = second;
+    try std.testing.expect(types.workingOutput(&f.wm) == second);
+    second.removed = true;
+    try std.testing.expect(types.workingOutput(&f.wm) == f.out);
+    second.removed = false;
 }

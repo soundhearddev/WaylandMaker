@@ -28,6 +28,7 @@ const std = @import("std");
 const gfx = @import("gfx.zig");
 const config = @import("config.zig");
 const dockapp = @import("dockapp.zig");
+const xpm = @import("xpm.zig");
 const types = @import("types.zig");
 
 const Rect = types.Rect;
@@ -46,6 +47,7 @@ pub const arrow: i32 = 16;
 const font_logo: [:0]const u8 = "Sans Bold 22";
 const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
+const font_name: [:0]const u8 = "Sans 8";
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 const col_light = gfx.Color.rgb(0xffffff);
@@ -111,7 +113,7 @@ pub const Model = struct {
         for (list.apps) |app| {
             const copy = try dupeApp(a, app);
             var slot: Slot = .{ .app = copy };
-            slot.icon = loadIcon(copy);
+            slot.icon = loadIcon(gpa, copy);
             switch (copy.place) {
                 .dock => try dock.append(a, slot),
                 .clip => try clip.append(a, slot),
@@ -247,10 +249,10 @@ const icon_dirs = [_][]const u8{
 };
 
 /// The icon of `app`: its `icon` key (a path, or a name looked up in
-/// `icon_dirs`), or else the program's own name. PNG only; anything else
-/// (XPM, SVG) just means "no icon", and the tile shows the first letter of
-/// the name instead.
-fn loadIcon(app: dockapp.DockApp) ?gfx.Icon {
+/// `icon_dirs`), or else the program's own name. PNG and XPM (Window Maker's
+/// own format, see xpm.zig); anything else (SVG) just means "no icon", and
+/// the tile shows the first letter of the name instead.
+fn loadIcon(gpa: std.mem.Allocator, app: dockapp.DockApp) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     const wanted: []const u8 = app.icon orelse blk: {
@@ -259,19 +261,34 @@ fn loadIcon(app: dockapp.DockApp) ?gfx.Icon {
     };
     if (wanted.len == 0) return null;
 
-    // A path.
+    // A path: the extension decides the decoder.
     if (std.mem.indexOfScalar(u8, wanted, '/') != null) {
         const path = std.fmt.bufPrintZ(&buf, "{s}", .{wanted}) catch return null;
-        return gfx.Icon.loadPng(path);
+        return loadFile(gpa, path);
     }
 
-    // A name: strip an extension someone wrote anyway, then search.
-    const stem = if (std.mem.endsWith(u8, wanted, ".png")) wanted[0 .. wanted.len - 4] else wanted;
-    for (icon_dirs) |dir| {
-        const path = std.fmt.bufPrintZ(&buf, "{s}/{s}.png", .{ dir, stem }) catch continue;
-        if (gfx.Icon.loadPng(path)) |icon| return icon;
+    // A name: strip an extension someone wrote anyway, then search every
+    // directory for a PNG, then an XPM.
+    var stem = wanted;
+    inline for (.{ ".png", ".xpm" }) |ext| {
+        if (std.mem.endsWith(u8, stem, ext)) stem = stem[0 .. stem.len - ext.len];
+    }
+    inline for (.{ ".png", ".xpm" }) |ext| {
+        for (icon_dirs) |dir| {
+            const path = std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dir, stem }) catch continue;
+            if (loadFile(gpa, path)) |icon| return icon;
+        }
     }
     return null;
+}
+
+fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
+    if (std.ascii.endsWithIgnoreCase(path, ".xpm")) {
+        const pm = xpm.load(gpa, path) orelse return null;
+        defer pm.deinit(gpa);
+        return gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels);
+    }
+    return gfx.Icon.loadPng(path);
 }
 
 // ----------------------------------------------------------------------------
@@ -485,7 +502,7 @@ pub fn drawClip(cv: *gfx.Canvas, m: *const Model, v: ClipView) void {
         drawCentered(cv, num, x0, 10, tile, font_number, col_text);
         var name_buf: [24:0]u8 = undefined;
         const clipped = clipName(&name_buf, name);
-        drawCentered(cv, clipped, x0, 41, tile, gfx.fonts.dockLabel(), col_text);
+        drawCentered(cv, clipped, x0, 41, tile, font_name, col_text);
     } else {
         drawCentered(cv, num, x0, 20, tile, font_number, col_text);
     }
@@ -872,4 +889,43 @@ test "wl-clock: --name picks the Dock tile, several clocks do not mix" {
     _ = m.setRunning(&.{"dockapp:tokyo"});
     try std.testing.expect(!m.dock[0].running);
     try std.testing.expect(m.dock[1].running);
+}
+
+test "an .xpm icon file is loaded for a Dock tile and painted" {
+    const cc = @cImport({
+        @cInclude("stdio.h");
+        @cInclude("stdlib.h");
+    });
+    var tmpl = "/tmp/wmaker-dockxpm-XXXXXX".*;
+    const dir = cc.mkdtemp(&tmpl) orelse return error.MkdTemp;
+    defer {
+        var cmd: [96]u8 = undefined;
+        if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{std.mem.span(dir)})) |z| _ = cc.system(z.ptr) else |_| {}
+    }
+    var path_buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/app.xpm", .{std.mem.span(dir)});
+    const text =
+        \\/* XPM */
+        \\static char *a[] = {
+        \\"2 2 2 1",
+        \\"a c #ff0000",
+        \\"b c None",
+        \\"aa",
+        \\"ab"
+        \\};
+    ;
+    const f = cc.fopen(path.ptr, "wb") orelse return error.Open;
+    _ = cc.fwrite(text.ptr, 1, text.len, f);
+    _ = cc.fclose(f);
+
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "x", .command = &.{"x"}, .icon = path },
+        // A broken file must not take the Dock down: it just has no icon.
+        .{ .name = "y", .command = &.{"y"}, .icon = "/nonexistent/none.xpm" },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+    defer m.deinit();
+    try std.testing.expect(m.dock[0].icon != null);
+    try std.testing.expectEqual(@as(i32, 2), m.dock[0].icon.?.w);
+    try std.testing.expect(m.dock[1].icon == null);
 }

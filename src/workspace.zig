@@ -265,6 +265,70 @@ pub fn leaveFullscreen(win: *Window) void {
 }
 
 // ----------------------------------------------------------------------------
+// Minimizing
+// ----------------------------------------------------------------------------
+
+/// Take `win` out of the layout and hide it (the render pass hides every
+/// window that is not placed). It remembers whether it was floating -- with
+/// its rectangle -- or which column and width it had, so `restore` can put
+/// it back the same way. Does nothing for an unplaced or already minimized
+/// window.
+pub fn minimize(wm: *WindowManager, win: *Window) void {
+    if (win.minimized or win.closed) return;
+    const ws = win.workspace orelse return;
+
+    win.min_floating = win.mode == .floating or (win.mode == .fullscreen and win.restore == .floating);
+    if (!win.min_floating) {
+        if (win.column) |col| {
+            win.saved_column_index = columnIndex(&ws.strip, col);
+            win.saved_column_width = col.width;
+        }
+    }
+
+    leaveFullscreen(win);
+    unplace(wm, win);
+
+    wm.min_counter +%= 1;
+    win.min_order = wm.min_counter;
+    win.minimized = true;
+}
+
+/// Bring a minimized window back onto `dest`, as it was: floating windows
+/// keep their rectangle, tiled ones open a column at their old position
+/// (or at the end if there are fewer columns now).
+pub fn restore(wm: *WindowManager, win: *Window, dest: *Workspace) !void {
+    if (!win.minimized or win.closed) return;
+
+    if (win.min_floating) {
+        placeFloating(dest, win);
+    } else {
+        const strip = &dest.strip;
+        const col = try newColumn(wm, strip, if (win.saved_column_width > 0)
+            win.saved_column_width
+        else
+            defaultWidth(wm, dest.output));
+        insertWindowAfter(col, null, win);
+        col.focused = win;
+        insertColumnAtIndex(strip, col, win.saved_column_index);
+        strip.active = col;
+        win.mode = .tiled;
+        win.workspace = dest;
+    }
+    win.minimized = false;
+}
+
+/// The minimized window that was minimized last, if any.
+pub fn lastMinimized(wm: *WindowManager) ?*Window {
+    var best: ?*Window = null;
+    var it = wm.windows.first();
+    while (it) |w| : (it = types.nextWindow(w, wm)) {
+        if (!w.minimized or w.closed) continue;
+        if (best == null or w.min_order > best.?.min_order) best = w;
+    }
+    return best;
+}
+
+// ----------------------------------------------------------------------------
 // Moving between workspaces / outputs
 // ----------------------------------------------------------------------------
 

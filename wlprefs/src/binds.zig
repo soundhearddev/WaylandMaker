@@ -8,6 +8,7 @@
 // shows what is in effect, and which entries come from the user's file.
 
 const std = @import("std");
+const xkb = @import("xkbcommon");
 
 pub const Entry = struct {
     /// As written in the file: "Super+Shift+e".
@@ -173,6 +174,160 @@ pub fn effective(a: std.mem.Allocator, defaults: []const u8, user: []const u8) !
 }
 
 // ----------------------------------------------------------------------------
+// Editing: from a list of bindings back to config.conf lines
+// ----------------------------------------------------------------------------
+
+extern fn xkb_utf32_to_keysym(ucs: u32) u32;
+
+/// Is `name` a key the compositor can resolve? The same lookup as its
+/// config.zig: a keysym name (case-insensitive as a fallback) or one
+/// character written as itself.
+pub fn keyKnown(a: std.mem.Allocator, name: []const u8) bool {
+    if (name.len == 0) return false;
+    const z = a.dupeZ(u8, name) catch return false;
+    defer a.free(z);
+    if (xkb.Keysym.fromName(z, .no_flags) != .NoSymbol) return true;
+    if (xkb.Keysym.fromName(z, .case_insensitive) != .NoSymbol) return true;
+    const n = std.unicode.utf8ByteSequenceLength(name[0]) catch return false;
+    if (n != name.len) return false;
+    const cp = std.unicode.utf8Decode(name) catch return false;
+    return xkb_utf32_to_keysym(cp) != 0;
+}
+
+/// Why `combo` cannot be a key combination, or null if it can.
+pub fn comboProblem(a: std.mem.Allocator, combo: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, combo, " \t");
+    if (t.len == 0) return "Keys: empty";
+    if (std.mem.indexOfScalar(u8, t, ',') != null) return "Keys: a comma is not allowed";
+
+    var key: []const u8 = t;
+    var mods_part: []const u8 = "";
+    if (std.mem.endsWith(u8, t, "++")) {
+        key = "plus";
+        mods_part = t[0 .. t.len - 2];
+    } else if (std.mem.lastIndexOfScalar(u8, t, '+')) |i| {
+        mods_part = t[0..i];
+        key = std.mem.trim(u8, t[i + 1 ..], " \t");
+    }
+    var it = std.mem.splitScalar(u8, mods_part, '+');
+    while (it.next()) |raw| {
+        const m = std.mem.trim(u8, raw, " \t");
+        if (m.len == 0) {
+            if (mods_part.len == 0) continue;
+            return "Keys: empty modifier";
+        }
+        const known = std.mem.eql(u8, modName(m), "super") or std.mem.eql(u8, modName(m), "shift") or
+            std.mem.eql(u8, modName(m), "ctrl") or std.mem.eql(u8, modName(m), "alt") or
+            std.mem.eql(u8, modName(m), "mod3") or std.mem.eql(u8, modName(m), "mod5");
+        if (!known) return "Keys: unknown modifier (Super, Ctrl, Alt, Shift)";
+    }
+    if (!keyKnown(a, key)) return "Keys: unknown key name";
+    return null;
+}
+
+/// The `bind =` / `unbind =` lines that turn the shipped defaults into
+/// `list`: a line for every entry that is new or different, an `unbind` for
+/// every default that is gone. Entries equal to a default need no line.
+pub fn userLines(a: std.mem.Allocator, defaults: []const u8, list: []const Entry) ![]const []const u8 {
+    const def = try effective(a, defaults, "");
+
+    var lines: std.ArrayList([]const u8) = .empty;
+
+    // Defaults that are gone.
+    for (def) |d| {
+        const dn = try normalize(a, d.combo);
+        var kept = false;
+        for (list) |e| {
+            if (std.mem.eql(u8, try normalize(a, e.combo), dn)) {
+                kept = true;
+                break;
+            }
+        }
+        if (!kept) try lines.append(a, try std.fmt.allocPrint(a, "unbind = {s}", .{d.combo}));
+    }
+    // New or changed entries.
+    for (list) |e| {
+        const en = try normalize(a, e.combo);
+        var same = false;
+        for (def) |d| {
+            if (std.mem.eql(u8, try normalize(a, d.combo), en) and std.mem.eql(u8, d.action, e.action)) {
+                same = true;
+                break;
+            }
+        }
+        if (!same) try lines.append(a, try std.fmt.allocPrint(a, "bind = {s}, {s}", .{ e.combo, e.action }));
+    }
+    return lines.toOwnedSlice(a);
+}
+
+/// Replace every `bind`/`unbind` line of `text` by `lines`: they go where the
+/// first old one was (or at the end, under a heading, if there was none).
+/// Everything else in the file is untouched. Result owned by the caller.
+pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const []const u8) ![]u8 {
+    var kept: std.ArrayList([]const u8) = .empty;
+    defer kept.deinit(gpa);
+    var insert_at: ?usize = null;
+
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        if (splitLine(raw)) |l| {
+            if (std.mem.eql(u8, l.key, "bind") or std.mem.eql(u8, l.key, "unbind")) {
+                if (insert_at == null) insert_at = kept.items.len;
+                continue;
+            }
+        }
+        try kept.append(gpa, raw);
+    }
+
+    // A file ending in a newline splits into a final empty piece: keep it last.
+    var trailing_nl = false;
+    if (kept.items.len > 0 and kept.items[kept.items.len - 1].len == 0 and text.len > 0 and text[text.len - 1] == '\n') {
+        _ = kept.pop();
+        trailing_nl = true;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    const at = insert_at orelse kept.items.len;
+    var first = true;
+    const Join = struct {
+        fn piece(o: *std.ArrayList(u8), g: std.mem.Allocator, f: *bool, s_: []const u8) !void {
+            if (!f.*) try o.append(g, '\n');
+            f.* = false;
+            try o.appendSlice(g, s_);
+        }
+    };
+    for (kept.items[0..@min(at, kept.items.len)]) |p| try Join.piece(&out, gpa, &first, p);
+    if (insert_at == null and lines.len > 0) {
+        try Join.piece(&out, gpa, &first, "");
+        try Join.piece(&out, gpa, &first, "# ---- key bindings (set by wlprefs) ----");
+    }
+    for (lines) |l| try Join.piece(&out, gpa, &first, l);
+    for (kept.items[@min(at, kept.items.len)..]) |p| try Join.piece(&out, gpa, &first, p);
+
+    if (trailing_nl or (insert_at == null and lines.len > 0)) try out.append(gpa, '\n');
+    return out.toOwnedSlice(gpa);
+}
+
+/// Same list (same combinations with the same actions), order aside?
+pub fn sameList(a: std.mem.Allocator, x: []const Entry, y: []const Entry) !bool {
+    if (x.len != y.len) return false;
+    for (x) |e| {
+        const en = try normalize(a, e.combo);
+        var found = false;
+        for (y) |f| {
+            if (std.mem.eql(u8, en, try normalize(a, f.combo)) and std.mem.eql(u8, e.action, f.action)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 
@@ -256,4 +411,132 @@ test "effective: the shipped default config yields a plausible list" {
         if (std.mem.eql(u8, e.combo, "Super+q") and std.mem.eql(u8, e.action, "close")) found_close = true;
     }
     try std.testing.expect(found_close);
+}
+
+test "keyKnown and comboProblem" {
+    const a = std.testing.allocator;
+    try std.testing.expect(keyKnown(a, "Return"));
+    try std.testing.expect(keyKnown(a, "q"));
+    try std.testing.expect(keyKnown(a, "udiaeresis"));
+    try std.testing.expect(keyKnown(a, "ü"));
+    try std.testing.expect(!keyKnown(a, "Bogus_Key"));
+    try std.testing.expect(!keyKnown(a, ""));
+    try std.testing.expect(!keyKnown(a, "üü"));
+
+    try std.testing.expect(comboProblem(a, "Super+q") == null);
+    try std.testing.expect(comboProblem(a, "Super+Shift+ü") == null);
+    try std.testing.expect(comboProblem(a, "Ctrl+Alt+Delete") == null);
+    try std.testing.expect(comboProblem(a, "Print") == null);
+    try std.testing.expect(comboProblem(a, "Super++") == null);
+    try std.testing.expect(comboProblem(a, "") != null);
+    try std.testing.expect(comboProblem(a, "Super+") != null);
+    try std.testing.expect(comboProblem(a, "Hyper+q") != null);
+    try std.testing.expect(comboProblem(a, "Super+q, close") != null);
+    try std.testing.expect(comboProblem(a, "Super+Nonsense") != null);
+}
+
+test "userLines: nothing for the defaults, bind for new and changed, unbind for removed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const defaults =
+        \\bind = Super+Return, spawn_terminal
+        \\bind = Super+q, close
+        \\bind = Super+h, focus_left
+    ;
+    const unchanged = try effective(a, defaults, "");
+    const none = try userLines(a, defaults, unchanged);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+
+    // Same keys, different spelling and order: still no lines.
+    const respelled = [_]Entry{
+        .{ .combo = "super+h", .action = "focus_left", .user = false },
+        .{ .combo = "Mod4+q", .action = "close", .user = false },
+        .{ .combo = "Super+Return", .action = "spawn_terminal", .user = false },
+    };
+    try std.testing.expectEqual(@as(usize, 0), (try userLines(a, defaults, &respelled)).len);
+
+    // q removed, h changed, a new one.
+    const edited = [_]Entry{
+        .{ .combo = "Super+Return", .action = "spawn_terminal", .user = false },
+        .{ .combo = "Super+h", .action = "focus_right", .user = true },
+        .{ .combo = "Super+x", .action = "minimize", .user = true },
+    };
+    const lines = try userLines(a, defaults, &edited);
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expectEqualStrings("unbind = Super+q", lines[0]);
+    try std.testing.expectEqualStrings("bind = Super+h, focus_right", lines[1]);
+    try std.testing.expectEqualStrings("bind = Super+x, minimize", lines[2]);
+
+    // And the compositor's own rule turns that back into the same list.
+    var text: std.ArrayList(u8) = .empty;
+    for (lines) |l| {
+        try text.appendSlice(a, l);
+        try text.append(a, '\n');
+    }
+    const back = try effective(a, defaults, text.items);
+    try std.testing.expect(try sameList(a, back, &edited));
+}
+
+test "rewriteUserLines replaces the bind lines where the first one was" {
+    const gpa = std.testing.allocator;
+    const text =
+        \\# my config
+        \\gap = 8
+        \\bind = Super+x, close
+        \\terminal = foot
+        \\unbind = Super+q
+        \\bind = Super+y, exit
+        \\# end
+        \\
+    ;
+    const out = try rewriteUserLines(gpa, text, &.{ "bind = Super+z, minimize", "unbind = Super+h" });
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(
+        \\# my config
+        \\gap = 8
+        \\bind = Super+z, minimize
+        \\unbind = Super+h
+        \\terminal = foot
+        \\# end
+        \\
+    , out);
+}
+
+test "rewriteUserLines: no old bind lines -> a block at the end; no new lines -> they vanish" {
+    const gpa = std.testing.allocator;
+    const a = try rewriteUserLines(gpa, "gap = 8\n", &.{"bind = Super+z, minimize"});
+    defer gpa.free(a);
+    try std.testing.expectEqualStrings("gap = 8\n\n# ---- key bindings (set by wlprefs) ----\nbind = Super+z, minimize\n", a);
+
+    const b = try rewriteUserLines(gpa, "gap = 8\nbind = Super+x, close\n", &.{});
+    defer gpa.free(b);
+    try std.testing.expectEqualStrings("gap = 8\n", b);
+
+    // Nothing to write into a file without bindings: unchanged, byte for byte.
+    const c = try rewriteUserLines(gpa, "gap = 8", &.{});
+    defer gpa.free(c);
+    try std.testing.expectEqualStrings("gap = 8", c);
+
+    // Empty file.
+    const d = try rewriteUserLines(gpa, "", &.{"bind = Super+z, minimize"});
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "bind = Super+z, minimize\n") != null);
+
+    // A commented-out bind line is a comment, not a bind.
+    const e = try rewriteUserLines(gpa, "# bind = Super+x, close\n", &.{"bind = Super+y, exit"});
+    defer gpa.free(e);
+    try std.testing.expect(std.mem.startsWith(u8, e, "# bind = Super+x, close\n"));
+}
+
+test "sameList ignores order and key spelling" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const x = [_]Entry{ .{ .combo = "Super+a", .action = "close", .user = false }, .{ .combo = "Super+b", .action = "exit", .user = false } };
+    const y = [_]Entry{ .{ .combo = "mod4+B", .action = "exit", .user = true }, .{ .combo = "super+a", .action = "close", .user = true } };
+    try std.testing.expect(try sameList(a, &x, &y));
+    const z = [_]Entry{ .{ .combo = "Super+a", .action = "close", .user = false }, .{ .combo = "Super+b", .action = "close", .user = false } };
+    try std.testing.expect(!(try sameList(a, &x, &z)));
+    try std.testing.expect(!(try sameList(a, &x, x[0..1])));
 }

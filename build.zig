@@ -24,6 +24,9 @@ pub const Wlprefs = struct {
     /// tests import it, to check that what wlprefs writes is what
     /// config.zig reads.
     settings: *std.Build.Module,
+    /// actions.zig on its own: the compositor's tests check it against
+    /// types.Command.
+    actions: *std.Build.Module,
 };
 
 pub fn buildWlprefs(
@@ -179,7 +182,13 @@ pub fn buildWlprefs(
         .root_source_file = b.path("src/share/default_config.conf"),
     });
 
-    return .{ .exe = exe, .mod = mod, .settings = settings_mod };
+    const actions_mod = b.createModule(.{
+        .root_source_file = projectPath(b, "src/actions.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    return .{ .exe = exe, .mod = mod, .settings = settings_mod, .actions = actions_mod };
 }
 
 // -------------------------------------------------------------------------
@@ -398,6 +407,7 @@ pub fn build(b: *std.Build) void {
 
     fn_link_graphics(b, test_module);
     test_module.addImport("wlprefs_settings", wlprefs.settings);
+    test_module.addImport("wlprefs_actions", wlprefs.actions);
 
     const tests = b.addTest(.{
         .root_module = test_module,

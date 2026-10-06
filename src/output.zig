@@ -118,6 +118,7 @@ pub fn reap(wm: *WindowManager) void {
         if (out.removed) {
             const target = firstLive(wm, out);
             migrate(wm, out, target);
+            if (wm.active_output == out) wm.active_output = target;
             types.unlink(&out.link);
             if (out.layer_shell) |l| l.destroy();
             out.obj.destroy();

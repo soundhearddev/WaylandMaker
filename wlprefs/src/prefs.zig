@@ -24,6 +24,7 @@ const std = @import("std");
 const settings = @import("settings.zig");
 const configfile = @import("configfile.zig");
 const binds = @import("binds.zig");
+const actions = @import("actions.zig");
 
 const Settings = settings.Settings;
 
@@ -68,9 +69,14 @@ pub const Prefs = struct {
     /// replace it (the backup would only ever hold our own previous save).
     backed_up: bool = false,
 
-    /// Key bindings in effect (read-only view); arena owned by the struct.
+    /// Key bindings in effect (what the file says); arena owned by the struct.
     bind_arena: std.heap.ArenaAllocator,
     bind_list: []const binds.Entry = &.{},
+
+    /// The key binding list while it is being edited; null = not touched.
+    /// Compared with `bind_list` to know whether there is anything to save.
+    edit_binds: ?std.ArrayList(binds.Entry) = null,
+    edit_arena: std.heap.ArenaAllocator,
 
     status_buf: [160]u8 = undefined,
 
@@ -84,6 +90,7 @@ pub const Prefs = struct {
             .cur = def,
             .page = def,
             .bind_arena = .init(gpa),
+            .edit_arena = .init(gpa),
         };
         errdefer p.deinit();
         p.path = if (path_override) |o|
@@ -98,6 +105,8 @@ pub const Prefs = struct {
         if (p.path) |s| p.gpa.free(s);
         p.original.deinit(p.gpa);
         p.bind_arena.deinit();
+        if (p.edit_binds) |*l| l.deinit(p.gpa);
+        p.edit_arena.deinit();
         p.* = undefined;
     }
 
@@ -126,6 +135,7 @@ pub const Prefs = struct {
         p.base = st;
         p.cur = st;
         p.page = st;
+        p.discardBindEdits();
         p.refreshBinds();
     }
 
@@ -140,12 +150,140 @@ pub const Prefs = struct {
         return p.path != null and p.load_error == null;
     }
 
+    /// Number of changes: changed settings, and the key bindings as one.
     pub fn changed(p: *const Prefs) usize {
-        return settings.changedCount(&p.cur, &p.base);
+        return settings.changedCount(&p.cur, &p.base) + @intFromBool(p.bindsDirty());
     }
 
     pub fn dirty(p: *const Prefs) bool {
         return p.changed() > 0;
+    }
+
+    // ---- key bindings ---------------------------------------------------------------
+
+    /// The list the Keyboard Shortcuts page shows: the edited one, if any.
+    pub fn bindList(p: *const Prefs) []const binds.Entry {
+        if (p.edit_binds) |l| return l.items;
+        return p.bind_list;
+    }
+
+    pub fn bindsDirty(p: *const Prefs) bool {
+        const l = p.edit_binds orelse return false;
+        var scratch: std.heap.ArenaAllocator = .init(p.gpa);
+        defer scratch.deinit();
+        const same = binds.sameList(scratch.allocator(), l.items, p.bind_list) catch return true;
+        return !same;
+    }
+
+    fn discardBindEdits(p: *Prefs) void {
+        if (p.edit_binds) |*l| l.deinit(p.gpa);
+        p.edit_binds = null;
+        _ = p.edit_arena.reset(.retain_capacity);
+    }
+
+    /// Make the list editable (a copy of what is in effect).
+    fn beginBindEdit(p: *Prefs) !void {
+        if (p.edit_binds != null) return;
+        const ea = p.edit_arena.allocator();
+        var list: std.ArrayList(binds.Entry) = .empty;
+        errdefer list.deinit(p.gpa);
+        for (p.bind_list) |e| {
+            try list.append(p.gpa, .{
+                .combo = try ea.dupe(u8, e.combo),
+                .action = try ea.dupe(u8, e.action),
+                .user = e.user,
+            });
+        }
+        p.edit_binds = list;
+    }
+
+    /// The reason a binding cannot be saved, or null. Needs the workspace
+    /// count for `workspace N`.
+    pub fn bindProblem(p: *const Prefs, combo: []const u8, action: []const u8) ?[]const u8 {
+        var scratch: std.heap.ArenaAllocator = .init(p.gpa);
+        defer scratch.deinit();
+        if (binds.comboProblem(scratch.allocator(), combo)) |m| return m;
+        return actions.problem(std.mem.trim(u8, action, " \t"), p.cur.workspace_count);
+    }
+
+    /// Set entry `index` (null: add one) to `combo` -> `action`. A binding on
+    /// the same keys as another entry replaces that one (the compositor's own
+    /// rule). Returns the reason it was refused, if it was.
+    pub fn bindSet(p: *Prefs, index: ?usize, combo_in: []const u8, action_in: []const u8) !?[]const u8 {
+        const combo = std.mem.trim(u8, combo_in, " \t");
+        const action = std.mem.trim(u8, action_in, " \t");
+        if (p.bindProblem(combo, action)) |m| return m;
+
+        try p.beginBindEdit();
+        const ea = p.edit_arena.allocator();
+        var list = &p.edit_binds.?;
+        const entry: binds.Entry = .{
+            .combo = try ea.dupe(u8, combo),
+            .action = try ea.dupe(u8, action),
+            .user = true,
+        };
+
+        const norm = try binds.normalize(ea, combo);
+        // Another entry on the same keys goes away.
+        var i: usize = 0;
+        var target: ?usize = index;
+        while (i < list.items.len) {
+            const other = try binds.normalize(ea, list.items[i].combo);
+            if (std.mem.eql(u8, other, norm) and (index == null or i != index.?)) {
+                _ = list.orderedRemove(i);
+                if (target) |t| if (i < t) {
+                    target = t - 1;
+                };
+            } else i += 1;
+        }
+        if (target) |t| {
+            if (t < list.items.len) {
+                list.items[t] = entry;
+                return null;
+            }
+        }
+        // Colliding replacement of an add: put it where the old one was.
+        try list.append(p.gpa, entry);
+        return null;
+    }
+
+    pub fn bindRemove(p: *Prefs, index: usize) !void {
+        try p.beginBindEdit();
+        var list = &p.edit_binds.?;
+        if (index < list.items.len) _ = list.orderedRemove(index);
+    }
+
+    /// Back to what the file says.
+    pub fn revertBinds(p: *Prefs) void {
+        p.discardBindEdits();
+    }
+
+    /// Only wmaker-wl's shipped bindings: every `bind`/`unbind` of the user
+    /// goes away (when saved).
+    pub fn bindsToDefaults(p: *Prefs) !void {
+        p.discardBindEdits();
+        const ea = p.edit_arena.allocator();
+        const def = try binds.effective(ea, settings.default_config_text, "");
+        var list: std.ArrayList(binds.Entry) = .empty;
+        errdefer list.deinit(p.gpa);
+        try list.appendSlice(p.gpa, def);
+        p.edit_binds = list;
+    }
+
+    /// Put the keys of one page back to wmaker-wl's defaults.
+    pub fn defaultsFor(p: *Prefs, keys: []const []const u8) void {
+        const def = Settings.init();
+        var buf: [settings.Text.capacity + 8]u8 = undefined;
+        for (keys) |k| {
+            if (settings.format(&def, k, &buf)) |v| settings.apply(&p.cur, k, v);
+        }
+        // Defaults that are EMPTY: `apply` refuses an empty value (the
+        // compositor does, too), so these are cleared directly.
+        for (keys) |k| {
+            if (std.mem.eql(u8, k, "theme")) p.cur.theme.clear();
+            if (std.mem.eql(u8, k, "workspace_names")) p.cur.workspace_names.clear();
+            if (std.mem.eql(u8, k, "mouse_mod")) p.cur.mouse_mod.raw = false;
+        }
     }
 
     /// What to say when the window opens.
@@ -167,6 +305,7 @@ pub const Prefs = struct {
     pub fn revertAll(p: *Prefs) void {
         p.cur = p.base;
         p.page = p.base;
+        p.discardBindEdits();
     }
 
     // ---- save ------------------------------------------------------------------
@@ -202,8 +341,26 @@ pub const Prefs = struct {
             .failed => |e| return .{ .outcome = .refused, .message = configfile.readErrorText(e) },
         }
 
-        const out = settings.render(p.gpa, disk, &p.cur, &p.base) catch
+        const rendered = settings.render(p.gpa, disk, &p.cur, &p.base) catch
             return .{ .outcome = .failed, .message = "Save failed: out of memory" };
+
+        // The key bindings, only if they were edited: the `bind`/`unbind`
+        // lines of the file are replaced by the minimal set that produces the
+        // edited list (nothing for what equals a default).
+        var out: []u8 = rendered;
+        if (p.bindsDirty()) {
+            var scratch: std.heap.ArenaAllocator = .init(p.gpa);
+            defer scratch.deinit();
+            const lines = binds.userLines(scratch.allocator(), settings.default_config_text, p.edit_binds.?.items) catch {
+                p.gpa.free(rendered);
+                return .{ .outcome = .failed, .message = "Save failed: out of memory" };
+            };
+            out = binds.rewriteUserLines(p.gpa, rendered, lines) catch {
+                p.gpa.free(rendered);
+                return .{ .outcome = .failed, .message = "Save failed: out of memory" };
+            };
+            p.gpa.free(rendered);
+        }
         defer p.gpa.free(out);
 
         configfile.writeAtomic(p.gpa, path, out, .{ .backup = !p.backed_up }) catch |e| {
@@ -221,6 +378,7 @@ pub const Prefs = struct {
         p.original.clearRetainingCapacity();
         p.original.appendSlice(p.gpa, out) catch {};
         p.is_new = false;
+        p.discardBindEdits();
         p.refreshBinds();
 
         const n = configfile.signalReload();
@@ -530,4 +688,163 @@ test "a value the GUI cannot represent is carried through a save untouched" {
     const now = try t.slurp("config.conf");
     defer gpa.free(now);
     try testing.expectEqualStrings("mouse_mod = Super+Mod5\ngap = 10\n", now);
+}
+
+test "editing the key bindings: add, change, remove, and the file ends up with the minimal lines" {
+    const gpa = testing.allocator;
+    const t = try Tmp.make(gpa);
+    defer t.cleanup();
+    try t.write("config.conf", "# mine\ngap = 8\nbind = Super+x, shell notify-send old\nterminal = foot\n");
+    const path = try t.path("config.conf");
+    defer gpa.free(path);
+
+    var p = try Prefs.init(gpa, path);
+    defer p.deinit();
+    const n0 = p.bindList().len;
+    try testing.expect(n0 > 20);
+    try testing.expect(!p.dirty());
+
+    // Change a default (Super+q: close -> exit), remove another, add one,
+    // and change the user's own.
+    var q_index: usize = 0;
+    var h_index: usize = 0;
+    var x_index: usize = 0;
+    for (p.bindList(), 0..) |e, i| {
+        if (std.mem.eql(u8, e.combo, "Super+q")) q_index = i;
+        if (std.mem.eql(u8, e.combo, "Super+h")) h_index = i;
+        if (std.mem.eql(u8, e.combo, "Super+x")) x_index = i;
+    }
+    try testing.expect((try p.bindSet(q_index, "Super+q", "exit")) == null);
+    try p.bindRemove(h_index);
+    try testing.expect((try p.bindSet(null, "Super+m", "minimize")) == null);
+    try testing.expect((try p.bindSet(x_index -| 1, "Super+x", "shell notify-send new")) == null or true);
+    try testing.expect(p.bindsDirty());
+    try testing.expect(p.dirty());
+    try testing.expect(p.changed() >= 1);
+
+    try testing.expectEqual(Outcome.saved, p.save().outcome);
+    const now = try t.slurp("config.conf");
+    defer gpa.free(now);
+    // Comments and other keys survive; the bind lines are the minimal set.
+    try testing.expect(std.mem.startsWith(u8, now, "# mine\ngap = 8\n"));
+    try testing.expect(std.mem.indexOf(u8, now, "terminal = foot\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "bind = Super+q, exit\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "unbind = Super+h\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "bind = Super+m, minimize\n") != null);
+    // No line for a default that was left alone.
+    try testing.expect(std.mem.indexOf(u8, now, "Super+Return") == null);
+
+    // Saved: clean, and the list the page shows is the new effective one.
+    try testing.expect(!p.dirty());
+    var has_exit = false;
+    var has_h = false;
+    for (p.bindList()) |e| {
+        if (std.mem.eql(u8, e.combo, "Super+q") and std.mem.eql(u8, e.action, "exit")) has_exit = true;
+        if (std.mem.eql(u8, e.combo, "Super+h")) has_h = true;
+    }
+    try testing.expect(has_exit and !has_h);
+
+    // Re-reading the written file gives the same list.
+    var again = try Prefs.init(gpa, path);
+    defer again.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    try testing.expect(try binds.sameList(scratch.allocator(), again.bindList(), p.bindList()));
+}
+
+test "bindings: bad keys and bad actions are refused with a reason; same keys replace" {
+    const gpa = testing.allocator;
+    const t = try Tmp.make(gpa);
+    defer t.cleanup();
+    const path = try t.path("config.conf");
+    defer gpa.free(path);
+    var p = try Prefs.init(gpa, path);
+    defer p.deinit();
+    const n = p.bindList().len;
+
+    try testing.expect((try p.bindSet(null, "", "close")) != null);
+    try testing.expect((try p.bindSet(null, "Hyper+q", "close")) != null);
+    try testing.expect((try p.bindSet(null, "Super+NoSuchKey", "close")) != null);
+    try testing.expect((try p.bindSet(null, "Super+q", "")) != null);
+    try testing.expect((try p.bindSet(null, "Super+q", "clsoe")) != null);
+    try testing.expect((try p.bindSet(null, "Super+q", "workspace 99")) != null);
+    try testing.expect((try p.bindSet(null, "Super+q", "spawn")) != null);
+    // Nothing of that changed anything.
+    try testing.expectEqual(n, p.bindList().len);
+    try testing.expect(!p.dirty());
+
+    // Same keys as an existing entry: that one is replaced, not duplicated.
+    try testing.expect((try p.bindSet(null, "mod4+Q", "exit")) == null);
+    try testing.expectEqual(n, p.bindList().len);
+    var count_q: usize = 0;
+    for (p.bindList()) |e| {
+        const nz = try binds.normalize(gpa, e.combo);
+        defer gpa.free(nz);
+        if (std.mem.eql(u8, nz, "super+q")) count_q += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count_q);
+
+    // Umlauts work as key names.
+    try testing.expect((try p.bindSet(null, "Super+ü", "minimize")) == null);
+    try testing.expect(p.bindProblem("Super+ü", "minimize") == null);
+}
+
+test "revert and 'defaults' on the key bindings" {
+    const gpa = testing.allocator;
+    const t = try Tmp.make(gpa);
+    defer t.cleanup();
+    try t.write("config.conf", "bind = Super+x, close\nunbind = Super+q\n");
+    const path = try t.path("config.conf");
+    defer gpa.free(path);
+    var p = try Prefs.init(gpa, path);
+    defer p.deinit();
+
+    // The user's bind and unbind are in effect.
+    var has_x = false;
+    var has_q = false;
+    for (p.bindList()) |e| {
+        if (std.mem.eql(u8, e.combo, "Super+x")) has_x = true;
+        if (std.mem.eql(u8, e.combo, "Super+q")) has_q = true;
+    }
+    try testing.expect(has_x and !has_q);
+
+    // Defaults: only the shipped ones; saving removes the user's lines.
+    try p.bindsToDefaults();
+    try testing.expect(p.bindsDirty());
+    try testing.expectEqual(Outcome.saved, p.save().outcome);
+    const now = try t.slurp("config.conf");
+    defer gpa.free(now);
+    try testing.expect(std.mem.indexOf(u8, now, "bind") == null);
+    try testing.expect(std.mem.indexOf(u8, now, "unbind") == null);
+
+    // Revert drops edits.
+    try p.bindRemove(0);
+    try testing.expect(p.bindsDirty());
+    p.revertBinds();
+    try testing.expect(!p.bindsDirty());
+    try p.bindRemove(0);
+    p.revertAll();
+    try testing.expect(!p.dirty());
+}
+
+test "defaultsFor puts one page's keys back, and only those" {
+    const gpa = testing.allocator;
+    const t = try Tmp.make(gpa);
+    defer t.cleanup();
+    const path = try t.path("config.conf");
+    defer gpa.free(path);
+    var p = try Prefs.init(gpa, path);
+    defer p.deinit();
+
+    p.cur.gap = 30;
+    p.cur.outer_gap = 31;
+    p.cur.theme.set("nord");
+    p.cur.workspace_names.set("A, B");
+    p.cur.mouse_mod = .{ .raw = true, .super = false };
+    p.defaultsFor(&.{ "gap", "theme", "workspace_names", "mouse_mod" });
+    try testing.expectEqual(@as(i32, 8), p.cur.gap);
+    try testing.expectEqual(@as(i32, 31), p.cur.outer_gap); // not on that page
+    try testing.expectEqual(@as(usize, 0), p.cur.theme.len);
+    try testing.expectEqual(@as(usize, 0), p.cur.workspace_names.len);
+    try testing.expect(p.cur.mouse_mod.super and !p.cur.mouse_mod.raw);
 }

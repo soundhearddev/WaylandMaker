@@ -34,7 +34,43 @@ pub const Result = struct {
     /// The click did something that needs a redraw but changes no setting
     /// (scrolling a list).
     redraw: bool = false,
+    /// A button of the key binding editor was pressed.
+    bind: ?BindCmd = null,
 };
+
+/// What the Keyboard Shortcuts page asks the window to do.
+pub const BindCmd = union(enum) {
+    select: usize,
+    add,
+    edit,
+    remove,
+    ok,
+    cancel,
+    /// The next key chord typed becomes the combination.
+    record,
+};
+
+/// The state of the key binding editor, owned by the window.
+pub const BindUi = struct {
+    sel: ?usize = null,
+    editing: bool = false,
+    /// Which entry is being edited; null = a new one.
+    edit_index: ?usize = null,
+    keys: settings.Text = .{},
+    action: settings.Text = .{},
+    /// Waiting for a key chord.
+    recording: bool = false,
+    /// Why OK was refused (shown in the editor).
+    message: [96:0]u8 = [_:0]u8{0} ** 96,
+
+    pub fn setMessage(b: *BindUi, msg: []const u8) void {
+        const n = @min(msg.len, b.message.len - 1);
+        @memcpy(b.message[0..n], msg[0..n]);
+        b.message[n] = 0;
+    }
+};
+
+pub const max_fields = 8;
 
 /// Context for a single pass over a page.
 pub const Ctx = struct {
@@ -47,6 +83,9 @@ pub const Ctx = struct {
     focused: ?*settings.Text = null,
     icons: ?*const icons.Set = null,
     res: Result = .{},
+    /// The text fields of the page in drawing order: Tab walks through them.
+    fields: [max_fields]*settings.Text = undefined,
+    nfields: usize = 0,
 
     fn hit(c: *const Ctx, x: i32, y: i32, w: i32, h: i32) bool {
         return c.mode == .click and c.cx >= x and c.cx < x + w and c.cy >= y and c.cy < y + h;
@@ -99,13 +138,9 @@ pub const Ctx = struct {
     pub fn radio(c: *Ctx, x: i32, y: i32, text: [:0]const u8, selected: bool) bool {
         const r: i32 = 7;
         if (c.cv) |cv| {
-            // A round WINGs radio: sunken ring, dot when selected.
-            const cx = x + r;
-            const cy = y + r;
-            cv.fillCircle(cx, cy, r, face);
-            cv.strokeCircle(cx, cy, r - 1, 1.5, gfx.Color.rgb(0x848484));
-            cv.strokeCircle(cx, cy, r, 1.0, white);
-            if (selected) cv.fillCircle(cx, cy, 3, black);
+            cv.fillRect(x, y, 2 * r, 2 * r, face);
+            cv.relief(x, y, 2 * r, 2 * r, .sunken);
+            if (selected) cv.fillCircle(x + r, y + r, 3, black);
             cv.drawText(text, x + 2 * r + 8, y - 1, font, black);
         }
         const w = 2 * r + 8 + (if (c.mode == .click) gfx.measureText(text, font).w else 0);
@@ -207,7 +242,7 @@ pub const Ctx = struct {
 
     pub fn colour(c: *Ctx, x: i32, y: i32, text: [:0]const u8, v: *u32) void {
         c.label(x, y + 2, text);
-        const bx = x + 110;
+        const bx = x + 150;
         if (c.cv) |cv| {
             cv.fillRect(bx, y, 44, 20, gfx.Color.rgb(v.*));
             cv.relief(bx, y, 44, 20, .sunken);
@@ -218,7 +253,7 @@ pub const Ctx = struct {
         const names = [_][:0]const u8{ "R", "G", "B" };
         inline for (names, 0..) |n, i| {
             const shift: u5 = @intCast(16 - 8 * i);
-            const px = bx + 128 + @as(i32, @intCast(i)) * 78;
+            const px = bx + 56 + @as(i32, @intCast(i)) * 96;
             c.label(px, y + 2, n);
             var ch: i64 = (v.* >> shift) & 0xff;
             if (c.stepBtn(px + 12, y, "-")) {
@@ -232,14 +267,41 @@ pub const Ctx = struct {
                 c.res.changed = true;
             }
         }
+        if (c.cv) |cv| {
+            var buf: [16:0]u8 = undefined;
+            const s = std.fmt.bufPrintZ(&buf, "#{x:0>6}", .{v.*}) catch "?";
+            cv.drawText(s, bx + 56 + 3 * 96 - 6, y + 2, font, dim);
+        }
     }
 
     // ---- text field ---------------------------------------------------------
+
+    /// Where the visible part of `t` starts: the caret stays in view, so a
+    /// long value scrolls and the end being typed at is what you see.
+    fn visibleStart(t: *const settings.Text, fw: i32) usize {
+        var buf: [settings.Text.capacity + 1:0]u8 = undefined;
+        const n = @min(t.len, buf.len - 1);
+        @memcpy(buf[0..n], t.get()[0..n]);
+        buf[n] = 0;
+        const caret = @min(t.pos, n);
+        buf[caret] = 0; // measure up to the caret only
+        var start: usize = 0;
+        while (start < caret) {
+            if (gfx.measureText(buf[start..caret :0], font).w <= fw - 14) break;
+            start += 1;
+        }
+        return start;
+    }
 
     pub fn textField(c: *Ctx, x: i32, y: i32, w: i32, text: [:0]const u8, t: *settings.Text) void {
         c.label(x, y + 4, text);
         const fx = x + 110;
         const fw = w - 110;
+        if (c.nfields < max_fields) {
+            c.fields[c.nfields] = t;
+            c.nfields += 1;
+        }
+        const start = visibleStart(t, fw);
         if (c.cv) |cv| {
             cv.fillRect(fx, y, fw, 24, white);
             cv.relief(fx, y, fw, 24, .sunken);
@@ -247,19 +309,56 @@ pub const Ctx = struct {
             const n = @min(t.len, buf.len - 1);
             @memcpy(buf[0..n], t.get()[0..n]);
             buf[n] = 0;
-            // Show the END of a long value, where the typing happens.
-            var start: usize = 0;
-            while (start < n and gfx.measureText(buf[start..n :0], font).w > fw - 12) {
-                start += 1;
-                while (start < n and (buf[start] & 0xC0) == 0x80) start += 1;
+            // Cut what does not fit on the right as well (the caret is always
+            // inside what is kept, see visibleStart).
+            var stop: usize = n;
+            while (stop > start) {
+                const saved = buf[stop];
+                buf[stop] = 0;
+                const wide = gfx.measureText(buf[start..stop :0], font).w;
+                buf[stop] = saved;
+                if (wide <= fw - 12) break;
+                stop -= 1;
             }
-            cv.drawText(buf[start..n :0], fx + 5, y + 4, font, black);
+            buf[stop] = 0;
+            cv.drawText(buf[start..stop :0], fx + 5, y + 4, font, black);
             if (c.focused == t) {
-                const tw = gfx.measureText(buf[start..n :0], font).w;
-                cv.fillRect(fx + 5 + tw + 1, y + 4, 1, 15, black);
+                const caret = @min(t.pos, n);
+                var tmp: [settings.Text.capacity + 1:0]u8 = undefined;
+                @memcpy(tmp[0 .. caret - start], buf[start..caret]);
+                tmp[caret - start] = 0;
+                const tw = gfx.measureText(tmp[0 .. caret - start :0], font).w;
+                cv.fillRect(fx + 5 + tw, y + 4, 1, 15, black);
             }
         }
-        if (c.hit(fx, y, fw, 24)) c.res.focus = t;
+        if (c.hit(fx, y, fw, 24)) {
+            c.res.focus = t;
+            // Put the caret where the click was.
+            var tmp: [settings.Text.capacity + 1:0]u8 = undefined;
+            const n = @min(t.len, tmp.len - 1);
+            var i: usize = start;
+            var pos: usize = n;
+            while (i < n) : (i += 1) {
+                @memcpy(tmp[0 .. i + 1 - start], t.get()[start .. i + 1]);
+                tmp[i + 1 - start] = 0;
+                const wid = gfx.measureText(tmp[0 .. i + 1 - start :0], font).w;
+                if (fx + 5 + wid > c.cx) {
+                    pos = i;
+                    break;
+                }
+            }
+            t.pos = pos;
+        }
+    }
+
+    /// A push button. true when clicked.
+    pub fn button(c: *Ctx, x: i32, y: i32, w: i32, text: [:0]const u8, enabled: bool) bool {
+        if (c.cv) |cv| {
+            cv.fillRect(x, y, w, 22, face);
+            cv.relief(x, y, w, 22, .raised);
+            cv.drawTextCentered(text, x + @divTrunc(w, 2), y + 3, font, if (enabled) black else dim);
+        }
+        return enabled and c.hit(x, y, w, 22);
     }
 };
 
@@ -268,18 +367,17 @@ pub const Ctx = struct {
 // ---------------------------------------------------------------------------
 
 pub fn focus(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 6, 480, 122, "Focus");
-    c.checkbox(ox + 40, oy + 30, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
-    c.hint(ox + 40, oy + 52, "Focus changes as soon as the mouse pointer enters a window.");
-    c.hint(ox + 40, oy + 68, "Off: focus only via click or keyboard shortcut.");
-    c.checkbox(ox + 40, oy + 94, "New windows take the focus", &s.focus_new_windows);
+    c.frame(ox + 20, oy + 14, 480, 96, "Focus");
+    c.checkbox(ox + 40, oy + 40, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
+    c.hint(ox + 40, oy + 62, "Focus changes as soon as the mouse pointer enters a window.");
+    c.hint(ox + 40, oy + 80, "Off: focus only via click or keyboard shortcut.");
 
-    c.frame(ox + 20, oy + 136, 480, 86, "Scrolling");
-    c.label(ox + 40, oy + 158, "Center focused column:");
+    c.frame(ox + 20, oy + 122, 480, 96, "Scrolling");
+    c.label(ox + 40, oy + 146, "Center focused column:");
     var m = s.center_focused_column;
-    if (c.radio(ox + 40, oy + 184, "on overflow", m == .on_overflow)) m = .on_overflow;
-    if (c.radio(ox + 190, oy + 184, "always", m == .always)) m = .always;
-    if (c.radio(ox + 300, oy + 184, "never", m == .never)) m = .never;
+    if (c.radio(ox + 40, oy + 170, "on overflow", m == .on_overflow)) m = .on_overflow;
+    if (c.radio(ox + 190, oy + 170, "always", m == .always)) m = .always;
+    if (c.radio(ox + 300, oy + 170, "never", m == .never)) m = .never;
     s.center_focused_column = m;
 }
 
@@ -310,23 +408,25 @@ pub fn workspace(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 }
 
 pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 14, oy + 8, 492, 152, "Window Frame");
-    c.stepInt(ox + 34, oy + 32, "Border width (px):", &s.border_width, 0, 16, 1);
-    c.colour(ox + 34, oy + 62, "Focused:", &s.border_focused);
-    c.colour(ox + 34, oy + 90, "Unfocused:", &s.border_unfocused);
-    c.colour(ox + 34, oy + 118, "Floating:", &s.border_floating);
+    c.frame(ox + 14, oy + 6, 492, 170, "Window Frame");
+    c.stepInt(ox + 34, oy + 28, "Border width (px):", &s.border_width, 0, 16, 1);
+    c.colour(ox + 34, oy + 54, "Focused:", &s.border_focused);
+    c.colour(ox + 34, oy + 80, "Unfocused:", &s.border_unfocused);
+    c.colour(ox + 34, oy + 106, "Floating:", &s.border_floating);
+    c.textField(ox + 34, oy + 136, 300, "Theme:", &s.theme);
+    c.hint(ox + 346, oy + 140, "Themes/NAME.conf");
 
     if (c.cv) |cv| {
         // Live preview of the three frames.
-        const py = oy + 168;
+        const py = oy + 182;
         const cols = [_]u32{ s.border_focused, s.border_unfocused, s.border_floating };
         const names = [_][:0]const u8{ "focused", "unfocused", "floating" };
         for (cols, 0..) |col, i| {
             const x = ox + 34 + @as(i32, @intCast(i)) * 160;
             const bw: i32 = @max(1, @min(6, s.border_width));
-            cv.fillRect(x, py, 140, 46, gfx.Color.rgb(col));
-            cv.fillRect(x + bw, py + bw, 140 - 2 * bw, 46 - 2 * bw, gfx.Color.rgb(0x282828));
-            cv.drawTextCentered(names[i], x + 70, py + 14, font, gfx.Color.rgb(0xd4d4d4));
+            cv.fillRect(x, py, 140, 40, gfx.Color.rgb(col));
+            cv.fillRect(x + bw, py + bw, 140 - 2 * bw, 40 - 2 * bw, gfx.Color.rgb(0x282828));
+            cv.drawTextCentered(names[i], x + 70, py + 11, font, gfx.Color.rgb(0xd4d4d4));
         }
     }
 }
@@ -358,7 +458,7 @@ pub fn ergonomic(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.textField(ox + 40, oy + 72, 440, "Launcher:", &s.launcher);
     c.textField(ox + 40, oy + 104, 440, "Browser:", &s.browser);
     c.hint(ox + 40, oy + 158, "A program and its arguments, separated by spaces (no shell).");
-    c.hint(ox + 40, oy + 176, "Used by the spawn_terminal / spawn_launcher / spawn_browser keys.");
+    c.hint(ox + 40, oy + 176, "Started by the spawn_terminal / spawn_launcher / spawn_browser keys.");
 }
 
 /// Dock and Clip.
@@ -391,42 +491,12 @@ pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 
 /// WPrefs' "Other Configurations": session and compatibility switches.
 pub fn configurations(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 6, 480, 140, "Session & Compatibility");
-    c.checkbox(ox + 40, oy + 30, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
-    c.checkbox(ox + 40, oy + 54, "Run the autostart script on launch", &s.enable_autostart);
-    c.checkbox(ox + 40, oy + 78, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
-    c.hint(ox + 40, oy + 104, "Files in ~/.config/wmaker-wl always take precedence over those.");
-    c.hint(ox + 40, oy + 120, "Autostart and autolaunch only run when wmaker-wl starts.");
-
-    c.frame(ox + 20, oy + 154, 480, 68, "Workspace Switching");
-    c.checkbox(ox + 40, oy + 178, "Wrap around: next on the last workspace goes to the first", &s.workspace_wrap);
-    c.hint(ox + 40, oy + 200, "Off: next / previous stop at the last / first workspace.");
-}
-
-/// "Menu Preferences": what wmaker-wl's menus (and the Clip wheel) can do.
-pub fn menuPreferences(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 96, "Submenus");
-    c.label(ox + 40, oy + 38, "A submenu opens on the:");
-    var a = s.menu_submenu_align;
-    if (c.radio(ox + 40, oy + 62, "right of its menu", a == .right)) a = .right;
-    if (c.radio(ox + 250, oy + 62, "left of its menu", a == .left)) a = .left;
-    s.menu_submenu_align = a;
-    c.hint(ox + 40, oy + 86, "It switches sides when it would leave the screen.");
-
-    c.frame(ox + 20, oy + 122, 480, 96, "Clip");
-    c.checkbox(ox + 40, oy + 146, "Mouse wheel over the Clip switches workspace", &s.clip_scroll_workspaces);
-    c.hint(ox + 40, oy + 172, "Scroll up: next workspace. Scroll down: previous.");
-}
-
-/// "Font Configuration": the Pango font descriptions of menus and Clip.
-pub fn fonts(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 132, "Fonts");
-    c.textField(ox + 40, oy + 40, 440, "Menu title:", &s.font_menu_title);
-    c.textField(ox + 40, oy + 72, 440, "Menu rows:", &s.font_menu);
-    c.textField(ox + 40, oy + 104, 440, "Clip name:", &s.font_dock);
-    c.hint(ox + 40, oy + 158, "Pango font description: Family [Style] Size, e.g. Sans Bold 10.");
-    c.hint(ox + 40, oy + 176, "Applies to the menus and the Clip once wmaker-wl reloads (SIGHUP).");
-    c.hint(ox + 40, oy + 194, "An unknown family falls back to the default font.");
+    c.frame(ox + 20, oy + 14, 480, 160, "Session & Compatibility");
+    c.checkbox(ox + 40, oy + 42, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
+    c.checkbox(ox + 40, oy + 70, "Run the autostart script on launch", &s.enable_autostart);
+    c.checkbox(ox + 40, oy + 98, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
+    c.hint(ox + 40, oy + 130, "Files in ~/.config/wmaker-wl always take precedence over those.");
+    c.hint(ox + 40, oy + 148, "Autostart and autolaunch only run when wmaker-wl starts.");
 }
 
 /// A section that has no counterpart (yet): the reason, not dead controls.
@@ -436,9 +506,9 @@ pub fn unavailable(c: *Ctx, ox: i32, oy: i32, headline: [:0]const u8, text: [:0]
     c.hint(ox + 40, oy + 66, text);
 }
 
-// ---- Keyboard shortcuts: read-only list -----------------------------------
+// ---- Keyboard shortcuts: the list, and an editor for one entry ----------------
 
-pub const bind_rows = 10;
+pub const bind_rows = 8;
 const bind_row_h = 17;
 
 /// How far the list can scroll.
@@ -464,11 +534,24 @@ fn clipText(buf: []u8, s: []const u8, max_chars: usize) [:0]const u8 {
     return buf[0..len :0];
 }
 
-pub fn shortcuts(c: *Ctx, ox: i32, oy: i32, list: []const binds.Entry, scroll: *i32) void {
-    c.hint(ox + 20, oy + 8, "Read-only. * = from your config.conf. Edit the `bind =` lines by hand.");
+pub fn shortcuts(
+    c: *Ctx,
+    ox: i32,
+    oy: i32,
+    list: []const binds.Entry,
+    scroll: *i32,
+    ui: *BindUi,
+    s: *Settings,
+) void {
+    if (ui.editing) {
+        bindEditor(c, ox, oy, ui);
+        return;
+    }
+
+    c.hint(ox + 20, oy + 4, "* = from your config.conf. Changes are written with Save.");
 
     const lx = ox + 20;
-    const ly = oy + 30;
+    const ly = oy + 22;
     const lw = 458;
     const lh = bind_rows * bind_row_h + 4;
     const max_scroll = bindMaxScroll(list.len);
@@ -479,17 +562,27 @@ pub fn shortcuts(c: *Ctx, ox: i32, oy: i32, list: []const binds.Entry, scroll: *
         cv.relief(lx, ly, lw, lh, .sunken);
         var i: usize = 0;
         while (i < bind_rows) : (i += 1) {
-            const idx: usize = @intCast(scroll.*);
-            if (idx + i >= list.len) break;
-            const e = list[idx + i];
+            const idx: usize = @as(usize, @intCast(scroll.*)) + i;
+            if (idx >= list.len) break;
+            const e = list[idx];
             const y = ly + 2 + @as(i32, @intCast(i)) * bind_row_h;
+            const selected = ui.sel != null and ui.sel.? == idx;
+            if (selected) cv.fillRect(lx + 2, y, lw - 4, bind_row_h, gfx.Color.rgb(0x3a3a6a));
+            const fg = if (selected) white else black;
             var b1: [64]u8 = undefined;
             var b2: [96]u8 = undefined;
-            if (e.user) cv.drawText("*", lx + 4, y, font, black);
-            cv.drawText(clipText(&b1, e.combo, 24), lx + 16, y, font, black);
-            cv.drawText(clipText(&b2, e.action, 52), lx + 200, y, font, if (e.user) black else dim);
+            if (e.user) cv.drawText("*", lx + 4, y, font, fg);
+            cv.drawText(clipText(&b1, e.combo, 24), lx + 16, y, font, fg);
+            cv.drawText(clipText(&b2, e.action, 52), lx + 200, y, font, if (selected) white else if (e.user) black else dim);
         }
         if (list.len == 0) cv.drawText("(no key bindings)", lx + 16, ly + 4, font, dim);
+    }
+
+    // Click on a row selects it.
+    if (c.hit(lx, ly, lw, lh)) {
+        const row: usize = @intCast(@divTrunc(c.cy - ly - 2, bind_row_h));
+        const idx = @as(usize, @intCast(scroll.*)) + row;
+        if (row < bind_rows and idx < list.len) c.res.bind = .{ .select = idx };
     }
 
     // Scroll buttons.
@@ -503,10 +596,54 @@ pub fn shortcuts(c: *Ctx, ox: i32, oy: i32, list: []const binds.Entry, scroll: *
         c.res.redraw = true;
     }
     if (c.cv) |cv| {
-        var buf: [32:0]u8 = undefined;
         if (list.len > bind_rows) {
-            const s = std.fmt.bufPrintZ(&buf, "{d}/{d}", .{ scroll.* + 1, list.len }) catch "";
-            cv.drawText(s, bx - 4, ly + 28, font_small, dim);
+            var buf: [32:0]u8 = undefined;
+            const t = std.fmt.bufPrintZ(&buf, "{d}/{d}", .{ scroll.* + 1, list.len }) catch "";
+            cv.drawText(t, bx - 4, ly + 28, font_small, dim);
         }
     }
+
+    // Buttons under the list.
+    const by = ly + lh + 6;
+    const has_sel = ui.sel != null and ui.sel.? < list.len;
+    if (c.button(lx, by, 74, "Add...", true)) c.res.bind = .add;
+    if (c.button(lx + 82, by, 74, "Edit...", has_sel)) c.res.bind = .edit;
+    if (c.button(lx + 164, by, 74, "Remove", has_sel)) c.res.bind = .remove;
+
+    // Which layout the keys are translated with.
+    const ry = by + 32;
+    c.label(lx, ry, "Keys follow:");
+    var bl = s.bind_layout;
+    if (c.radio(lx + 100, ry + 1, "the active layout", bl == -1)) bl = -1;
+    inline for (.{ 0, 1, 2, 3 }) |n| {
+        const label = switch (n) {
+            0 => "layout 1",
+            1 => "2",
+            2 => "3",
+            else => "4",
+        };
+        const rx: i32 = lx + 270 + (if (n == 0) 0 else 92 + (n - 1) * 40);
+        if (c.radio(rx, ry + 1, label, bl == n)) bl = n;
+    }
+    s.bind_layout = bl;
+}
+
+fn bindEditor(c: *Ctx, ox: i32, oy: i32, ui: *BindUi) void {
+    c.frame(ox + 20, oy + 8, 478, 190, if (ui.edit_index == null) "New key binding" else "Edit key binding");
+
+    // The keys: a field you can type in, or fill by pressing the keys.
+    c.textField(ox + 36, oy + 34, 340, "Keys:", &ui.keys);
+    if (c.button(ox + 384, oy + 34, 100, if (ui.recording) "Press keys..." else "Record", true)) {
+        c.res.bind = .record;
+    }
+    c.hint(ox + 36, oy + 62, "e.g. Super+Shift+q, Ctrl+Alt+Delete, Super+ü (Record fills this in)");
+
+    c.textField(ox + 36, oy + 90, 448, "Action:", &ui.action);
+    c.hint(ox + 36, oy + 118, "close, focus_left, minimize, workspace 2, spawn foot -e htop, shell ... (docs/WMPREFS.md)");
+
+    if (ui.message[0] != 0) {
+        if (c.cv) |cv| cv.drawText(&ui.message, ox + 36, oy + 140, font, gfx.Color.rgb(0x8a1010));
+    }
+    if (c.button(ox + 330, oy + 164, 74, "OK", true)) c.res.bind = .ok;
+    if (c.button(ox + 410, oy + 164, 74, "Cancel", true)) c.res.bind = .cancel;
 }

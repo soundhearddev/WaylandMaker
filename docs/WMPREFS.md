@@ -26,19 +26,16 @@ anzeigt, die der Compositor noch gar nicht auswertet, wäre irreführend.
 | Window Focus | `focus_follows_mouse`, `center_focused_column` |
 | Window Handling | `new_window`, `gap`, `outer_gap`, `min_window_size` |
 | Workspace | `workspace_count`, `workspace_names`, `default_column_width`, `width_step`, `width_presets` |
-| Appearance | `border_width`, `border_focused`, `border_unfocused`, `border_floating` |
+| Appearance | `border_width`, `border_focused`, `border_unfocused`, `border_floating`, `theme` |
 | Mouse | `mouse_mod` (beliebige Kombination), `drag_threshold`, `floating_size` |
 | Ergonomic (Standardprogramme) | `terminal`, `launcher`, `browser` |
 | Docks | `dock_enabled`, `dock_edge`, `dock_offset`, `dock_on_top`, `dock_reserve_space`, `clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed` |
-| Other Configurations | `enable_dockapps`, `enable_autostart`, `enable_wmaker_compat`, `workspace_wrap` |
-| Menu Preferences | `menu_submenu_align`, `clip_scroll_workspaces` |
-| Font Configuration | `font_menu_title`, `font_menu`, `font_dock` (Pango-Beschreibung, wirkt nach SIGHUP) |
-| Keyboard Shortcuts | **nur Anzeige** der wirksamen `bind`-Zeilen (Standard + eigene), `*` = aus der eigenen Datei |
+| Other Configurations | `enable_dockapps`, `enable_autostart`, `enable_wmaker_compat` |
+| Keyboard Shortcuts | die wirksamen Kürzel (Standard + eigene, `*` = aus der eigenen Datei) **bearbeiten**: Add / Edit / Remove, „Record“ nimmt die Tastenkombination auf; geprüft werden Taste (gegen xkbcommon) und Aktion (Liste in `wlprefs/src/actions.zig`, im Compositor-Test gegen `types.Command` abgeglichen). Dazu `bind_layout` (welches Tastaturlayout die Kürzel übersetzt). Geschrieben wird die kleinste Menge `bind`/`unbind`-Zeilen, die aus den Standardwerten die Liste macht; Gleiches bleibt ungeschrieben, der Rest der Datei unberührt |
 
-Die Seite Window Focus hat zusätzlich `focus_new_windows`. Die frühere „nur Anzeige“-Variante von Menu
-Preferences ist durch eine echte Seite ersetzt (nur Optionen, die der Compositor wirklich hat). Icons,
-Paths, Menu (Editor), Hot Corners und Expert haben keine Entsprechung und sagen auf ihrer Seite, warum
-und was man stattdessen tut.
+Menu Preferences zeigt das WPrefs-Bild, ist aber ausdrücklich „nur Anzeige“ (wmaker-wl hat diese
+Optionen nicht). Icons, Paths, Menu, Hot Corners, Fonts und Expert haben keine Entsprechung und sagen
+auf ihrer Seite, warum und was man stattdessen tut.
 
 **Speichern verändert nie mehr als nötig** (`settings.render`, `prefs.save`, `configfile.writeAtomic`):
 
@@ -57,8 +54,10 @@ und was man stattdessen tut.
   demselben Wert gelesen wird (`wlprefs and the compositor agree`).
 - Danach bekommt jeder laufende `wmaker-wl` des Nutzers `SIGHUP` (über `/proc`, ohne `pkill`).
 
-Bedienung: `Save` (oder Strg+S), `Revert Page`, `Revert All`; `Close` mit ungesicherten Änderungen
-warnt und verwirft erst beim zweiten Klick. `wlprefs --config DATEI` bearbeitet eine andere Datei,
+Bedienung: `Save` (oder Strg+S), `Revert Page`, `Revert All`, `Defaults` (die Schlüssel der Seite auf
+wmaker-wls Standard, nicht gespeichert bis `Save`); `Close` mit ungesicherten Änderungen warnt und
+verwirft erst beim zweiten Klick. In Textfeldern: Pfeile, Pos1/Ende, Entf, Klick setzt den Cursor,
+Tab/Shift+Tab wechselt das Feld. `wlprefs --config DATEI` bearbeitet eine andere Datei,
 `wlprefs --shot ORDNER` schreibt jede Seite als PNG (ohne Wayland-Sitzung).
 
 Icons: `docs/WLPREFS-ICONS.md`. Offenes: `docs/TODO.md`.
@@ -75,10 +74,10 @@ WPrefs gliedert sich in Icons/Tabs, jede davon eine eigene `.conf`-Sektion in
 |---|---|---|
 | **Window Handling** | Fokusmodus (click/sloppy/auto), Auto-Arrange-Icons, Fenster-Platzierung | `focus_follows_mouse`; Rest fehlt (siehe §3.1) |
 | **Icon and Image Preferences** | Icon-Größe, Icon-Positionierung, Pixmap-Pfade | fehlt komplett (kein Dateimanager-Icon-Konzept in einem scrollenden Tiling-WM) |
-| **Menu Preferences** | Menü-Stil, Scrollen, Transparenz | `menu_submenu_align` (Seite, auf der Untermenüs aufgehen); Scroll-Geschwindigkeit/vi-Tasten fehlen |
+| **Menu Preferences** | Menü-Stil, Scrollen, Transparenz | Root-Menü existiert (`RootMenu`-Datei), Styling teils über `config.conf`-Farben |
 | **Workspace Preferences** | Anzahl, Namen, "Advance to new workspace" | `workspace_count`; **Namen fehlen** (§3.2) |
 | **Appearance / Themes** | Theme-Paket laden (Texturen, Schriften, Farben je Widget) | fehlt komplett -- Phase 6 (§3.3) |
-| **Menu and Icon Fonts** | Schriftfamilie/-größe für Menü, Titelleiste, Icons | `font_menu_title`, `font_menu`, `font_dock` (Pango-Beschreibung; Titelleisten gibt es nicht) |
+| **Menu and Icon Fonts** | Schriftfamilie/-größe für Menü, Titelleiste, Icons | fehlt (`gfx.zig` nutzt aktuell feste Pango-Defaults) |
 | **Mouse Preferences** | Doppelklick-Geschwindigkeit, Grab-Modifier, Scroll-Aktionen auf Titelleiste | `mouse_mod`, `drag_threshold`; Rest fehlt |
 | **Keyboard Shortcuts** | Grafischer Keybind-Editor (genau `bind =`-Zeilen) | `bind =`/`unbind =` existieren textuell; **GUI fehlt** (§2) |
 | **Window Focus Preferences** | Focus-follows-mouse-Feinheiten, Auto-Focus neuer Fenster | teilweise (`focus_follows_mouse`) |
