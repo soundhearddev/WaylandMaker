@@ -169,10 +169,7 @@
       Taste bleibt; `current` (Standard) folgt dem aktiven Layout. In wlprefs unter Keyboard Shortcuts.
 - [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
       `process.spawnShell`)
-- [ ] **WPrefs-Äquivalent**: Plan und Bestandsaufnahme in `docs/WPREFS.md`. Grundgerüst
-      `src/wm_prefs.zig` liegt als reines Skelett (Typen + Signaturen, keine Implementierung)
-      vor Phase 5/6, weil eine GUI erst sinnvoll wird, sobald Dock/Clip (Phase 5) und Themes
-      (Phase 6) zumindest im Datenmodell existieren.
+
 
 ### Ideen, noch nicht begonnen (nach Nutzen sortiert)
 - [ ] **Titelleisten** (Phase 3): braucht `river_decoration_v1`-Flächen pro Fenster, eine reservierte Höhe im

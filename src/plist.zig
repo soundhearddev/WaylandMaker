@@ -99,6 +99,14 @@ pub const Diag = struct {
 
 pub const Error = error{ Syntax, OutOfMemory };
 
+/// Deepest nesting of `{}`/`()` we accept. The parser is recursive, so
+/// without a bound a file made of a few hundred thousand `(` (well under the
+/// 1 MiB read limit of `wm_files.zig`) would overflow the stack and take the
+/// whole window manager down at start-up or on a SIGHUP reload. Real Window
+/// Maker files nest fewer than 10 levels; root menus are capped at 32 menu
+/// levels by `wm_menu.zig`, which stays below this.
+pub const max_depth: u32 = 64;
+
 /// Parse one value; anything but whitespace and comments after it is an error.
 pub fn parse(arena: std.mem.Allocator, text: []const u8, diag: ?*Diag) Error!Value {
     var p: Parser = .{ .a = arena, .text = text, .diag = diag };
@@ -114,6 +122,8 @@ const Parser = struct {
     text: []const u8,
     pos: usize = 0,
     line: u32 = 1,
+    /// Current `{}`/`()` nesting, bounded by `max_depth`.
+    depth: u32 = 0,
     diag: ?*Diag,
 
     fn fail(p: *Parser, msg: []const u8) Error {
@@ -172,6 +182,9 @@ const Parser = struct {
     }
 
     fn dict(p: *Parser) Error!Value {
+        if (p.depth >= max_depth) return p.fail("nesting too deep");
+        p.depth += 1;
+        defer p.depth -= 1;
         p.advance(); // {
         var list: std.ArrayList(Entry) = .empty;
         while (true) {
@@ -204,6 +217,9 @@ const Parser = struct {
     }
 
     fn array(p: *Parser) Error!Value {
+        if (p.depth >= max_depth) return p.fail("nesting too deep");
+        p.depth += 1;
+        defer p.depth -= 1;
         p.advance(); // (
         var list: std.ArrayList(Value) = .empty;
         while (true) {
@@ -423,4 +439,27 @@ test "booleans and integers" {
     try std.testing.expectEqual(@as(i64, 16), hex.int().?);
     try std.testing.expect(junk.boolean() == null);
     try std.testing.expect(junk.int() == null);
+}
+
+test "absurdly deep nesting is a syntax error, not a stack overflow" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..100_000) |_| try buf.append(a, '(');
+    var diag: Diag = .{};
+    try std.testing.expectError(error.Syntax, parse(a, buf.items, &diag));
+    try std.testing.expectEqualStrings("nesting too deep", diag.message);
+
+    // The same for dictionaries.
+    buf.clearRetainingCapacity();
+    for (0..100_000) |_| try buf.appendSlice(a, "{A=");
+    try std.testing.expectError(error.Syntax, parse(a, buf.items, null));
+
+    // Right at the limit still parses.
+    buf.clearRetainingCapacity();
+    for (0..max_depth) |_| try buf.append(a, '(');
+    for (0..max_depth) |_| try buf.append(a, ')');
+    _ = try parse(a, buf.items, null);
 }

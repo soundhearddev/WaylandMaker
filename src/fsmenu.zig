@@ -50,6 +50,8 @@ pub const Spec = struct {
 };
 
 /// Split `arg` ("~/a ~/b WITH cmd args") into its parts.
+// TODO: paths are split at blanks, so a directory name with a space cannot be
+// used here (quoting is not understood).
 pub fn parseSpec(a: std.mem.Allocator, arg: []const u8) !Spec {
     const text = std.mem.trim(u8, arg, " \t");
     if (text.len > 0 and text[0] == '|') return .{ .paths = &.{}, .with = null, .pipe = true };
@@ -110,6 +112,9 @@ fn lessEntry(_: void, x: Entry, y: Entry) bool {
 
 /// The entries of `path`: no dot files, directories first, then by name.
 /// null if it cannot be read. Never more than `max_entries_per_dir`.
+// TODO: the cap is applied in readdir order, before sorting, so in a huge
+// directory the entries that are shown are arbitrary, not the first
+// alphabetically.
 fn listDir(a: std.mem.Allocator, path: [:0]const u8) ?[]Entry {
     const d = c.opendir(path.ptr) orelse return null;
     defer _ = c.closedir(d);
@@ -340,15 +345,8 @@ test "directories nest to a fixed depth only" {
     const m = expand(arena.allocator(), t.path, "T") orelse return error.NoMenu;
     // Root (0) -> a (1) -> b (2) -> c would be depth 3: not entered.
     const a_menu = m.items[0].action.submenu;
-    var found_b = false;
-    for (a_menu.items) |it| {
-        if (std.mem.eql(u8, it.label, "b")) {
-            found_b = true;
-            // `b` holds only `c`, which is cut off, so b itself is empty
-            // and was dropped from `a`... unless it has files of its own.
-        }
-    }
-    try testing.expect(!found_b);
+    // `b` holds only `c`, which is cut off, so `b` is empty and was dropped.
+    for (a_menu.items) |it| try testing.expect(!std.mem.eql(u8, it.label, "b"));
     try testing.expectEqual(@as(usize, 1), a_menu.items.len);
     try testing.expectEqualStrings("top.txt", a_menu.items[0].label);
 }

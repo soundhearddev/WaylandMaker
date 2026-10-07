@@ -10,7 +10,6 @@
 // react. The page stays so that the section looks like WPrefs and the
 // moment an option gets a config.conf key, its control is already here.
 
-const std = @import("std");
 const gfx = @import("gfx.zig");
 
 const face = gfx.Color.rgb(0xaeaeae);

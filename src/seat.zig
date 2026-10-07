@@ -171,7 +171,10 @@ fn xkbListener(_: *river.XkbBindingV1, event: river.XkbBindingV1.Event, node: *t
             if (node.command >= wm.commands.len) return;
             // `pressed` arrives outside a manage sequence; queue it and ask
             // for one so it actually runs.
-            wm.pending.append(wm.gpa, wm.commands[node.command]) catch return;
+            wm.pending.append(wm.gpa, wm.commands[node.command]) catch {
+                std.log.err("out of memory: key binding {d} dropped", .{node.command});
+                return;
+            };
             wm.obj.manageDirty();
         },
         else => {},

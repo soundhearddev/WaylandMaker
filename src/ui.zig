@@ -72,9 +72,6 @@ const KEY_DOWN: u32 = 108;
 // Look (Window Maker / NeXT)
 // ----------------------------------------------------------------------------
 
-const font_title: [:0]const u8 = "Sans Bold 10";
-const font_item: [:0]const u8 = "Sans 10";
-
 const title_h: i32 = 22;
 const item_h: i32 = 20;
 /// Space kept free above and below a menu that is taller than the output.
@@ -608,7 +605,7 @@ pub const Ui = struct {
             return;
         }
         const b = ui.barAt(s) orelse return;
-        if (b.kind != .clip) return;
+        if (b.kind != .clip or !ui.wm.cfg.clip_scroll_workspaces) return;
         const scroll_step = 10.0;
         ui.scroll_acc += value;
         if (@abs(ui.scroll_acc) < scroll_step) return;
@@ -865,11 +862,19 @@ pub const Ui = struct {
         wm.obj.manageDirty();
     }
 
+    /// Runs an `EXEC` entry: split at blanks only, so quotes are NOT honoured
+    /// (unlike `config.parseCommand` for key bindings). Use `SHEXEC` for
+    /// anything that needs quoting.
+    // TODO: use `config.parseCommand` here too, so `EXEC` and `bind = ..., exec`
+    // treat quotes the same way.
     fn spawnWords(ui: *Ui, cmd: []const u8) void {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(ui.gpa());
         var it = std.mem.tokenizeAny(u8, cmd, " \t");
-        while (it.next()) |w| argv.append(ui.gpa(), w) catch return;
+        while (it.next()) |w| argv.append(ui.gpa(), w) catch {
+            std.log.err("out of memory while starting `{s}`", .{cmd});
+            return;
+        };
         proc.spawn(ui.wm, argv.items);
     }
 
@@ -1049,10 +1054,10 @@ pub const Ui = struct {
     // ---- geometry ----------------------------------------------------------
 
     fn measure(lvl: *Level) void {
-        var w: i32 = gfx.measureText(lvl.title, font_title).w + 2 * pad_x;
+        var w: i32 = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w + 2 * pad_x;
         for (lvl.rows) |r| {
-            var rw = gfx.measureText(r.label, font_item).w + 2 * pad_x;
-            if (r.shortcut) |s| rw += gfx.measureText(s, font_item).w + 2 * pad_x;
+            var rw = gfx.measureText(r.label, gfx.fonts.menuItem()).w + 2 * pad_x;
+            if (r.shortcut) |s| rw += gfx.measureText(s, gfx.fonts.menuItem()).w + 2 * pad_x;
             if (r.kind == .submenu) rw += arrow_w;
             w = @max(w, rw);
         }
@@ -1626,8 +1631,8 @@ pub const Ui = struct {
         cv.clear(col_bg);
 
         cv.vGradient(1, 1, lvl.w - 2, title_h - 1, col_title_top, col_title_bot);
-        const tw = gfx.measureText(lvl.title, font_title).w;
-        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, font_title, col_hi_text);
+        const tw = gfx.measureText(lvl.title, gfx.fonts.menuTitle()).w;
+        cv.drawText(lvl.title, @divTrunc(lvl.w - tw, 2), 3, gfx.fonts.menuTitle(), col_hi_text);
 
         const first = lvl.scroll;
         const last = @min(lvl.rows.len, first + shown(lvl));
@@ -1636,10 +1641,10 @@ pub const Ui = struct {
             const hot = r.enabled and lvl.hover != null and lvl.hover.? == i;
             if (hot) cv.fillRect(2, y, lvl.w - 4, item_h, col_hi_bg);
             const tc = if (hot) col_hi_text else if (r.enabled) col_text else col_disabled;
-            cv.drawText(r.label, pad_x, y + 2, font_item, tc);
+            cv.drawText(r.label, pad_x, y + 2, gfx.fonts.menuItem(), tc);
             if (r.shortcut) |s| {
-                const sw = gfx.measureText(s, font_item).w;
-                cv.drawText(s, lvl.w - sw - pad_x, y + 2, font_item, tc);
+                const sw = gfx.measureText(s, gfx.fonts.menuItem()).w;
+                cv.drawText(s, lvl.w - sw - pad_x, y + 2, gfx.fonts.menuItem(), tc);
             }
             if (r.kind == .submenu) {
                 const cx = lvl.w - pad_x;

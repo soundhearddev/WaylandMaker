@@ -157,6 +157,8 @@ const named_colors = [_]NamedColor{
 /// A hex digit run of 1..4 digits per channel, scaled to 8 bits.
 fn hexChannel(digits: []const u8) ?u32 {
     if (digits.len == 0 or digits.len > 4) return null;
+    // `parseInt` would also take a sign here ("+1"); only hex digits are valid.
+    for (digits) |ch| if (!std.ascii.isHex(ch)) return null;
     const v = std.fmt.parseInt(u32, digits, 16) catch return null;
     // 1 digit: 0xF -> 0xFF; 2: as is; 3: top 8 of 12 bits; 4: top 8 of 16.
     return switch (digits.len) {
@@ -343,6 +345,8 @@ const c = @cImport({
 /// No icon is anywhere near this; a bigger file is not one.
 pub const max_file: usize = 1 << 20;
 
+// TODO: `fsmenu.zig` also uses this to read menu files, which has nothing to do
+// with XPM; a shared "read a small file" helper would be the better home.
 /// Read `path` completely (at most `max_file` bytes). null if it is missing,
 /// unreadable, or too big. Caller frees.
 pub fn readFile(gpa: std.mem.Allocator, path: [:0]const u8) ?[]u8 {
@@ -550,4 +554,10 @@ test "load: missing, directory and valid files" {
     const p = load(gpa, path) orelse return error.LoadFailed;
     defer p.deinit(gpa);
     try testing.expectEqual(@as(u32, 4), p.width);
+}
+
+test "parseColor: a sign or other non-hex character in #rrggbb is an error, not a colour" {
+    try testing.expectEqual(magenta, parseColor("#+12+34+56"));
+    try testing.expectEqual(magenta, parseColor("#12-456"));
+    try testing.expectEqual(@as(u32, 0xff112233), parseColor("#112233"));
 }

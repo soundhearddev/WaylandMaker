@@ -26,7 +26,7 @@
 | `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
 | `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |
 | `compatibility.zig` | Unused legacy stub, not imported anywhere except `root.zig` | no |
-| `root.zig` | Re-exports every module so `main.zig` and tests can reach them by name | no |
+| `root.zig` | Re-exports the core modules so `main.zig` and tests can reach them by name (not all: `dock`, `shm`, `fsmenu`, `xpm`, `wm_menu`, `wm_attr` are tested via `main.zig` instead) | no |
 | `model_test.zig` | Invariant tests without a compositor | – |
 
 Everything that modifies the model can be tested without a compositor with `zig build test` (102 tests as of this writing).

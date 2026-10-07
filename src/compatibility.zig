@@ -1,6 +1,10 @@
-// TODO: INTEGRATE INTO MAINLINE
-
 // SPDX-License-Identifier: 0BSD
+//
+// LEGACY STUB -- not used by the running window manager. Only `root.zig`
+// imports it; the real implementations live in wm_attr.zig (attributes),
+// dockapp.zig / dock.zig (Dock and Clip) and wm_files.zig (loading). Kept
+// for reference until someone decides whether to delete it (see
+// docs/ARCHITECTURE.md). The notes below describe the original idea.
 //
 // WindowMaker Compatibility Layer
 // Provides FFI bindings and abstraction for WindowMaker C code.

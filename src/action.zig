@@ -217,6 +217,10 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .focus_first_column => if (strip.columns.first()) |c| setActiveColumn(wm, strip, c),
         .focus_last_column => if (strip.columns.last()) |c| setActiveColumn(wm, strip, c),
 
+        // TODO: for floating windows `focus_up` steps DOWN the stack and
+        // `focus_down` steps UP (see `focusFloatingStep`, where "up" means
+        // toward the top). Looks inverted; check what is intended before
+        // changing it.
         .focus_up => if (focusedWindow(wm)) |w| {
             if (w.mode == .floating) {
                 focusFloatingStep(wm, w, .down);
@@ -299,8 +303,13 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 
         // ---- workspaces --------------------------------------------------------
         .workspace => |i| switchWorkspace(wm, out, i),
-        .workspace_next => switchWorkspace(wm, out, (out.active + 1) % out.workspace_count),
-        .workspace_prev => switchWorkspace(wm, out, (out.active + out.workspace_count - 1) % out.workspace_count),
+        // `workspace_wrap = false`: stop at the last / first workspace.
+        .workspace_next => if (cfg.workspace_wrap or out.active + 1 < out.workspace_count) {
+            switchWorkspace(wm, out, (out.active + 1) % out.workspace_count);
+        },
+        .workspace_prev => if (cfg.workspace_wrap or out.active > 0) {
+            switchWorkspace(wm, out, (out.active + out.workspace_count - 1) % out.workspace_count);
+        },
         .move_to_workspace => |i| sendToWorkspace(wm, out, i),
     }
 }
@@ -309,9 +318,6 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 // Helpers
 // ----------------------------------------------------------------------------
 
-/// Toggle between tiled and floating. Fullscreen is left first, because a
-/// fullscreen window has to be a normal window again before it can change
-/// layer.
 /// Work on the next/previous output. Focus goes to the window that was
 /// active there, or nowhere if the output is empty: the point is that the
 /// next workspace/spawn/move command then applies to THAT output.
@@ -392,6 +398,9 @@ fn showAll(wm: *WindowManager, out: *Output) void {
     }
 }
 
+/// Toggle between tiled and floating. Fullscreen is left first, because a
+/// fullscreen window has to be a normal window again before it can change
+/// layer.
 pub fn toggleFloating(wm: *WindowManager, w: *Window) void {
     workspace.leaveFullscreen(w);
     switch (w.mode) {

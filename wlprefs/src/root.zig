@@ -17,7 +17,6 @@
 
 const std = @import("std");
 const wayland = @import("wayland");
-const xkb = @import("xkbcommon");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 

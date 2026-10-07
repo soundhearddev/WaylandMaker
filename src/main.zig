@@ -60,7 +60,6 @@ test {
     _ = @import("fsmenu.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
-    _ = @import("wm_prefs.zig");
     _ = @import("gfx.zig");
     _ = @import("shm.zig");
     _ = ui_mod;

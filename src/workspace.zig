@@ -11,7 +11,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
-const config = @import("config.zig");
 
 const Window = types.Window;
 const Column = types.Column;

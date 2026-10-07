@@ -14,10 +14,3 @@ pub const wm_files = @import("wm_files.zig");
 pub const proc = @import("process.zig");
 pub const ui = @import("ui.zig");
 pub const plist = @import("plist.zig");
-
-/// SKELETT (siehe docs/WPREFS.md), noch keine funktionierende
-/// Implementierung. Re-exportiert wie jedes andere Modul hier, damit ein
-/// künftiges eigenständiges "wmaker-wl-prefs"-GUI-Projekt (analog
-/// examples/wl-clock) es schon jetzt als Abhängigkeit gegen
-/// dieses Repo bauen und iterativ füllen kann.
-pub const prefs_model = @import("wm_prefs.zig");

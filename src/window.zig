@@ -253,8 +253,16 @@ pub fn placeNew(wm: *WindowManager) void {
 
         if (!attrs.is("unfocusable")) {
             workspace.activate(win);
+            // `focus_new_windows = false`: open in the background while some
+            // other window holds the focus. (With nothing focused, the new
+            // window still takes it, or the keyboard would have no target.)
+            const background = !wm.cfg.focus_new_windows and blk: {
+                const s = wm.seats.first() orelse break :blk false;
+                const f = s.focused orelse break :blk false;
+                break :blk !f.closed and f.workspace != null;
+            };
             // A window opened on another workspace must not steal the view.
-            if (ws == out.ws()) {
+            if (ws == out.ws() and !background) {
                 wm.focus_request = win;
                 wm.follow_request = true;
             }

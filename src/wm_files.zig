@@ -31,7 +31,8 @@ const wm_attr = @import("wm_attr.zig");
 const dockapp = @import("dockapp.zig");
 const config = @import("config.zig");
 
-const max_file = 1 << 20;
+/// Largest configuration file we read (1 MiB); bigger ones are refused.
+const max_file: usize = 1 << 20;
 
 /// Window Maker's user root: $WMAKER_USER_ROOT, else ~/GNUstep.
 pub fn userRoot(a: std.mem.Allocator) !?[]const u8 {
@@ -87,9 +88,21 @@ pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]c
     return list.toOwnedSlice(a);
 }
 
+/// Read one candidate file. A missing file is normal (not every candidate
+/// exists) and stays silent; anything else -- no permission, larger than
+/// `max_file` -- is logged instead of making the file vanish without a trace.
+fn readCandidate(io: std.Io, a: std.mem.Allocator, p: []const u8) ?[]const u8 {
+    return std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch |err| {
+        if (!std.mem.eql(u8, @errorName(err), "FileNotFound")) {
+            std.log.warn("cannot read {s}: {t}", .{ p, err });
+        }
+        return null;
+    };
+}
+
 fn readFirst(io: std.Io, a: std.mem.Allocator, paths: []const []const u8) ?struct { path: []const u8, text: []const u8 } {
     for (paths) |p| {
-        const text = std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch continue;
+        const text = readCandidate(io, a, p) orelse continue;
         return .{ .path = p, .text = text };
     }
     return null;
@@ -128,7 +141,7 @@ fn loadMenu(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config, own: ?[
     // The first file that exists AND parses wins; a broken one is reported
     // and the next candidate is tried.
     for (paths) |p| {
-        const text = std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch continue;
+        const text = readCandidate(io, a, p) orelse continue;
         var diag: plist.Diag = .{};
         if (wm_menu.parseDiag(a, text, &diag)) |parsed| {
             for (parsed.warnings) |w| std.log.warn("root menu {s}: {s}", .{ p, w });
@@ -187,7 +200,7 @@ fn findAutostart(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]co
 fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !dockapp.List {
     const paths = try candidates(a, .dockapps, own, root);
     for (paths) |p| {
-        const text = std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch continue;
+        const text = readCandidate(io, a, p) orelse continue;
         const is_wmstate = std.mem.endsWith(u8, p, "/WMState");
 
         var diag: plist.Diag = .{};
@@ -211,6 +224,8 @@ fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]con
 }
 
 /// argv -> one command line, for the menu's `exec` entries.
+// TODO: on out-of-memory this silently yields "" (an empty menu command);
+// `loadMenu` could return the error instead.
 fn join(a: std.mem.Allocator, argv: []const []const u8) []const u8 {
     return std.mem.join(a, " ", argv) catch "";
 }

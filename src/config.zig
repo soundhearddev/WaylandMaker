@@ -80,6 +80,12 @@ pub const max_font_len = 63;
 /// Hard upper bound; Output holds workspaces in a fixed array.
 pub const max_workspaces = 16;
 
+/// Upper bound for every pixel-valued option (gaps, border, sizes, offsets).
+/// The layout multiplies and sums these per column and window; an absurd
+/// value such as `gap = 2000000000` would overflow `i32` there and crash the
+/// window manager, so it is refused when the file is read instead.
+pub const max_pixels: i32 = 10_000;
+
 /// xkbcommon allows at most four layouts per keymap.
 pub const max_bind_layouts = 4;
 
@@ -114,6 +120,7 @@ pub const Config = struct {
     // ---- menus ----------------------------------------------------------
     /// Which side of its parent a submenu opens on first. It flips to the
     /// other side when it would leave the screen.
+    // TODO: parsed and editable in wlprefs, but ui.zig does not read it yet.
     menu_submenu_align: SubmenuAlign = .right,
 
     // ---- windows / focus --------------------------------------------------
@@ -505,7 +512,7 @@ fn applyOption(
     inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
             const v = std.fmt.parseInt(i32, value, 10) catch return error.Invalid;
-            if (v < 0) return error.Invalid;
+            if (v < 0 or v > max_pixels) return error.Invalid;
             @field(cfg, name) = v;
             return;
         }
@@ -529,7 +536,17 @@ fn applyOption(
         }
     }
 
-    inline for (.{ "dock_enabled", "dock_on_top", "dock_reserve_space", "clip_enabled", "clip_on_top", "clip_collapsed" }) |name| {
+    inline for (.{
+        "dock_enabled",
+        "dock_on_top",
+        "dock_reserve_space",
+        "clip_enabled",
+        "clip_on_top",
+        "clip_collapsed",
+        "focus_new_windows",
+        "workspace_wrap",
+        "clip_scroll_workspaces",
+    }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = try parseBool(value);
             return;
@@ -586,6 +603,12 @@ fn applyOption(
             try list.append(a, try a.dupe(u8, name));
         }
         cfg.workspace_names = try list.toOwnedSlice(a);
+    } else if (eql(u8, key, "font_menu_title")) {
+        cfg.font_menu_title = try parseFont(a, value);
+    } else if (eql(u8, key, "font_menu")) {
+        cfg.font_menu = try parseFont(a, value);
+    } else if (eql(u8, key, "font_dock")) {
+        cfg.font_dock = try parseFont(a, value);
     } else if (eql(u8, key, "mouse_mod")) {
         cfg.mouse_mod = parseMods(value) orelse return error.Invalid;
     } else if (eql(u8, key, "terminal")) {
@@ -1071,4 +1094,42 @@ test "the shipped themes are valid themes and the shipped config has no warnings
 
     // The built-in default config parses without a single warning.
     try std.testing.expectEqual(@as(u32, 0), def.parse_warnings);
+}
+
+test "fonts and the focus/wrap/scroll switches are parsed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(),
+        \\font_menu_title = Serif Bold 12
+        \\font_menu = Sans 11
+        \\font_dock = Sans 7
+        \\focus_new_windows = no
+        \\workspace_wrap = off
+        \\clip_scroll_workspaces = false
+        \\font_menu = 
+    , &cfg, &binds, "<test>");
+    try std.testing.expectEqualStrings("Serif Bold 12", cfg.font_menu_title);
+    // The last line is an empty font: refused, the previous value stays.
+    try std.testing.expectEqualStrings("Sans 11", cfg.font_menu);
+    try std.testing.expectEqualStrings("Sans 7", cfg.font_dock);
+    try std.testing.expect(!cfg.focus_new_windows);
+    try std.testing.expect(!cfg.workspace_wrap);
+    try std.testing.expect(!cfg.clip_scroll_workspaces);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
+test "pixel options above max_pixels are refused instead of overflowing the layout later" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), "gap = 2000000000\nborder_width = 10001\nouter_gap = 10000\n", &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap); // default kept
+    try std.testing.expectEqual(@as(i32, 2), cfg.border_width);
+    try std.testing.expectEqual(@as(i32, 10_000), cfg.outer_gap); // the limit itself is fine
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
 }

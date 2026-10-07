@@ -229,8 +229,9 @@ fn commandKind(name: []const u8) ?CommandKind {
 // ----------------------------------------------------------------------------
 
 /// Maximum nesting depth for menus (plist and text formats).
-/// Prevents stack exhaustion from deeply nested or circular menu structures.
-/// 32 levels allows deeply nested menus while protecting against pathological input.
+/// Prevents stack exhaustion from deeply nested menu structures. 32 levels is
+/// far more than any real menu needs. For the plist form, `plist.max_depth`
+/// (64) bounds the raw nesting before this limit is even reached.
 const MAX_MENU_DEPTH = 32;
 
 /// Maximum number of items in a single menu.
@@ -249,7 +250,7 @@ const Builder = struct {
 
     fn warn(b: *Builder, comptime fmt: []const u8, args: anytype) Error!void {
         if (b.warnings.items.len >= MAX_WARNINGS) {
-            // Silently drop warnings after limit to avoid memory exhaustion
+            // Drop further warnings: a hostile file must not exhaust memory.
             return;
         }
         try b.warnings.append(b.a, try std.fmt.allocPrint(b.a, fmt, args));
@@ -336,7 +337,13 @@ const Builder = struct {
         }
 
         // Submenu: the element after the label is a list.
-        if (t.len > 1 and t[1].items() != null) {
+        if (t[1].items() != null) {
+            // Too deep: drop just this submenu (with a warning) instead of
+            // failing the whole menu, which would also lose that warning.
+            if (b.depth >= MAX_MENU_DEPTH) {
+                try b.warn("`{s}`: menu nesting too deep (limit: {d}), submenu skipped", .{ label, MAX_MENU_DEPTH });
+                return null;
+            }
             const sub = try b.plistMenu(t, label);
             return .{ .label = label, .action = .{ .submenu = sub } };
         }
@@ -344,7 +351,9 @@ const Builder = struct {
         var idx: usize = 1;
         var shortcut: ?[]const u8 = null;
 
-        // Sichere Bounds-Checks für SHORTCUT-Parsing
+        // Optional `SHORTCUT, "key"` before the command. It needs the key and
+        // at least the command after it, otherwise `SHORTCUT` is read as the
+        // (unknown) command name.
         if (idx < t.len) {
             if (t[idx].str()) |s| {
                 if (std.mem.eql(u8, s, "SHORTCUT") and t.len > idx + 2) {
@@ -354,7 +363,7 @@ const Builder = struct {
             }
         }
 
-        // Überprüfe, dass wir noch einen Command haben
+        // Defensive: with the length check above this cannot happen.
         if (idx >= t.len) {
             try b.warn("`{s}`: entry has no command after SHORTCUT, skipped", .{label});
             return null;
@@ -374,6 +383,16 @@ const Builder = struct {
         return .{ .label = label, .shortcut = shortcut, .action = act };
     }
 
+    /// Append a finished submenu to its parent, honouring the item cap the
+    /// leaf entries are already held to.
+    fn addSubmenu(b: *Builder, parent: *std.ArrayList(Item), title: []const u8, m: *const Menu) Error!void {
+        if (parent.items.len >= MAX_ITEMS_PER_MENU) {
+            try b.warn("menu too many items (limit: {d}), submenu `{s}` dropped", .{ MAX_ITEMS_PER_MENU, title });
+            return;
+        }
+        try parent.append(b.a, .{ .label = title, .action = .{ .submenu = m } });
+    }
+
     // ---- text form ----------------------------------------------------------
 
     fn fromText(b: *Builder, text: []const u8) Error!*const Menu {
@@ -385,6 +404,10 @@ const Builder = struct {
         var root: ?*const Menu = null;
 
         var in_block_comment = false;
+        // Nesting of `MENU`s we refused for being too deep. Their items and
+        // matching `END`s are skipped as a block; otherwise the first `END`
+        // would close the wrong (outer) menu and the structure would be wrong.
+        var skip_depth: usize = 0;
         var lines = std.mem.splitScalar(u8, text, '\n');
         var line_no: usize = 0;
         while (lines.next()) |raw| {
@@ -413,6 +436,15 @@ const Builder = struct {
                 continue;
             };
 
+            if (skip_depth > 0) {
+                if (std.mem.eql(u8, word, "MENU")) {
+                    skip_depth += 1;
+                } else if (std.mem.eql(u8, word, "END")) {
+                    skip_depth -= 1;
+                }
+                continue;
+            }
+
             var shortcut: ?[]const u8 = null;
             if (std.mem.eql(u8, word, "SHORTCUT")) {
                 shortcut = nextWord(&line);
@@ -425,7 +457,8 @@ const Builder = struct {
 
             if (std.mem.eql(u8, word, "MENU")) {
                 if (stack.items.len >= MAX_MENU_DEPTH) {
-                    try b.warn("line {d}: menu nesting too deep (limit: {d}), ignored", .{ line_no, MAX_MENU_DEPTH });
+                    try b.warn("line {d}: menu nesting too deep (limit: {d}), menu skipped", .{ line_no, MAX_MENU_DEPTH });
+                    skip_depth = 1;
                     continue;
                 }
                 try stack.append(b.a, .{ .title = title });
@@ -437,13 +470,9 @@ const Builder = struct {
                 const m = try b.a.create(Menu);
                 m.* = .{ .title = frame.title, .items = try frame.items.toOwnedSlice(b.a) };
                 if (stack.items.len == 0) {
+                    if (root != null) try b.warn("line {d}: a second top-level menu `{s}` replaces the first", .{ line_no, frame.title });
                     root = m;
-                } else {
-                    try stack.items[stack.items.len - 1].items.append(b.a, .{
-                        .label = frame.title,
-                        .action = .{ .submenu = m },
-                    });
-                }
+                } else try b.addSubmenu(&stack.items[stack.items.len - 1].items, frame.title, m);
             } else {
                 if (stack.items.len > 0 and stack.items[stack.items.len - 1].items.items.len >= MAX_ITEMS_PER_MENU) {
                     try b.warn("line {d}: menu too many items (limit: {d}), stopping", .{ line_no, MAX_ITEMS_PER_MENU });
@@ -476,41 +505,36 @@ const Builder = struct {
         }
 
         // MENUs that were never closed still become part of the tree.
-        while (stack.pop()) |*frame_ptr| {
-            var frame = frame_ptr.*;
+        while (stack.pop()) |popped| {
+            var frame = popped;
             try b.warn("menu `{s}` is not closed with END", .{frame.title});
             const m = try b.a.create(Menu);
             m.* = .{ .title = frame.title, .items = try frame.items.toOwnedSlice(b.a) };
             if (stack.items.len == 0) {
                 root = m;
-            } else {
-                try stack.items[stack.items.len - 1].items.append(b.a, .{
-                    .label = frame.title,
-                    .action = .{ .submenu = m },
-                });
-            }
+            } else try b.addSubmenu(&stack.items[stack.items.len - 1].items, frame.title, m);
         }
         return root orelse error.Empty;
     }
 };
 
 /// Next whitespace-separated word, or a "quoted string". Advances `line`.
+/// An unterminated quote takes the rest of the line.
 fn nextWord(line: *[]const u8) ?[]const u8 {
     const s = std.mem.trimStart(u8, line.*, " \t");
     if (s.len == 0) return null;
-    if (s.len > 0 and s[0] == '"') {
-        // Sichere Suche nach schließendem Quote, beginne nach dem öffnenden
-        const end = if (s.len > 1) std.mem.indexOfScalarPos(u8, s, 1, '"') else null;
-        const close_pos = end orelse s.len;
-        const word = if (close_pos < s.len) s[1..close_pos] else s[1..];
-        // Positionierung: wenn Quote gefunden, dann hinter dem schließenden Quote
-        line.* = if (close_pos < s.len and close_pos + 1 < s.len) s[close_pos + 1 ..] else "";
-        return word;
+    if (s[0] == '"') {
+        const close = if (s.len > 1) std.mem.indexOfScalarPos(u8, s, 1, '"') else null;
+        if (close) |c| {
+            line.* = s[c + 1 ..];
+            return s[1..c];
+        }
+        line.* = "";
+        return s[1..];
     }
     const end = std.mem.indexOfAny(u8, s, " \t") orelse s.len;
-    const word = if (end <= s.len) s[0..end] else s;
-    line.* = if (end < s.len) s[end..] else "";
-    return word;
+    line.* = s[end..];
+    return s[0..end];
 }
 
 /// `"xterm -e vi"` -> `xterm -e vi` when the whole remainder is one quoted
@@ -520,7 +544,7 @@ fn unquoteWhole(s: []const u8) []const u8 {
     if (s[0] != '"' or s[s.len - 1] != '"') return s;
 
     const inner = s[1 .. s.len - 1];
-    // Prüfe auf zusätzliche unescapierte Quotes im inneren
+    // A quote inside means this is several quoted words, not one string.
     if (std.mem.indexOfScalar(u8, inner, '"') != null) return s;
 
     return inner;
@@ -794,4 +818,44 @@ test "nextWord and unquoteWhole survive odd quoting" {
     try std.testing.expectEqualStrings("", unquoteWhole("\"\""));
     try std.testing.expectEqualStrings("a b", unquoteWhole("\"a b\""));
     try std.testing.expectEqualStrings("\"a\" \"b\"", unquoteWhole("\"a\" \"b\""));
+}
+
+test "text form: a too-deep MENU is skipped as a block, the outer structure survives" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..MAX_MENU_DEPTH) |_| try buf.appendSlice(arena, "\"m\" MENU\n");
+    // This one is one level too many; it and its content are skipped ...
+    try buf.appendSlice(arena, "\"too deep\" MENU\n");
+    try buf.appendSlice(arena, "\"inside\" EXEC x\n");
+    try buf.appendSlice(arena, "\"too deep\" END\n");
+    // ... and this item still belongs to the innermost real menu.
+    try buf.appendSlice(arena, "\"after\" EXEC y\n");
+    for (0..MAX_MENU_DEPTH) |_| try buf.appendSlice(arena, "\"m\" END\n");
+
+    const p = try parse(arena, buf.items);
+    try std.testing.expectEqual(@as(usize, 1), p.warnings.len);
+    var m = p.menu;
+    var levels: usize = 1;
+    while (m.items.len > 0 and m.items[0].action == .submenu) : (levels += 1) m = m.items[0].action.submenu;
+    try std.testing.expectEqual(@as(usize, MAX_MENU_DEPTH), levels);
+    try std.testing.expectEqual(@as(usize, 1), m.items.len);
+    try std.testing.expectEqualStrings("after", m.items[0].label);
+}
+
+test "text form: a second top-level menu is reported" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(),
+        \\"One" MENU
+        \\  "a" EXEC a
+        \\"One" END
+        \\"Two" MENU
+        \\  "b" EXEC b
+        \\"Two" END
+    );
+    try std.testing.expectEqualStrings("Two", r.menu.title);
+    try std.testing.expectEqual(@as(usize, 1), r.warnings.len);
 }

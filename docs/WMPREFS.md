@@ -198,16 +198,9 @@ In empfohlener Reihenfolge, jeder Schritt für sich klein und testbar:
 
 1. Workspace-Namen (`workspace_names` in `config.conf`, §3.2) -- kleinster Einstieg, kein neues
    Konzept, nur ein weiteres `Config`-Feld nach bestehendem Muster.
-2. Grundgerüst `src/wm_prefs.zig` in diesem Repo: reine, GUI-freie Lese-/Schreib-Bibliothek
-   ("lade Config in ein GUI-freundliches, veränderliches In-Memory-Modell; schreibe es wieder als
-   `config.conf`/`attributes.conf`/`dockapps.conf`-Text"). Das ist die Grundlage, auf der sowohl
-   eine künftige GUI als auch z.B. ein `wmaker-wl-prefs --set key=value`-CLI-Modus aufbauen können,
-   ohne dass die GUI die Parser/Serializer selbst duplizieren muss. **Ein erster Entwurf davon
-   liegt bereits in diesem Commit, siehe `src/wm_prefs.zig`** -- bewusst nur Skelett mit
-   Kommentaren, keine vollständige Implementierung.
-3. Minimales Theme-Datenmodell (§3.3, nur Farben+Schriften, keine Pixmap-Texturen) inklusive
+2. Minimales Theme-Datenmodell (§3.3, nur Farben+Schriften, keine Pixmap-Texturen) inklusive
    `config.conf`-Schlüssel `theme = <pfad>` und Fallback auf die eingebauten Defaults.
-4. Erst danach: das eigentliche `wmaker-wl-prefs`-GUI-Projekt, aufbauend auf 1--3.
+3. Erst danach: das eigentliche `wmaker-wl-prefs`-GUI-Projekt, aufbauend auf 1--3.
 
 Phase 5 (Dock/Clip) und Phase 3 (Titelleisten) aus `docs/TODO.md` bleiben Voraussetzung für die
 DockApps- bzw. jede zukünftige Titelleisten-bezogene GUI-Seite und sind bewusst nicht Teil dieser

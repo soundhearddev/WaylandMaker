@@ -47,7 +47,6 @@ pub const arrow: i32 = 16;
 const font_logo: [:0]const u8 = "Sans Bold 22";
 const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
-const font_name: [:0]const u8 = "Sans 8";
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 const col_light = gfx.Color.rgb(0xffffff);
@@ -502,7 +501,7 @@ pub fn drawClip(cv: *gfx.Canvas, m: *const Model, v: ClipView) void {
         drawCentered(cv, num, x0, 10, tile, font_number, col_text);
         var name_buf: [24:0]u8 = undefined;
         const clipped = clipName(&name_buf, name);
-        drawCentered(cv, clipped, x0, 41, tile, font_name, col_text);
+        drawCentered(cv, clipped, x0, 41, tile, gfx.fonts.dockLabel(), col_text);
     } else {
         drawCentered(cv, num, x0, 20, tile, font_number, col_text);
     }
