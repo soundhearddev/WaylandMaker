@@ -4,11 +4,12 @@
 //
 // What makes a program a DockApp is only this (see ../../docs/DOCKAPPS.md):
 //
-//   1. The xdg_toplevel's app_id is "dockapp:<name>". wmaker-wl matches <name>
-//      against the entry of that name in dockapps.conf.
+//   1. The xdg_toplevel's app_id is "dockapp:<name>", <name> being the
+//      program's own name (wl-clock): "Keep Icon" saves `<name>` as command.
 //   2. The window asks for one fixed size, equal min and max, at most 64x64.
-//      wmaker-wl then floats it and puts it INTO that entry's tile of the
-//      Dock, centred, above the Dock, on every workspace.
+//      wmaker-wl then treats it as an icon, not a window: it sits INTO a Dock
+//      tile (a temporary one, or the WMState entry of that name), centred,
+//      on every workspace, and the close key does not reach it.
 //
 // Like every Window Maker dockapp this one draws its whole 64x64 tile itself,
 // frame included (face.zig), in the look of wmaker-wl's own Dock tiles, so a
@@ -21,8 +22,8 @@
 // and only redraws when what is on screen would change.
 //
 // A click toggles 12/24 hours. Starting it is not its business: put
-// `wl-clock &` in ~/.config/wmaker-wl/autostart, or `autolaunch = yes` on the
-// entry in dockapps.conf.
+// `wl-clock &` in ~/.config/wmaker-wl/autostart (or `AutoLaunch = Yes` on its
+// WMState entry). Without an entry the tile lives as long as the clock does.
 
 const std = @import("std");
 const posix = std.posix;

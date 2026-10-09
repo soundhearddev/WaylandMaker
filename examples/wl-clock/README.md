@@ -41,36 +41,39 @@ Zwei Dinge machen ein Programm zur DockApp, und beide stecken in `src/main.zig`:
 1. `app_id` = `dockapp:<name>`
 2. feste Fenstergröße (Min = Max), höchstens 64×64
 
-Dann setzt wmaker-wl das Fenster **in die Kachel** des Dock-Eintrags mit demselben Namen: mittig,
-über dem Dock, auf allen Workspaces, ohne Rahmen und Titelleiste, und nicht in der Fensterliste.
-Der Eintrag in `~/.config/wmaker-wl/dockapps.conf` (siehe `dockapps.conf.example`):
+Dann behandelt wmaker-wl das Fenster als Icon, nicht als Fenster: Es sitzt **in einer Dock-Kachel**
+(mittig, auf allen Workspaces, ohne Rahmen und Titelleiste, nicht in der Fensterliste) und lässt sich
+nicht mit der Close-Taste (Mod+Q) schließen. Beenden geht über *Kill* im Kachelmenü.
 
-```ini
-[clock]
-command = wl-clock
-position = 0,1
-autolaunch = yes
+Konfiguration gibt es keine. Starte die Uhr einfach, z. B. in `~/.config/wmaker-wl/autostart`:
+
+```sh
+wl-clock &
 ```
 
-`[clock]` und `wl-clock`s `--name` (Standard: `clock`) müssen übereinstimmen. Bis die Uhr da ist,
-zeigt die Kachel ihren Buchstaben; läuft sie, deckt das Fenster die Kachel genau ab.
+Ohne eigenen Dock-Eintrag bekommt sie eine **temporäre Kachel** am Ende des Docks, solange sie läuft.
+*Keep Icon* im Kachelmenü macht die Kachel dauerhaft; wmaker-wl speichert sie in seiner `WMState` mit
+dem Befehl `wl-clock` (deshalb ist `wl-clock` der Standardname). Ab dann kann der Eintrag auch
+`AutoLaunch = Yes` haben, und die Uhr startet mit dem Dock.
 
 ### Mehrere Uhren
 
-Jede Uhr braucht einen eigenen Namen und einen eigenen Eintrag:
+Jede Uhr braucht einen eigenen Namen:
 
-```ini
-[tokyo]
-command = wl-clock --name tokyo --tz Asia/Tokyo --label tokyo
-position = 0,2
-autolaunch = yes
+```sh
+wl-clock &
+wl-clock --name tokyo --tz Asia/Tokyo --label tokyo &
 ```
+
+Beide bekommen eine temporäre Kachel. Für die zweite speichert *Keep Icon* nur den Befehl `tokyo`;
+soll sie dauerhaft sein, trag in der `WMState` einen Eintrag mit `Command = "wl-clock --name tokyo
+--tz Asia/Tokyo --label tokyo"` und `Name = "tokyo"` ein.
 
 ## Optionen
 
 | Option | Bedeutung |
 |---|---|
-| `-n`, `--name NAME` | `app_id`-Suffix = Name des Eintrags (Standard `clock`; Buchstaben, Ziffern, `_`, `-`) |
+| `-n`, `--name NAME` | `app_id`-Suffix = Name des Programms (Standard `wl-clock`; Buchstaben, Ziffern, `_`, `-`) |
 | `-z`, `--tz ZONE` | Zeitzone, z. B. `Europe/Berlin` (Standard: lokale Zeit) |
 | `-l`, `--label TEXT` | statt des Monatsnamens, bis 8 Zeichen |
 | `--12h` / `--24h` | Startmodus (Klick schaltet um) |
@@ -100,6 +103,5 @@ wl-clock/
 ├── src/main.zig           # Wayland-Client, Ereignisschleife
 ├── src/face.zig           # Kachel zeichnen (rein, getestet)
 ├── src/options.zig        # Kommandozeile (rein, getestet)
-├── dockapps.conf.example  # Einträge für wmaker-wl
 └── README.md
 ```

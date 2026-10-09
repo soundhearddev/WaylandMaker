@@ -3,12 +3,11 @@
 // Command line of wl-clock. Pure, so it can be tested without a compositor.
 //
 // The one option that matters for the dock is --name: the window's app_id is
-// "dockapp:<name>", and that is what wmaker-wl matches against the entry of
-// the same name in dockapps.conf to put the window into that entry's tile.
-// Two clocks therefore need two names:
-//
-//     [berlin]                          [tokyo]
-//     command = wl-clock                command = wl-clock --name tokyo --tz Asia/Tokyo --label tokyo
+// "dockapp:<name>". The default is the program's own name, `wl-clock`, so
+// "Keep Icon" in wmaker-wl (which saves the command `<name>`) starts it
+// again. Two clocks at once need two names (`--name tokyo`); a Dock entry
+// for the second one then has to be written into WMState by hand, because
+// its command is not `<name>`.
 
 const std = @import("std");
 
@@ -16,10 +15,10 @@ pub const usage =
     \\usage: wl-clock [options]
     \\
     \\A 64x64 clock for the dock of wmaker-wl (a DockApp). It sets its app_id to
-    \\"dockapp:<name>", so wmaker-wl puts it into the dock tile of that name.
+    \\"dockapp:<name>"; wmaker-wl docks it by itself, no entry or config needed.
     \\
     \\options:
-    \\  -n, --name NAME     app_id suffix, the entry name in dockapps.conf (default: clock)
+    \\  -n, --name NAME     app_id suffix, app_id suffix; keep it equal to the program name (default: wl-clock)
     \\  -z, --tz ZONE       time zone, e.g. Europe/Berlin or Asia/Tokyo (default: local)
     \\  -l, --label TEXT    shown instead of the month name (up to 8 characters)
     \\      --12h           start in 12-hour mode with AM/PM
@@ -32,7 +31,7 @@ pub const usage =
 ;
 
 pub const Options = struct {
-    name: []const u8 = "clock",
+    name: []const u8 = "wl-clock",
     tz: ?[:0]const u8 = null,
     label: ?[]const u8 = null,
     hour12: bool = false,
@@ -134,7 +133,7 @@ fn run(args: []const [:0]const u8) Error!Options {
 
 test "no arguments: the defaults" {
     const o = try run(&.{});
-    try std.testing.expectEqualStrings("clock", o.name);
+    try std.testing.expectEqualStrings("wl-clock", o.name);
     try std.testing.expect(o.tz == null and o.label == null and o.snapshot == null);
     try std.testing.expect(!o.hour12);
     try std.testing.expect(o.seconds);
