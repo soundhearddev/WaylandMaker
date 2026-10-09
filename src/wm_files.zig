@@ -59,17 +59,18 @@ pub fn ownDir(a: std.mem.Allocator) !?[]const u8 {
 }
 
 /// Where wmaker-wl keeps what the user changed with the mouse in the Dock
-/// and the Clip: `$XDG_STATE_HOME/wmaker-wl/dock.conf`, else
-/// `~/.local/state/wmaker-wl/dock.conf`. Not under ~/.config on purpose:
+/// and the Clip, as a Window Maker WMState property list:
+/// `$XDG_STATE_HOME/wmaker-wl/WMState`, else
+/// `~/.local/state/wmaker-wl/WMState`. Not under ~/.config on purpose:
 /// wmaker-wl writes this file itself, so it must never be a file the user
 /// edits, keeps in dotfiles or finds replaced after a reload.
 pub fn statePath(a: std.mem.Allocator) !?[]const u8 {
     if (std.c.getenv("XDG_STATE_HOME")) |x| {
         const s = std.mem.span(x);
-        if (s.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/dock.conf", .{s});
+        if (s.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/WMState", .{s});
     }
     if (std.c.getenv("HOME")) |h| {
-        return try std.fmt.allocPrint(a, "{s}/.local/state/wmaker-wl/dock.conf", .{std.mem.span(h)});
+        return try std.fmt.allocPrint(a, "{s}/.local/state/wmaker-wl/WMState", .{std.mem.span(h)});
     }
     return null;
 }
@@ -77,17 +78,17 @@ pub fn statePath(a: std.mem.Allocator) !?[]const u8 {
 /// Write the Dock state atomically: a temporary file next to the target,
 /// then rename(2) over it, so a crash or a full disk leaves the old state
 /// untouched. Creates the directory. Entries that cannot be written back
-/// faithfully are left out (and logged); see `dockapp.render`.
+/// faithfully are left out (and logged); see `dockapp.render`. The file is a WMState property list.
 pub fn saveDockState(
     io: std.Io,
     gpa: std.mem.Allocator,
     path: []const u8,
-    apps: []const dockapp.DockApp,
+    list: dockapp.List,
     state: dockapp.State,
 ) !void {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    const skipped = try dockapp.render(&aw.writer, apps, state);
+    const skipped = try dockapp.render(&aw.writer, list, state);
     if (skipped > 0) std.log.warn("dock state: {d} entries cannot be written and were left out", .{skipped});
 
     const cwd = std.Io.Dir.cwd();
@@ -122,7 +123,8 @@ pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]c
             if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Library/WindowMaker/autostart", .{d}));
         },
         .dockapps => {
-            if (own) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/dockapps.conf", .{d}));
+            // wmaker-wl's own copy is the state file (statePath); the only
+            // other source is Window Maker's own WMState.
             if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Defaults/WMState", .{d}));
         },
     }
@@ -237,48 +239,39 @@ fn findAutostart(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]co
     return found.path;
 }
 
-/// DockApps to auto-launch (see dockapp.zig). The own-directory file
-/// (dockapps.conf) is wmaker-wl's plain block format; Window Maker's
-/// WMState is a GNUstep property list, so the two need different parsers
-/// even though `candidates(.dockapps, ...)` treats them as one ordered
-/// list of "the first one that exists wins". A broken file is reported
-/// and the next candidate is tried, same policy as loadMenu.
+/// The Dock and Clip contents: ONE format, Window Maker's WMState property
+/// list (see dockapp.zig). The copy wmaker-wl saved itself (`state_path`)
+/// wins, because it is what the Dock looked like when the session ended;
+/// then, with wmaker compatibility on, ~/GNUstep/Defaults/WMState. A broken
+/// file is reported and the next candidate is tried.
 fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8, state_path: ?[]const u8) !dockapp.List {
-    // The state wmaker-wl saved itself wins over everything the user wrote:
-    // it is what the Dock looked like when the session ended. Only a file
-    // that carries its state block counts (see List.state).
     if (state_path) |sp| if (readCandidate(io, a, sp)) |text| {
-        if (dockapp.parseOwn(a, text)) |l| {
+        var diag: plist.Diag = .{};
+        if (dockapp.parseWMStateAllDiag(a, text, &diag)) |l| {
             if (l.state != null) {
                 std.log.info("dockapps: {d} entries from the saved state {s}", .{ l.apps.len, sp });
                 return l;
             }
-            std.log.warn("dockapps: {s} has no state block; ignored", .{sp});
-        } else |err| std.log.warn("dockapps: saved state {s} is unusable ({t}); using the config", .{ sp, err });
+            std.log.warn("dockapps: {s} has no Dock or Clip section; ignored", .{sp});
+        } else |err| switch (err) {
+            error.Syntax => std.log.warn("dockapps: saved state {s}, {f}; using the next file", .{ sp, diag }),
+            else => std.log.warn("dockapps: saved state {s} is unusable ({t}); using the next file", .{ sp, err }),
+        }
     };
 
     const paths = try candidates(a, .dockapps, own, root);
     for (paths) |p| {
         const text = readCandidate(io, a, p) orelse continue;
-        const is_wmstate = std.mem.endsWith(u8, p, "/WMState");
-
         var diag: plist.Diag = .{};
-        const list = if (is_wmstate)
-            dockapp.parseWMStateAllDiag(a, text, &diag)
-        else
-            dockapp.parseOwn(a, text);
-
-        if (list) |l| {
+        if (dockapp.parseWMStateAllDiag(a, text, &diag)) |l| {
             std.log.info("dockapps: {d} entries from {s}", .{ l.apps.len, p });
             return l;
-        } else |err| {
-            switch (err) {
-                error.Syntax => std.log.warn("dockapps {s}, {f}; trying the next file", .{ p, diag }),
-                else => std.log.warn("dockapps {s} is unusable ({t}); trying the next file", .{ p, err }),
-            }
+        } else |err| switch (err) {
+            error.Syntax => std.log.warn("dockapps {s}, {f}; trying the next file", .{ p, diag }),
+            else => std.log.warn("dockapps {s} is unusable ({t}); trying the next file", .{ p, err }),
         }
     }
-    std.log.info("dockapps: no file found, nothing to auto-launch", .{});
+    std.log.info("dockapps: no WMState found, the Dock starts empty", .{});
     return .{};
 }
 
@@ -315,9 +308,8 @@ test "candidate order: wmaker-wl first, then Window Maker's files" {
     try std.testing.expectEqualStrings("/h/GNUstep/Library/WindowMaker/autostart", auto[1]);
 
     const dock = try candidates(a, .dockapps, "/h/.config/wmaker-wl", "/h/GNUstep");
-    try std.testing.expectEqual(@as(usize, 2), dock.len);
-    try std.testing.expectEqualStrings("/h/.config/wmaker-wl/dockapps.conf", dock[0]);
-    try std.testing.expectEqualStrings("/h/GNUstep/Defaults/WMState", dock[1]);
+    try std.testing.expectEqual(@as(usize, 1), dock.len);
+    try std.testing.expectEqualStrings("/h/GNUstep/Defaults/WMState", dock[0]);
 }
 
 test "autostart candidates respect wmaker compat toggle (root omitted)" {
@@ -353,17 +345,17 @@ test "saveDockState writes atomically and loadDockApps prefers it" {
 
     const base = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-state-test-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    const path = try std.fmt.allocPrint(a, "{s}/nested/wmaker-wl/dock.conf", .{base});
+    const path = try std.fmt.allocPrint(a, "{s}/nested/wmaker-wl/WMState", .{base});
 
     const apps = [_]dockapp.DockApp{
         .{ .name = "term", .command = &.{"foot"}, .y = 0 },
         .{ .name = "notes", .command = &.{"notes"}, .place = .clip, .workspace = 1 },
     };
-    try saveDockState(io, std.testing.allocator, path, &apps, .{ .edge = .left, .clip_collapsed = true });
-    // Saving again replaces it (rename over an existing file) and leaves no
-    // temporary file behind.
-    try saveDockState(io, std.testing.allocator, path, apps[0..1], .{ .edge = .right });
-    try saveDockState(io, std.testing.allocator, path, &apps, .{ .edge = .left, .clip_collapsed = true });
+    const st: dockapp.State = .{ .edge = .left, .clip_collapsed = true };
+    try saveDockState(io, std.testing.allocator, path, .{ .apps = &apps }, st);
+    // Saving again replaces it and leaves no temporary file behind.
+    try saveDockState(io, std.testing.allocator, path, .{ .apps = apps[0..1] }, .{ .edge = .right });
+    try saveDockState(io, std.testing.allocator, path, .{ .apps = &apps }, st);
     const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
     try std.testing.expect(readCandidate(io, a, tmp) == null);
 
@@ -372,28 +364,14 @@ test "saveDockState writes atomically and loadDockApps prefers it" {
     try std.testing.expectEqual(config.DockEdge.left, list.state.?.edge.?);
     try std.testing.expectEqual(@as(?u32, 1), list.apps[1].workspace);
 
-    // A saved empty Dock stays empty: it does not fall back to the config.
-    try saveDockState(io, std.testing.allocator, path, &.{}, .{});
+    // A saved empty Dock stays empty: it does not fall back to anything.
+    try saveDockState(io, std.testing.allocator, path, .{}, .{});
     const empty = try loadDockApps(io, a, null, null, path);
     try std.testing.expectEqual(@as(usize, 0), empty.apps.len);
     try std.testing.expect(empty.state != null);
 
     // No state file: nothing found (and no crash).
-    const none = try loadDockApps(io, a, null, null, try std.fmt.allocPrint(a, "{s}/missing.conf", .{base}));
+    const none = try loadDockApps(io, a, null, null, try std.fmt.allocPrint(a, "{s}/missing", .{base}));
     try std.testing.expect(none.state == null);
     try std.testing.expect(none.isEmpty());
-}
-
-test "a hand-written file at the state path is not mistaken for saved state" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const io = std.testing.io;
-    const base = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-state-test2-{d}", .{std.c.getpid()});
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, base);
-    const path = try std.fmt.allocPrint(a, "{s}/dock.conf", .{base});
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "[x]\ncommand = y\n" });
-    const list = try loadDockApps(io, a, null, null, path);
-    try std.testing.expect(list.isEmpty()); // ignored, nothing else to read
 }

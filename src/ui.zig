@@ -136,6 +136,8 @@ const UiCmd = union(enum) {
     launch: SlotRef,
     app_op: AppRequest,
     toggle_lock: SlotRef,
+    /// "Keep Icon" on a temporary DockApp tile: make it permanent.
+    keep_attached: SlotRef,
     /// "Remove Icon".
     remove: SlotRef,
     /// Clip only: show the entry on this workspace only / on all (null).
@@ -996,10 +998,14 @@ pub const Ui = struct {
                 if (w.closed or (w.workspace == null and !w.minimized)) continue;
                 const id = w.app_id orelse continue;
                 if (!app.matches(id)) continue;
+                // A DockApp takes its own clicks; it is never focused.
+                if (dockapp.isSelfDeclared(id)) return;
                 ui.wm.pending_ui = .{ .focus = w };
                 return;
             }
         }
+        // A temporary DockApp tile has no command to start.
+        if (app.command.len == 0) return;
         proc.spawn(ui.wm, app.command);
         if (ui.model) |*m| {
             m.markLaunching(ref.clip, ref.index, ui.nowMs());
@@ -1028,6 +1034,10 @@ pub const Ui = struct {
                 const list = if (ref.clip) m.clip else m.dock;
                 if (ref.index >= list.len) return;
                 list[ref.index].app.locked = !list[ref.index].app.locked;
+            },
+            .keep_attached => |ref| {
+                const m = if (ui.model) |*mm| mm else return;
+                if (ref.clip or !m.keepAttached(ref.index)) return;
             },
             .remove => |ref| {
                 const m = if (ui.model) |*mm| mm else return;
@@ -1094,7 +1104,10 @@ pub const Ui = struct {
         var last: ?*types.Window = null;
         var it = wm.windows.first();
         while (it) |w| : (it = types.nextWindow(w, wm)) {
-            if (w.closed or w.docked) continue;
+            if (w.closed) continue;
+            // A docked DockApp is only ever touched by "Kill": it has no
+            // title bar, cannot be hidden and is not moved between workspaces.
+            if (w.docked and req.op != .kill) continue;
             const id = w.app_id orelse continue;
             if (!app.matches(id)) continue;
             switch (req.op) {
@@ -1685,7 +1698,7 @@ pub const Ui = struct {
         var arena: std.heap.ArenaAllocator = .init(ui.gpa());
         defer arena.deinit();
         const list = m.exportList(arena.allocator()) catch return;
-        wm_files.saveDockState(wm.io, ui.gpa(), path, list.apps, ui.savedState()) catch |err| {
+        wm_files.saveDockState(wm.io, ui.gpa(), path, list, ui.savedState()) catch |err| {
             std.log.warn("dock: cannot save the state to {s}: {t}", .{ path, err });
             return;
         };
@@ -1756,6 +1769,25 @@ pub const Ui = struct {
         return m.setRunning(ids.items);
     }
 
+    /// Window Maker puts every started DockApp into the Dock. Here: a
+    /// self-declared (`dockapp:<name>`), fixed-size window without a tile
+    /// gets a temporary one (Model.attach). True if a tile was added.
+    fn attachDockApps(ui: *Ui, m: *dock_mod.Model) bool {
+        var changed = false;
+        var it = ui.wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
+            if (w.closed) continue;
+            const id = w.app_id orelse continue;
+            const name = dockapp.declaredName(id) orelse continue;
+            if (name.len == 0 or !validAppId(id)) continue;
+            const fixed = w.min_w > 0 and w.min_w == w.max_w and w.min_h > 0 and w.min_h == w.max_h;
+            if (!fixed or m.dockSlotFor(id) != null) continue;
+            _ = m.attach(ui.gpa(), name) catch continue;
+            changed = true;
+        }
+        return changed;
+    }
+
     /// Dock and Clip live on the first output. Everything about them that
     /// touches river happens here (manage sequence), like the menus.
     fn syncBars(ui: *Ui) void {
@@ -1780,7 +1812,18 @@ pub const Ui = struct {
             return;
         };
 
-        if (ui.updateRunning(m) or m.expireLaunching(ui.nowMs(), launch_timeout_ms)) {
+        // Every DockApp gets a tile (a temporary one if it has no entry),
+        // and a temporary tile goes with its program.
+        const attached = ui.attachDockApps(m);
+        const running = ui.updateRunning(m);
+        const expired = m.expireLaunching(ui.nowMs(), launch_timeout_ms);
+        const pruned = m.pruneAttached();
+        if (pruned) {
+            ui.dock.hover = null;
+            ui.dock.drag = null;
+            ui.press = null;
+        }
+        if (attached or running or expired or pruned) {
             ui.dock.dirty = true;
             ui.clip.dirty = true;
         }
@@ -1965,7 +2008,11 @@ pub const Ui = struct {
             const all_hidden = running and st.hidden == st.open;
 
             // Window Maker's per-icon entries, in its order.
-            try rows.append(ui.a(), .{ .label = "Launch", .kind = .{ .ui_cmd = .{ .launch = ref } } });
+            try rows.append(ui.a(), .{
+                .label = "Launch",
+                .enabled = app.command.len > 0,
+                .kind = .{ .ui_cmd = .{ .launch = ref } },
+            });
             try rows.append(ui.a(), .{
                 .label = if (all_hidden) "Unhide Here" else "Bring Here",
                 .enabled = running,
@@ -1980,13 +2027,17 @@ pub const Ui = struct {
                 const child = try ui.buildMoveLevel(ref);
                 try rows.append(ui.a(), .{ .label = "Move Icon To", .kind = .{ .submenu = child } });
             }
-            try rows.append(ui.a(), .{
-                .label = if (app.locked) "Unlock" else "Lock",
-                .kind = .{ .ui_cmd = .{ .toggle_lock = ref } },
-            });
+            if (app.attached) {
+                try rows.append(ui.a(), .{ .label = "Keep Icon", .kind = .{ .ui_cmd = .{ .keep_attached = ref } } });
+            } else {
+                try rows.append(ui.a(), .{
+                    .label = if (app.locked) "Unlock" else "Lock",
+                    .kind = .{ .ui_cmd = .{ .toggle_lock = ref } },
+                });
+            }
             try rows.append(ui.a(), .{
                 .label = "Remove Icon",
-                .enabled = !app.locked,
+                .enabled = !app.locked and !app.attached,
                 .kind = .{ .ui_cmd = .{ .remove = ref } },
             });
             try rows.append(ui.a(), .{
@@ -3118,7 +3169,7 @@ test "saveState writes the model and the switches, loadable again" {
     const io = std.testing.io;
     const a = std.testing.allocator;
 
-    const path = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-ui-state-{d}/dock.conf", .{std.c.getpid()});
+    const path = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-ui-state-{d}/WMState", .{std.c.getpid()});
     defer a.free(path);
     defer std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(path).?) catch {};
 
@@ -3135,7 +3186,7 @@ test "saveState writes the model and the switches, loadable again" {
     defer a.free(text);
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
-    const list = try dockapp.parseOwn(arena.allocator(), text);
+    const list = try dockapp.parseWMStateAll(arena.allocator(), text);
     try std.testing.expectEqual(@as(usize, 3), list.apps.len);
     const st = list.state.?;
     try std.testing.expectEqual(config_mod.DockEdge.left, st.edge.?);

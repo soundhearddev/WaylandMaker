@@ -161,7 +161,11 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .shell => |sh| proc.spawnShell(wm, sh),
         .exit => wm.quit = true,
 
-        .close => if (focusedWindow(wm)) |w| w.obj.close(),
+        // A DockApp lives in its tile like an icon in Window Maker: the close
+        // key never reaches it (the tile menu's "Kill" does).
+        .close => if (focusedWindow(wm)) |w| {
+            if (!w.docked) w.obj.close();
+        },
 
         // ---- minimize / hide (Window Maker's miniaturize, HIDE, HIDE_OTHERS) ---
         .minimize => if (focusedWindow(wm)) |w| {

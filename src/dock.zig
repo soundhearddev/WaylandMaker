@@ -317,8 +317,8 @@ pub const Model = struct {
     /// that it ends up at tile position `to`, everything in between shifting
     /// by one. Crossing the logo tile changes how many entries sit above it.
     /// The y of every entry is renumbered (Window Maker's grid: the logo is
-    /// 0, tiles above it negative, below it 0, 1, 2 ... in `position`-terms
-    /// of dockapps.conf) so the new order survives being written out and read
+    /// 0, tiles above it negative, below it 0, 1, 2 ... in `Position`-terms
+    /// of WMState) so the new order survives being written out and read
     /// back. False if nothing moved.
     pub fn moveDockTile(m: *Model, from: usize, to: usize) bool {
         const n = m.dockTiles();
@@ -446,12 +446,50 @@ pub const Model = struct {
     }
 
     /// Everything the Model holds as one list (Dock in tile order, then the
-    /// Clip), for writing it out. The strings stay owned by the Model.
+    /// Clip), for writing it out. Temporary (`attached`) tiles are left out.
+    /// The strings stay owned by the Model.
     pub fn exportList(m: *const Model, a: std.mem.Allocator) !dockapp.List {
-        var out = try a.alloc(dockapp.DockApp, m.dock.len + m.clip.len);
-        for (m.dock, 0..) |s, i| out[i] = s.app;
-        for (m.clip, 0..) |s, i| out[m.dock.len + i] = s.app;
-        return .{ .apps = out, .workspace_names = m.names, .logo_y = 0 };
+        var out: std.ArrayList(dockapp.DockApp) = .empty;
+        try out.ensureTotalCapacity(a, m.dock.len + m.clip.len);
+        for (m.dock) |s| if (!s.app.attached) out.appendAssumeCapacity(s.app);
+        for (m.clip) |s| if (!s.app.attached) out.appendAssumeCapacity(s.app);
+        return .{ .apps = try out.toOwnedSlice(a), .workspace_names = m.names, .logo_y = 0 };
+    }
+
+    /// A self-declared DockApp (`dockapp:<name>`) is running but has no tile:
+    /// give it a temporary one at the end of the Dock, like Window Maker
+    /// gives a freshly started DockApp an icon. It is not saved and goes
+    /// away with the program (`pruneAttached`). Returns the new index.
+    pub fn attach(m: *Model, gpa: std.mem.Allocator, name: []const u8) !usize {
+        return m.addApp(gpa, .{ .name = name, .command = &.{}, .attached = true });
+    }
+
+    /// Remove every temporary tile whose program has quit. True if any went.
+    pub fn pruneAttached(m: *Model) bool {
+        var changed = false;
+        var i: usize = m.dock.len;
+        while (i > 0) {
+            i -= 1;
+            const s = m.dock[i];
+            if (s.app.attached and !s.running and !s.launching) {
+                _ = m.removeDock(i);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// "Keep Icon": make a temporary tile permanent. The command is the
+    /// DockApp's name (name the app_id after the program).
+    pub fn keepAttached(m: *Model, index: usize) bool {
+        if (index >= m.dock.len or !m.dock[index].app.attached) return false;
+        const a = m.arena.allocator();
+        const s = &m.dock[index];
+        const argv = a.alloc([]const u8, 1) catch return false;
+        argv[0] = s.app.name;
+        s.app.command = argv;
+        s.app.attached = false;
+        return true;
     }
 
     /// The Dock entry that a docked window with this app_id belongs to, and
