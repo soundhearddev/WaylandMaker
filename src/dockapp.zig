@@ -147,6 +147,8 @@ pub const DockApp = struct {
     /// Explicit app_id of the windows this entry starts. Optional: without
     /// it `matches` derives candidates from the name and the command.
     app_id: ?[]const u8 = null,
+    /// Window Maker's "Lock": the tile cannot be dragged away or removed.
+    locked: bool = false,
 
     /// Does a window with this app_id belong to this entry (is the entry
     /// "running", and which window does a click on it focus)? Compared
@@ -211,11 +213,58 @@ pub const List = struct {
     /// Grid y of the Dock's logo tile (WMState's "Logo.WMDock" entry).
     /// Entries above it have a smaller y; ties go below the logo.
     logo_y: i32 = 0,
+    /// Set when the list came from wmaker-wl's own saved Dock state (see
+    /// `State`): it then wins over dockapps.conf, even if it is empty (the
+    /// user removed every tile).
+    state: ?State = null,
 
     pub fn isEmpty(self: List) bool {
         return self.apps.len == 0;
     }
 };
+
+/// The part of the Dock's and Clip's look that the user changes with the
+/// mouse or the menus and that Window Maker saves in WMState: where the Dock
+/// sits and its stacking level, and the Clip's switches. Saved next to the
+/// entries, in a block `[wmaker-wl:state]` of the state file (see
+/// `render`). null = "not in the file, config.conf decides".
+pub const State = struct {
+    edge: ?config.DockEdge = null,
+    offset: ?i32 = null,
+    dock_on_top: ?bool = null,
+    dock_auto_raise: ?bool = null,
+    clip_corner: ?config.ClipCorner = null,
+    clip_on_top: ?bool = null,
+    clip_collapsed: ?bool = null,
+    clip_auto_collapse: ?bool = null,
+    clip_auto_raise: ?bool = null,
+};
+
+/// Header of the block that carries a `State`.
+pub const state_block = "wmaker-wl:state";
+
+fn parseStateKey(st: *State, key: []const u8, value: []const u8) void {
+    const eql = std.mem.eql;
+    if (eql(u8, key, "dock_edge")) {
+        st.edge = std.meta.stringToEnum(config.DockEdge, value);
+    } else if (eql(u8, key, "dock_offset")) {
+        st.offset = if (std.fmt.parseInt(i32, value, 10) catch null) |v| (if (v >= 0 and v <= 100000) v else null) else null;
+    } else if (eql(u8, key, "dock_on_top")) {
+        st.dock_on_top = config.parseBool(value) catch null;
+    } else if (eql(u8, key, "dock_auto_raise")) {
+        st.dock_auto_raise = config.parseBool(value) catch null;
+    } else if (eql(u8, key, "clip_corner")) {
+        st.clip_corner = std.meta.stringToEnum(config.ClipCorner, value);
+    } else if (eql(u8, key, "clip_on_top")) {
+        st.clip_on_top = config.parseBool(value) catch null;
+    } else if (eql(u8, key, "clip_collapsed")) {
+        st.clip_collapsed = config.parseBool(value) catch null;
+    } else if (eql(u8, key, "clip_auto_collapse")) {
+        st.clip_auto_collapse = config.parseBool(value) catch null;
+    } else if (eql(u8, key, "clip_auto_raise")) {
+        st.clip_auto_raise = config.parseBool(value) catch null;
+    }
+}
 
 pub const Error = error{ Syntax, OutOfMemory };
 
@@ -382,6 +431,7 @@ pub fn parseOwn(arena: std.mem.Allocator, text: []const u8) Error!List {
     // yet", matching wm_attr.zig / compatibility.zig's own attribute-file
     // parsers.
     var block: Block = .{};
+    var state: ?State = null;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
@@ -391,12 +441,21 @@ pub fn parseOwn(arena: std.mem.Allocator, text: []const u8) Error!List {
         if (line[0] == '[' and line[line.len - 1] == ']') {
             try flushDockApp(arena, &apps, block);
             block = .{ .name = try arena.dupe(u8, line[1 .. line.len - 1]) };
+            if (std.mem.eql(u8, block.name.?, state_block)) {
+                block.is_state = true;
+                if (state == null) state = .{};
+            }
             continue;
         }
 
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const value = std.mem.trim(u8, line[eq + 1 ..], " \t\"");
+
+        if (block.is_state) {
+            parseStateKey(&state.?, key, value);
+            continue;
+        }
 
         if (std.mem.eql(u8, key, "command")) {
             block.command = try arena.dupe(u8, value);
@@ -413,6 +472,8 @@ pub fn parseOwn(arena: std.mem.Allocator, text: []const u8) Error!List {
             block.autolaunch = config.parseBool(value) catch false;
         } else if (std.mem.eql(u8, key, "lowered")) {
             block.lowered = config.parseBool(value) catch false;
+        } else if (std.mem.eql(u8, key, "locked")) {
+            block.locked = config.parseBool(value) catch false;
         } else if (std.mem.eql(u8, key, "place")) {
             // An unknown place keeps the default (the Dock).
             if (std.meta.stringToEnum(Place, value)) |pl| block.place = pl;
@@ -428,7 +489,7 @@ pub fn parseOwn(arena: std.mem.Allocator, text: []const u8) Error!List {
     }
     try flushDockApp(arena, &apps, block);
 
-    return .{ .apps = try apps.toOwnedSlice(arena) };
+    return .{ .apps = try apps.toOwnedSlice(arena), .state = state };
 }
 
 /// The `[name]` block parseOwn is currently reading.
@@ -443,6 +504,9 @@ const Block = struct {
     lowered: bool = false,
     place: Place = .dock,
     workspace: ?u32 = null,
+    locked: bool = false,
+    /// The `[wmaker-wl:state]` block: its keys are a `State`, not an entry.
+    is_state: bool = false,
 };
 
 /// Append the block being accumulated by parseOwn as a DockApp, if it has
@@ -464,7 +528,117 @@ fn flushDockApp(arena: std.mem.Allocator, apps: *std.ArrayList(DockApp), block: 
         .place = block.place,
         .workspace = block.workspace,
         .app_id = block.app_id,
+        .locked = block.locked,
     });
+}
+
+// ----------------------------------------------------------------------------
+// Writing wmaker-wl's own format (the saved Dock state)
+// ----------------------------------------------------------------------------
+
+/// Does `arg` survive a trip through this file's reader? What the reader
+/// cannot give back is exactly what it can never have produced from a file
+/// either, so skipping such an entry loses nothing that was ever in one:
+///   - an empty argument, a `"`, a line break (the format has no escapes);
+///   - ` #` / tab-`#` inside an argument (the reader strips comments before
+///     it looks at quotes);
+///   - blanks in the PROGRAM (first argument): the reader trims quotes off
+///     both ends of the whole value, which eats the quote that would hold it
+///     together.
+fn argWritable(arg: []const u8, first: bool) bool {
+    if (arg.len == 0) return false;
+    for (arg) |c| if (c == '"' or c == '\n' or c == '\r' or c == 0) return false;
+    if (std.mem.indexOf(u8, arg, " #") != null or std.mem.indexOf(u8, arg, "\t#") != null) return false;
+    if (first and std.mem.indexOfAny(u8, arg, " \t") != null) return false;
+    return true;
+}
+
+/// An argument as it is written: in double quotes when it holds blanks or
+/// would otherwise start a comment (`#` after a blank).
+fn writeArg(w: *std.Io.Writer, arg: []const u8) std.Io.Writer.Error!void {
+    const quote = std.mem.indexOfAny(u8, arg, " \t") != null or arg[0] == '#';
+    if (quote) try w.writeByte('"');
+    try w.writeAll(arg);
+    if (quote) try w.writeByte('"');
+}
+
+/// A single-line value that can be read back: no line break, no quote, and
+/// no ` #` (which would start a comment).
+fn valueWritable(v: []const u8) bool {
+    if (v.len == 0) return false;
+    for (v) |c| if (c == '"' or c == '\n' or c == '\r' or c == 0) return false;
+    return std.mem.indexOf(u8, v, " #") == null and std.mem.indexOf(u8, v, "\t#") == null;
+}
+
+/// Header text for `app`'s block: brackets and breaks cannot be in it.
+fn writeName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
+    var any = false;
+    for (name) |c| {
+        const bad = c == '[' or c == ']' or c == '\n' or c == '\r' or c == 0 or c == '#';
+        try w.writeByte(if (bad) '_' else c);
+        any = true;
+    }
+    if (!any) try w.writeAll("app");
+}
+
+/// `apps` and `state` in the own format. An entry that cannot be written
+/// back faithfully (a command with a `"` in it, say) is skipped rather than
+/// written wrong; the count of skipped entries is returned.
+pub fn render(w: *std.Io.Writer, apps: []const DockApp, state: State) std.Io.Writer.Error!usize {
+    try w.writeAll(
+        \\# wmaker-wl: saved state of the Dock and the Clip.
+        \\#
+        \\# Written by wmaker-wl when tiles are moved, added or removed with the
+        \\# mouse or the Dock menus, and read at start-up INSTEAD of dockapps.conf.
+        \\# Delete this file to go back to dockapps.conf. Format: docs/DOCKAPPS.md.
+        \\
+        \\
+    );
+    try w.print("[{s}]\n", .{state_block});
+    if (state.edge) |e| try w.print("dock_edge = {s}\n", .{@tagName(e)});
+    if (state.offset) |o| try w.print("dock_offset = {d}\n", .{o});
+    if (state.clip_corner) |c| try w.print("clip_corner = {s}\n", .{@tagName(c)});
+    inline for (.{
+        .{ "dock_on_top", state.dock_on_top },
+        .{ "dock_auto_raise", state.dock_auto_raise },
+        .{ "clip_on_top", state.clip_on_top },
+        .{ "clip_collapsed", state.clip_collapsed },
+        .{ "clip_auto_collapse", state.clip_auto_collapse },
+        .{ "clip_auto_raise", state.clip_auto_raise },
+    }) |kv| {
+        if (kv[1]) |v| try w.print("{s} = {s}\n", .{ kv[0], if (v) "yes" else "no" });
+    }
+
+    var skipped: usize = 0;
+    for (apps) |app| {
+        var writable = app.command.len > 0;
+        for (app.command, 0..) |arg, i| writable = writable and argWritable(arg, i == 0);
+        if (!writable) {
+            skipped += 1;
+            continue;
+        }
+        try w.writeAll("\n[");
+        try writeName(w, app.name);
+        try w.writeAll("]\ncommand = ");
+        for (app.command, 0..) |arg, i| {
+            if (i > 0) try w.writeByte(' ');
+            try writeArg(w, arg);
+        }
+        try w.writeByte('\n');
+        if (app.icon) |v| if (valueWritable(v)) try w.print("icon = {s}\n", .{v});
+        if (app.app_id) |v| if (valueWritable(v)) try w.print("app_id = {s}\n", .{v});
+        try w.print("place = {s}\n", .{@tagName(app.place)});
+        try w.print("position = {d},{d}\n", .{ app.x, app.y });
+        if (app.place == .clip) {
+            if (app.workspace) |ws| {
+                try w.print("workspace = {d}\n", .{ws + 1});
+            } else try w.writeAll("workspace = all\n");
+        }
+        if (app.autolaunch) try w.writeAll("autolaunch = yes\n");
+        if (app.lowered) try w.writeAll("lowered = yes\n");
+        if (app.locked) try w.writeAll("locked = yes\n");
+    }
+    return skipped;
 }
 
 /// Same comment-stripping rule as config.zig's stripComment, minus the
@@ -845,4 +1019,162 @@ test "the shipped dockapps.conf parses: Dock and Clip entries" {
     try std.testing.expectEqual(@as(?u32, 1), list.apps[4].workspace);
     // The clock is a Dock tile and matches the example client's app_id.
     try std.testing.expect(list.apps[0].matches("dockapp:clock"));
+}
+
+// ----------------------------------------------------------------------------
+// Tests: the saved Dock state
+// ----------------------------------------------------------------------------
+
+fn renderAlloc(gpa: std.mem.Allocator, apps: []const DockApp, state: State) !struct { text: []u8, skipped: usize } {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const skipped = try render(&aw.writer, apps, state);
+    return .{ .text = try aw.toOwnedSlice(), .skipped = skipped };
+}
+
+test "render -> parseOwn round-trips entries, places, workspaces and flags" {
+    const apps = [_]DockApp{
+        .{ .name = "term", .command = &.{ "foot", "--title", "my term" }, .y = -1, .autolaunch = true, .icon = "utilities-terminal" },
+        .{ .name = "web.Firefox", .command = &.{"firefox"}, .y = 0, .locked = true, .app_id = "firefox" },
+        .{ .name = "notes", .command = &.{ "echo", "x", "#not-a-comment" }, .place = .clip, .x = 2, .y = 0, .workspace = 2 },
+        .{ .name = "all", .command = &.{"htop"}, .place = .clip, .x = 3, .lowered = true },
+    };
+    const out = try renderAlloc(std.testing.allocator, &apps, .{});
+    defer std.testing.allocator.free(out.text);
+    try std.testing.expectEqual(@as(usize, 0), out.skipped);
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(), out.text);
+    try std.testing.expectEqual(@as(usize, 4), list.apps.len);
+
+    const t = list.apps[0];
+    try std.testing.expectEqualStrings("term", t.name);
+    try std.testing.expectEqual(@as(usize, 3), t.command.len);
+    try std.testing.expectEqualStrings("my term", t.command[2]);
+    try std.testing.expectEqual(@as(i32, -1), t.y);
+    try std.testing.expect(t.autolaunch);
+    try std.testing.expectEqualStrings("utilities-terminal", t.icon.?);
+
+    try std.testing.expect(list.apps[1].locked);
+    try std.testing.expectEqualStrings("firefox", list.apps[1].app_id.?);
+
+    const n = list.apps[2];
+    try std.testing.expectEqual(Place.clip, n.place);
+    try std.testing.expectEqual(@as(?u32, 2), n.workspace);
+    try std.testing.expectEqualStrings("#not-a-comment", n.command[2]);
+    try std.testing.expectEqual(@as(i32, 2), n.x);
+
+    try std.testing.expectEqual(@as(?u32, null), list.apps[3].workspace);
+    try std.testing.expect(list.apps[3].lowered);
+}
+
+test "render: blanks in a later argument survive, in the program they are skipped" {
+    const apps = [_]DockApp{
+        .{ .name = "x", .command = &.{ "run", "a b", "c" } },
+        .{ .name = "y", .command = &.{ "/opt/my app/run", "a" } },
+    };
+    const out = try renderAlloc(std.testing.allocator, &apps, .{});
+    defer std.testing.allocator.free(out.text);
+    try std.testing.expectEqual(@as(usize, 1), out.skipped);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(), out.text);
+    try std.testing.expectEqual(@as(usize, 1), list.apps.len);
+    try std.testing.expectEqualStrings("a b", list.apps[0].command[1]);
+    try std.testing.expectEqualStrings("c", list.apps[0].command[2]);
+}
+
+test "render skips what it cannot write faithfully, and says so" {
+    const apps = [_]DockApp{
+        .{ .name = "bad", .command = &.{ "echo", "a\"b" } },
+        .{ .name = "empty", .command = &.{} },
+        .{ .name = "empty-arg", .command = &.{ "x", "" } },
+        .{ .name = "comment", .command = &.{ "x", "a #b" } },
+        .{ .name = "good", .command = &.{"ok"} },
+    };
+    const out = try renderAlloc(std.testing.allocator, &apps, .{});
+    defer std.testing.allocator.free(out.text);
+    try std.testing.expectEqual(@as(usize, 4), out.skipped);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(), out.text);
+    try std.testing.expectEqual(@as(usize, 1), list.apps.len);
+    try std.testing.expectEqualStrings("good", list.apps[0].name);
+}
+
+test "render: odd names and values cannot break the file apart" {
+    const apps = [_]DockApp{
+        .{ .name = "a]\n[evil", .command = &.{"x"}, .icon = "bad\nicon", .app_id = "has \"quote" },
+        .{ .name = "", .command = &.{"y"}, .icon = "i #c" },
+    };
+    const out = try renderAlloc(std.testing.allocator, &apps, .{});
+    defer std.testing.allocator.free(out.text);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(), out.text);
+    try std.testing.expectEqual(@as(usize, 2), list.apps.len);
+    try std.testing.expect(list.apps[0].icon == null);
+    try std.testing.expect(list.apps[0].app_id == null);
+    try std.testing.expect(list.apps[1].icon == null);
+    try std.testing.expectEqualStrings("app", list.apps[1].name);
+}
+
+test "state block: round-trips, is not an entry, and marks the list as saved" {
+    const st: State = .{
+        .edge = .left,
+        .offset = 240,
+        .dock_on_top = false,
+        .dock_auto_raise = true,
+        .clip_corner = .bottom_left,
+        .clip_on_top = true,
+        .clip_collapsed = true,
+        .clip_auto_collapse = false,
+        .clip_auto_raise = true,
+    };
+    const apps = [_]DockApp{.{ .name = "t", .command = &.{"foot"} }};
+    const out = try renderAlloc(std.testing.allocator, &apps, st);
+    defer std.testing.allocator.free(out.text);
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(), out.text);
+    try std.testing.expectEqual(@as(usize, 1), list.apps.len); // the state block is no entry
+    const got = list.state.?;
+    try std.testing.expectEqual(config.DockEdge.left, got.edge.?);
+    try std.testing.expectEqual(@as(i32, 240), got.offset.?);
+    try std.testing.expectEqual(false, got.dock_on_top.?);
+    try std.testing.expectEqual(true, got.dock_auto_raise.?);
+    try std.testing.expectEqual(config.ClipCorner.bottom_left, got.clip_corner.?);
+    try std.testing.expectEqual(true, got.clip_collapsed.?);
+    try std.testing.expectEqual(false, got.clip_auto_collapse.?);
+
+    // An empty Dock is still a saved Dock.
+    const empty = try renderAlloc(std.testing.allocator, &.{}, .{});
+    defer std.testing.allocator.free(empty.text);
+    const l2 = try parseOwn(arena.allocator(), empty.text);
+    try std.testing.expectEqual(@as(usize, 0), l2.apps.len);
+    try std.testing.expect(l2.state != null);
+
+    // A hand-written file has no state block: not "saved".
+    const l3 = try parseOwn(arena.allocator(), "[a]\ncommand = x\n");
+    try std.testing.expect(l3.state == null);
+}
+
+test "state block: bad values are ignored one by one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseOwn(arena.allocator(),
+        \\[wmaker-wl:state]
+        \\dock_edge = middle
+        \\dock_offset = -5
+        \\dock_on_top = maybe
+        \\clip_collapsed = yes
+        \\something_new = 1
+    );
+    const st = list.state.?;
+    try std.testing.expect(st.edge == null);
+    try std.testing.expect(st.offset == null);
+    try std.testing.expect(st.dock_on_top == null);
+    try std.testing.expectEqual(true, st.clip_collapsed.?);
 }

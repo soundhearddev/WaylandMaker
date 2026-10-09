@@ -168,47 +168,105 @@ DockApp.
 
 ## Dock und Clip
 
-`ui.zig`/`dock.zig` zeichnen beides als 64-px-Kacheln im NeXT-/Window-Maker-Look.
+`ui.zig`/`dock.zig` zeichnen beides als 64-px-Kacheln im NeXT-/Window-Maker-Look und verhalten sich so
+nah an Window Makers Dock wie es unter Wayland geht.
 
-**Dock** (`dock_enabled`, `dock_edge = left|right`, `dock_offset`, `dock_on_top`,
-`dock_reserve_space`): eine Spalte am Bildschirmrand der ersten Ausgabe. Oben die „WM“-Logo-Kachel,
-darunter die Einträge mit `place = dock`, nach `y` sortiert und lückenlos gestapelt (`y = 0` kommt
-direkt hinter das Logo, ein negatives `y` davor).
+**Dock** (`dock_enabled`, `dock_edge = left|right`, `dock_offset`, `dock_on_top`, `dock_auto_raise`,
+`dock_level`, `dock_single_click`, `dock_save_state`, `dock_reserve_space`): eine Spalte am
+Bildschirmrand der ersten Ausgabe. Oben die „WM“-Logo-Kachel, darunter die Einträge mit
+`place = dock`, nach `y` sortiert und lückenlos gestapelt (`y = 0` kommt direkt hinter das Logo, ein
+negatives `y` davor).
 
 | Aktion | Wirkung |
 |---|---|
-| Linksklick auf eine Kachel | Programm starten, oder das laufende Fenster fokussieren |
+| Doppelklick auf eine Kachel | Programm starten, oder das laufende Fenster fokussieren (`dock_single_click = yes`: ein Klick) |
 | Mittelklick | immer eine neue Instanz starten |
-| Rechtsklick | Menü: *Launch*, *Lower Dock* / *Keep Dock on Top* |
-| kleines Dreieck unten links | ein Fenster dieses Eintrags ist offen |
+| Rechtsklick | Menü der Kachel (unten) |
+| Kachel ziehen | auf einen anderen Platz = umsortieren; weit vom Dock weg loslassen = entfernen (die Kachel wird dabei blass) |
+| Logo-Kachel ziehen | das ganze Dock folgt dem Zeiger: entlang des Rands, oder auf die andere Seite |
+| Doppelklick auf das Logo | Info-Panel |
+| Rechtsklick auf das Logo | Dock-Menü |
+| drei kleine Punkte unten links | das Programm der Kachel läuft **nicht** (wie bei Window Maker; eine laufende Kachel bleibt glatt) |
+| feines Raster über der Kachel | das Programm wurde gerade gestartet und hat noch kein Fenster (nach 8 s ohne Fenster endet es) |
+
+*Dock-Menü* (Logo): **Dock position** (*Normal* / *Auto raise & lower* / *Keep on Top*, der gerade
+gültige Punkt ist mit • markiert), **Keep Application** (Programme mit offenem Fenster, die noch keine
+Kachel haben; ein Klick legt eine an, ausgegraut wenn es keine gibt) und **Info Panel**.
+
+*Kachel-Menü* (wie Window Makers Icon-Menü): **Launch** (neue Instanz), **Bring Here** / **Unhide Here**
+(Fenster des Programms auf den aktuellen Workspace holen), **Hide** / **Unhide**, im Clip **Move Icon
+To** (ein Workspace oder *All workspaces*), **Lock** / **Unlock** (gesperrte Kacheln lassen sich weder
+ziehen noch entfernen), **Remove Icon**, **Kill** (schließt alle Fenster des Programms). Was ein
+laufendes Fenster braucht, ist ausgegraut, solange keins offen ist.
+
+*Dock position* wie bei Window Maker: **Normal** (unter den Fenstern; ein Klick hebt es, bis der Fokus
+auf ein anderes Fenster wandert), **Auto raise & lower** (oben, solange der Zeiger darauf ist) und
+**Keep on Top** (immer oben; nur dann macht das Dock Platz, `dock_reserve_space`).
 
 Ein Fenster gehört zu einem Eintrag, wenn (in dieser Reihenfolge) der explizite `app_id` passt;
-sonst wenn `dockapp:<name>`/`dockapp-<name>` den Namen trifft, ein Teil eines Window-Maker-Namens
+sonst wenn `dockapp:<n>`/`dockapp-<n>` den Namen trifft, ein Teil eines Window-Maker-Namens
 `instance.Class` die `app_id` ist, ein Argument des Befehls selbst eine solche `dockapp:…`-Kennung
 trägt (`alacritty --class dockapp:htop` — dann zählt *nur* die), oder der Dateiname des Programms.
 Groß-/Kleinschreibung egal.
 
-**DockApp-Fenster in der Kachel:** ein Fenster mit `app_id = dockapp:<name>`, dessen Größe *fest*
+**DockApp-Fenster in der Kachel:** ein Fenster mit `app_id = dockapp:<n>`, dessen Größe *fest*
 (Min = Max) und höchstens 64×64 ist (der Beispielclient `wl-clock`), wird mittig in die Kachel des
 gleichnamigen Eintrags gesetzt, über das Dock gestapelt und ist auf allen Workspaces sichtbar. Alles
 andere (ein Terminal mit `--class dockapp:htop`) bleibt ein normales schwebendes Fenster; seine
 Kachel startet/fokussiert es nur.
 
-**Clip** (`clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `workspace_names`):
+**Clip** (`clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`,
+`clip_auto_raise`, `workspace_names`):
 
 | Aktion | Wirkung |
 |---|---|
 | Pfeil oben rechts / unten links | nächster / vorheriger Workspace |
 | Mausrad über dem Clip | dito |
-| Rechtsklick auf die Workspace-Kachel | Menü: *Collapse/Expand*, *Lower/Keep on Top*, Workspace vor/zurück, *Workspaces* |
+| Doppelklick auf die Workspace-Kachel | Clip ein-/ausklappen (*Collapsed*) |
+| Workspace-Kachel ziehen | der Clip springt in die nächstgelegene Bildschirmecke |
+| Rechtsklick auf die Workspace-Kachel | Menü: **Clip Options** (*Keep on Top*, *Collapsed*, *Autocollapse*, *Autoraise*), **Keep Application**, Workspace vor/zurück, *Workspaces* |
 | Mittelklick | Workspace-Menü |
-| Kacheln daneben | Einträge mit `place = clip` des aktuellen Workspaces; Klick wie im Dock |
+| Kacheln daneben | Einträge mit `place = clip` des aktuellen Workspaces; Bedienung wie im Dock, Ziehen sortiert innerhalb der Reihe um |
+| kleines Eselsohr oben rechts | der Eintrag ist auf **allen** Workspaces sichtbar (*omnipresent*) |
 
 Liegt der Clip auf der Dock-Seite und überdeckt es, rückt er neben das Dock.
 
-## Was noch fehlt
+*Autocollapse* klappt den Clip zu, sobald der Zeiger ihn verlässt, und wieder auf, wenn er zurückkehrt.
+Anders als bei Window Maker **ohne Verzögerung**: wmaker-wl hat keine Timer.
 
-Dock und Clip lassen sich nicht mit der Maus verschieben, und Einträge nicht per Drag & Drop
-hinzufügen oder entfernen: Position und Inhalt kommen aus `config.conf` und `dockapps.conf` /
-`WMState`, und wmaker-wl schreibt nie in Nutzerdateien. Icons sind nur PNG (kein XPM, kein SVG). Das
-Dock hat kein „Collapse“, und beide hängen an der ersten Ausgabe. Siehe `docs/TODO.md`.
+### Dock state: was die Maus ändert
+
+Alles, was man mit der Maus oder den Menüs ändert (Kachel umsortieren, entfernen, anlegen, sperren, in
+einen anderen Workspace schieben; Position des Docks und des Clips; *Dock position*; die Clip-Schalter)
+schreibt wmaker-wl in eine **eigene Zustandsdatei**:
+
+```
+$XDG_STATE_HOME/wmaker-wl/dock.conf        (sonst ~/.local/state/wmaker-wl/dock.conf)
+```
+
+Das ist wmaker-wls Gegenstück zu Window Makers `WMState`: eine Datei, die das Programm selbst schreibt
+und liest, **nicht** unter `~/.config`. Deine eigenen Dateien (`config.conf`, `dockapps.conf`, `WMState`)
+fasst wmaker-wl weiterhin nie an. Die Datei hat das eigene Format von oben, dazu einen Block
+`[wmaker-wl:state]` mit Position und Schaltern. Geschrieben wird atomar (temporäre Datei, dann
+`rename`).
+
+* Gibt es die Datei, **ersetzt sie** `dockapps.conf`/`WMState` komplett (auch ein leeres Dock bleibt
+  leer), und ihre Schalter schlagen `config.conf`. Änderungen an `dockapps.conf` wirken dann erst, wenn
+  man die Zustandsdatei löscht (und `kill -HUP` schickt oder neu startet).
+* `dock_save_state = no` schaltet Lesen und Schreiben ab; Änderungen gelten dann nur bis zum Neuladen.
+* „Keep Application“ rät den Startbefehl aus der `app_id` (`org.mozilla.firefox` → `firefox`). Stimmt er
+  nicht, einfach in der Zustandsdatei die Zeile `command =` des Eintrags ändern.
+* Befehle, die das Format nicht ausdrücken kann (ein `"` darin, ein Leerzeichen im Programmnamen), werden
+  beim Schreiben ausgelassen und im Log gemeldet; aus einer Datei können sie ohnehin nie stammen.
+
+## Was anders ist als bei Window Maker
+
+* **Kein Umschalten per Strg/Shift/Alt-Klick.** Ein Wayland-Fenstermanager sieht die Modifikatoren
+  nicht, solange der Zeiger über seinen eigenen Flächen ist. Stattdessen gibt es die Menüeinträge
+  (*Launch* = neue Instanz, *Bring Here* = „Unhide Here“).
+* **Keine Drawers**, kein *Settings…*-Dialog, kein *Rename Workspace*, kein *Autoattract*, kein
+  *Selected*-Untermenü: Dafür bräuchte der Fenstermanager eigene Texteingabe bzw. Programm-Icons laufender
+  Fenster, die es unter Wayland nicht gibt.
+* **Kein „Auto raise“ mit Verzögerung**, siehe oben.
+* Icons sind nur PNG und XPM (kein SVG), und beide Leisten hängen an der ersten Ausgabe. Siehe
+  `docs/TODO.md`.

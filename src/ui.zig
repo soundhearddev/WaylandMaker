@@ -53,6 +53,9 @@ const dock_mod = @import("dock.zig");
 const fsmenu = @import("fsmenu.zig");
 const version = @import("version.zig").version;
 const dockapp = @import("dockapp.zig");
+const workspace = @import("workspace.zig");
+const config_mod = @import("config.zig");
+const wm_files = @import("wm_files.zig");
 
 const WindowManager = types.WindowManager;
 const Allocator = std.mem.Allocator;
@@ -106,13 +109,40 @@ const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 /// A Dock/Clip entry: which list, and where in it.
 const SlotRef = struct { clip: bool, index: usize };
 
+/// What a Dock/Clip menu row does to the windows of an entry. These touch
+/// river state, so they only record a request that sync() runs inside the
+/// manage sequence (see `runAppRequest`).
+const AppOp = enum {
+    /// Move the windows of the application to the workspace the user is on
+    /// (Window Maker's "Bring Here" / "Unhide Here") and focus one.
+    bring_here,
+    hide,
+    unhide,
+    /// Ask every window of the application to close ("Kill").
+    kill,
+};
+
+const AppRequest = struct { op: AppOp, ref: SlotRef };
+
 /// What the rows of the Dock/Clip menus do (ui.runUiCmd).
 const UiCmd = union(enum) {
-    toggle_dock_level,
+    /// Window Maker's "Dock position" menu.
+    set_dock_level: dock_mod.Level,
     toggle_clip_level,
     toggle_clip_collapse,
+    toggle_clip_auto_collapse,
+    toggle_clip_auto_raise,
     /// Start a NEW instance (a click on the tile would focus a running one).
     launch: SlotRef,
+    app_op: AppRequest,
+    toggle_lock: SlotRef,
+    /// "Remove Icon".
+    remove: SlotRef,
+    /// Clip only: show the entry on this workspace only / on all (null).
+    set_workspace: struct { ref: SlotRef, ws: ?u32 },
+    /// "Keep Application": make an entry for a running program. `app_id` is
+    /// a slice of `Ui.arena`, valid while the menu is.
+    keep: struct { app_id: []const u8, clip: bool },
 };
 
 const RowKind = union(enum) {
@@ -275,7 +305,7 @@ const OpenPanel = struct {
     panel: *Panel,
 };
 
-const BarMenuKind = enum { dock, clip, workspaces };
+const BarMenuKind = enum { dock, clip, workspaces, info };
 
 /// A request recorded by an input callback, executed in sync().
 const Request = union(enum) {
@@ -289,6 +319,10 @@ const Request = union(enum) {
 
 /// How deep OPEN_MENU may nest (a menu file that opens a menu file ...).
 const max_expand_depth: u8 = 4;
+
+/// Rows of the "Keep Application" and "Move Icon To" menus at most.
+const max_keep_rows: usize = 16;
+const max_move_rows: u32 = 32;
 
 /// The most Clip application tiles ever shown (a screen is never wider).
 const max_clip_apps: usize = 32;
@@ -307,6 +341,56 @@ const Bar = struct {
     hover: ?usize = null,
     hover_arrow: dock_mod.Arrow = .none,
     dirty: bool = true,
+    /// A tile is being dragged on this bar.
+    drag: ?dock_mod.DragView = null,
+};
+
+/// Window Maker's double click: two presses of the same button on the same
+/// tile within this many milliseconds.
+const double_click_ms: u32 = 400;
+
+/// How long (ms) a tile stays covered by the launching raster when no window
+/// ever shows up.
+const launch_timeout_ms: u32 = 8000;
+
+const LastClick = struct {
+    time: u32 = 0,
+    button: u32 = 0,
+    kind: BarKind = .dock,
+    tile: usize = 0,
+    valid: bool = false,
+};
+
+/// Is a press at `time` on (`kind`, `tile`) with `button` the second half of
+/// a double click after `last`?
+fn isDoubleClick(last: LastClick, time: u32, button: u32, kind: BarKind, tile: usize) bool {
+    return last.valid and last.button == button and last.kind == kind and last.tile == tile and
+        time -% last.time <= double_click_ms;
+}
+
+/// What a pressed button on a bar may turn into when the pointer moves.
+const PressKind = enum {
+    /// An application tile of the Dock: reorder, or take away to remove.
+    dock_tile,
+    /// The Dock's logo tile: moves the whole Dock.
+    dock_logo,
+    /// An application tile of the Clip: reorder, or take away to remove.
+    clip_tile,
+    /// The Clip's workspace tile: moves the Clip to another corner.
+    clip_body,
+};
+
+const Press = struct {
+    kind: PressKind,
+    /// Tile position pressed on (Dock: tile index, Clip: 0 = workspace).
+    tile: usize,
+    slot: ?SlotRef,
+    /// Surface-local position of the press.
+    x: i32,
+    y: i32,
+    dragging: bool = false,
+    /// Single-click mode: launch when the button is released without a drag.
+    activate_on_release: bool = false,
 };
 
 /// What is under the pointer on a Bar.
@@ -324,6 +408,32 @@ fn clipUtf8(s: []const u8, max: usize) []const u8 {
     // Step back to a character boundary.
     while (end > 0 and end < s.len and (s[end] & 0xC0) == 0x80) end -= 1;
     return s[0..end];
+}
+
+/// May `id` become the name and app_id of a new Dock entry? Only plain
+/// program identifiers: no blanks, quotes, slashes or control characters,
+/// so nothing odd ends up in the saved state file or on a command line.
+fn validAppId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 100) return false;
+    for (id) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_' or c == '+';
+        if (!ok) return false;
+    }
+    return id[0] != '.' and id[0] != '-';
+}
+
+/// The program to start for an entry made from a running window with this
+/// app_id: the id itself, or for a reverse-DNS id (`org.mozilla.firefox`)
+/// its last part in lower case. A guess -- the user fixes it in the state
+/// file if it is wrong (docs/DOCKAPPS.md). Written into `buf`.
+fn guessCommand(buf: []u8, id: []const u8) ?[]const u8 {
+    var tail = id;
+    if (std.mem.lastIndexOfScalar(u8, id, '.')) |dot| {
+        if (dot + 1 < id.len) tail = id[dot + 1 ..];
+    }
+    if (tail.len == 0 or tail.len > buf.len) return null;
+    for (tail, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf[0..tail.len];
 }
 
 pub const Ui = struct {
@@ -350,10 +460,24 @@ pub const Ui = struct {
     model_gen: u32 = std.math.maxInt(u32),
     dock: Bar = .{ .kind = .dock },
     clip: Bar = .{ .kind = .clip },
-    /// Run-time state, started from config.conf and changed by the menus.
-    dock_on_top: bool = true,
+    /// Run-time state, started from config.conf (or the saved state) and
+    /// changed by the menus.
+    dock_level: dock_mod.Level = .top,
     clip_on_top: bool = true,
     clip_collapsed: bool = false,
+    clip_auto_collapse: bool = false,
+    clip_auto_raise: bool = false,
+    /// A click raised a Dock/Clip that is not on top (level `normal`); it
+    /// stays up until the keyboard focus moves to another window.
+    dock_clicked: bool = false,
+    clip_clicked: bool = false,
+    raise_focus: ?*types.Window = null,
+    /// Button press in progress on a bar, and the last click (double click).
+    press: ?Press = null,
+    last_click: LastClick = .{},
+    /// A menu row asked for something to be done to an application's
+    /// windows; sync() does it.
+    app_request: ?AppRequest = null,
     /// Workspace the Clip shows, and the `model.clip` entries on it.
     clip_ws: u32 = 0,
     clip_buf: [max_clip_apps]usize = undefined,
@@ -457,12 +581,15 @@ pub const Ui = struct {
                 // plain UI: always the default arrow, regardless of which
                 // shape a window under the old focus had set.
                 if (ui.cursor_shape_device) |dev| dev.setShape(e.serial, .default);
+                if (e.surface) |sf| if (ui.barAt(sf)) |b| ui.onBarEnter(b);
                 ui.onMotion();
             },
             .leave => {
+                const left = ui.pointer_surface;
                 ui.pointer_surface = null;
                 ui.scroll_acc = 0;
                 ui.clearBarHover();
+                if (left) |sf| if (ui.barAt(sf)) |b| ui.onBarLeave(b);
             },
             .axis => |e| if (e.axis == .vertical_scroll) ui.onScroll(e.value.toDouble()),
             .motion => |e| {
@@ -473,8 +600,8 @@ pub const Ui = struct {
             .button => |e| {
                 if (e.state == .pressed) {
                     std.log.info("pointer button 0x{x} on {s}", .{ e.button, ui.describe(ui.pointer_surface) });
-                    ui.onButton(e.button);
-                }
+                    ui.onButton(e.button, e.time);
+                } else ui.onRelease(e.button);
             },
             else => {},
         }
@@ -509,7 +636,7 @@ pub const Ui = struct {
         return null;
     }
 
-    fn onButton(ui: *Ui, button: u32) void {
+    fn onButton(ui: *Ui, button: u32, time: u32) void {
         const s = ui.pointer_surface orelse return;
 
         if (ui.levelFor(s)) |li| {
@@ -517,7 +644,7 @@ pub const Ui = struct {
             return;
         }
         if (ui.barAt(s)) |b| {
-            ui.clickBar(b, button);
+            ui.clickBar(b, button, time);
             return;
         }
         if (ui.desktopAt(s)) |d| {
@@ -537,6 +664,7 @@ pub const Ui = struct {
         const s = ui.pointer_surface orelse return;
         if (ui.barAt(s)) |b| {
             ui.hoverBar(b);
+            ui.dragMotion(b);
             return;
         }
         const li = ui.levelFor(s) orelse return;
@@ -615,7 +743,32 @@ pub const Ui = struct {
         ui.wm.obj.manageDirty();
     }
 
-    fn clickBar(ui: *Ui, b: *Bar, button: u32) void {
+    /// A click raises a Dock/Clip that is not always on top; it goes down
+    /// again when the focus moves to another window (syncBars).
+    fn raiseBar(ui: *Ui, kind: BarKind) void {
+        if (kind == .dock) ui.dock_clicked = true else ui.clip_clicked = true;
+        ui.raise_focus = if (ui.wm.seats.first()) |sd| sd.focused else null;
+    }
+
+    /// The pointer came onto / left a bar: Autocollapse and (through
+    /// `raised`) Autoraise / Auto raise & lower.
+    fn onBarEnter(ui: *Ui, b: *Bar) void {
+        if (b.kind == .clip and ui.clip_auto_collapse and ui.clip_collapsed) {
+            ui.clip_collapsed = false;
+            ui.clip.dirty = true;
+            ui.wm.obj.manageDirty();
+        }
+    }
+
+    fn onBarLeave(ui: *Ui, b: *Bar) void {
+        if (b.kind == .clip and ui.clip_auto_collapse and !ui.clip_collapsed and ui.press == null) {
+            ui.clip_collapsed = true;
+            ui.clip.dirty = true;
+            ui.wm.obj.manageDirty();
+        }
+    }
+
+    fn clickBar(ui: *Ui, b: *Bar, button: u32, time: u32) void {
         const wm = ui.wm;
         // A click on the Dock while a menu is open only dismisses the menu,
         // like a click on the empty desktop does.
@@ -652,27 +805,65 @@ pub const Ui = struct {
             },
         }
 
+        // Window Maker: a press raises the Dock/Clip.
+        ui.raiseBar(b.kind);
+        const dbl = isDoubleClick(ui.last_click, time, button, b.kind, tile);
+        ui.last_click = if (dbl) .{} else .{ .time = time, .button = button, .kind = b.kind, .tile = tile, .valid = true };
+        const left = button == BTN_LEFT;
+
         if (is_tile0 and b.kind == .clip) {
-            // The workspace tile: arrows, menus.
+            // The workspace tile: arrows, menus, double click folds the Clip.
             switch (hit.arrow) {
-                .next => if (button == BTN_LEFT) {
+                .next => if (left) {
                     wm.pending_ui = .workspace_next;
                 },
-                .prev => if (button == BTN_LEFT) {
+                .prev => if (left) {
                     wm.pending_ui = .workspace_prev;
                 },
                 .none => switch (button) {
+                    BTN_LEFT => if (dbl) {
+                        ui.clip_collapsed = !ui.clip_collapsed;
+                        ui.clip.dirty = true;
+                        ui.saveState();
+                    } else {
+                        ui.press = .{ .kind = .clip_body, .tile = 0, .slot = null, .x = ui.px, .y = ui.py };
+                    },
                     BTN_RIGHT => ui.request = .{ .open_bar_menu = .{ .kind = .clip, .output = out, .x = mx, .y = my, .slot = null } },
                     BTN_MIDDLE => ui.request = .{ .open_bar_menu = .{ .kind = .workspaces, .output = out, .x = mx, .y = my, .slot = null } },
                     else => {},
                 },
             }
         } else if (is_tile0) {
-            // The Dock's logo tile.
-            if (button == BTN_RIGHT) ui.request = .{ .open_bar_menu = .{ .kind = .dock, .output = out, .x = mx, .y = my, .slot = null } };
+            // The Dock's logo tile: drag moves the Dock, double click shows
+            // the info panel (Window Maker), right click the Dock menu.
+            switch (button) {
+                BTN_LEFT => if (dbl) {
+                    ui.request = .{ .open_bar_menu = .{ .kind = .info, .output = out, .x = mx, .y = my, .slot = null } };
+                } else {
+                    ui.press = .{ .kind = .dock_logo, .tile = tile, .slot = null, .x = ui.px, .y = ui.py };
+                },
+                BTN_RIGHT => ui.request = .{ .open_bar_menu = .{ .kind = .dock, .output = out, .x = mx, .y = my, .slot = null } },
+                else => {},
+            }
         } else if (slot) |ref| {
             switch (button) {
-                BTN_LEFT => ui.activateSlot(ref, false),
+                BTN_LEFT => {
+                    const single = wm.cfg.dock_single_click;
+                    if (!single and dbl) {
+                        ui.activateSlot(ref, false);
+                    } else {
+                        // Not yet a click: it may become a drag. With
+                        // single-click launching it launches on release.
+                        ui.press = .{
+                            .kind = if (b.kind == .dock) .dock_tile else .clip_tile,
+                            .tile = tile,
+                            .slot = ref,
+                            .x = ui.px,
+                            .y = ui.py,
+                            .activate_on_release = single,
+                        };
+                    }
+                },
                 BTN_MIDDLE => ui.activateSlot(ref, true),
                 BTN_RIGHT => ui.request = .{ .open_bar_menu = .{
                     .kind = if (b.kind == .dock) .dock else .clip,
@@ -685,6 +876,107 @@ pub const Ui = struct {
             }
         }
         wm.obj.manageDirty();
+    }
+
+    /// The pointer moved with a button held on a bar: start a drag once it
+    /// has gone far enough, then follow it.
+    fn dragMotion(ui: *Ui, b: *Bar) void {
+        if (ui.dragUpdate(b)) ui.wm.obj.manageDirty();
+    }
+
+    /// The part of `dragMotion` that does not talk to river: true if the
+    /// bar (or the place it sits at) changed and needs a new frame.
+    fn dragUpdate(ui: *Ui, b: *Bar) bool {
+        const p = if (ui.press) |*pp| pp else return false;
+        const wm = ui.wm;
+        const out = b.output orelse return false;
+        if (!p.dragging) {
+            const thr: i32 = @max(4, wm.cfg.drag_threshold);
+            if (@abs(ui.px - p.x) <= thr and @abs(ui.py - p.y) <= thr) return false;
+            // A locked tile stays where it is (Window Maker's Lock).
+            if (p.slot) |ref| if (ui.slotApp(ref)) |app| if (app.locked) {
+                ui.press = null;
+                return false;
+            };
+            p.dragging = true;
+        }
+        switch (p.kind) {
+            .dock_tile => b.drag = .{
+                .from = p.tile,
+                .to = dock_mod.dropTile(ui.py, b.ntiles),
+                .x = ui.px,
+                .y = ui.py,
+                .detached = dock_mod.detached(ui.px, ui.py, b.rect.w, b.rect.h),
+            },
+            .clip_tile => b.drag = .{
+                .from = p.tile,
+                .to = dock_mod.clipDropTile(ui.px, b.ntiles, dock_mod.clipOnLeft(wm.cfg.clip_corner)),
+                .x = ui.px,
+                .y = ui.py,
+                .detached = dock_mod.detached(ui.px, ui.py, b.rect.w, b.rect.h),
+            },
+            .dock_logo => {
+                // The Dock follows the pointer: its top-left corner is the
+                // pointer minus the point that was grabbed.
+                const pl = dock_mod.dockPlacementFor(out.rect, b.rect.x + ui.px - p.x, b.rect.y + ui.py - p.y);
+                wm.cfg.dock_edge = pl.edge;
+                wm.cfg.dock_offset = pl.offset;
+                b.drag = null;
+            },
+            .clip_body => {
+                wm.cfg.clip_corner = dock_mod.clipCornerFor(out.rect, b.rect.x + ui.px, b.rect.y + ui.py);
+                b.drag = null;
+            },
+        }
+        b.dirty = true;
+        return true;
+    }
+
+    /// A button was let go: finish a drag, or (single-click mode) launch.
+    fn onRelease(ui: *Ui, button: u32) void {
+        if (ui.finishPress(button)) ui.wm.obj.manageDirty();
+    }
+
+    /// The part of `onRelease` that does not talk to river. True if there
+    /// was a press to finish.
+    fn finishPress(ui: *Ui, button: u32) bool {
+        if (button != BTN_LEFT) return false;
+        const p = ui.press orelse return false;
+        ui.press = null;
+        const b = switch (p.kind) {
+            .dock_tile, .dock_logo => &ui.dock,
+            .clip_tile, .clip_body => &ui.clip,
+        };
+        const drag = b.drag;
+        b.drag = null;
+        b.dirty = true;
+
+        if (!p.dragging) {
+            if (p.activate_on_release) if (p.slot) |ref| ui.activateSlot(ref, false);
+            return true;
+        }
+        const m = if (ui.model) |*mm| mm else return true;
+        switch (p.kind) {
+            .dock_tile => {
+                const d = drag orelse return true;
+                const ref = p.slot orelse return true;
+                if (d.detached) {
+                    _ = m.removeDock(ref.index);
+                } else _ = m.moveDockTile(d.from, d.to);
+            },
+            .clip_tile => {
+                const d = drag orelse return true;
+                const ref = p.slot orelse return true;
+                if (d.detached) {
+                    _ = m.removeClip(ref.index);
+                } else if (d.to >= 1 and d.to - 1 < ui.clip_count) {
+                    _ = m.moveClipEntry(ref.index, ui.clip_buf[d.to - 1]);
+                }
+            },
+            .dock_logo, .clip_body => {},
+        }
+        ui.saveState();
+        return true;
     }
 
     fn slotApp(ui: *Ui, ref: SlotRef) ?*const dockapp.DockApp {
@@ -709,14 +1001,124 @@ pub const Ui = struct {
             }
         }
         proc.spawn(ui.wm, app.command);
+        if (ui.model) |*m| {
+            m.markLaunching(ref.clip, ref.index, ui.nowMs());
+            ui.dock.dirty = true;
+            ui.clip.dirty = true;
+        }
     }
 
     fn runUiCmd(ui: *Ui, cmd: UiCmd) void {
         switch (cmd) {
-            .toggle_dock_level => ui.dock_on_top = !ui.dock_on_top,
+            .set_dock_level => |l| ui.dock_level = l,
             .toggle_clip_level => ui.clip_on_top = !ui.clip_on_top,
             .toggle_clip_collapse => ui.clip_collapsed = !ui.clip_collapsed,
-            .launch => |ref| ui.activateSlot(ref, true),
+            .toggle_clip_auto_collapse => ui.clip_auto_collapse = !ui.clip_auto_collapse,
+            .toggle_clip_auto_raise => ui.clip_auto_raise = !ui.clip_auto_raise,
+            .launch => |ref| {
+                ui.activateSlot(ref, true);
+                return;
+            },
+            .app_op => |r| {
+                ui.app_request = r;
+                return;
+            },
+            .toggle_lock => |ref| {
+                const m = if (ui.model) |*mm| mm else return;
+                const list = if (ref.clip) m.clip else m.dock;
+                if (ref.index >= list.len) return;
+                list[ref.index].app.locked = !list[ref.index].app.locked;
+            },
+            .remove => |ref| {
+                const m = if (ui.model) |*mm| mm else return;
+                const ok = if (ref.clip) m.removeClip(ref.index) else m.removeDock(ref.index);
+                if (!ok) return;
+            },
+            .set_workspace => |r| {
+                const m = if (ui.model) |*mm| mm else return;
+                if (r.ref.index >= m.clip.len or !r.ref.clip) return;
+                m.clip[r.ref.index].app.workspace = r.ws;
+            },
+            .keep => |k| ui.keepApplication(k.app_id, k.clip),
+        }
+        ui.dock.dirty = true;
+        ui.clip.dirty = true;
+        ui.saveState();
+    }
+
+    /// How many windows (open, and of those minimized) belong to `app`.
+    fn appState(ui: *Ui, app: *const dockapp.DockApp) struct { open: usize, hidden: usize } {
+        var open: usize = 0;
+        var hidden: usize = 0;
+        var it = ui.wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
+            if (w.closed) continue;
+            const id = w.app_id orelse continue;
+            if (!app.matches(id)) continue;
+            open += 1;
+            if (w.minimized) hidden += 1;
+        }
+        return .{ .open = open, .hidden = hidden };
+    }
+
+    /// "Keep Application": a new Dock entry (or, on the Clip, one for the
+    /// workspace shown) for the program that owns a running window.
+    fn keepApplication(ui: *Ui, app_id: []const u8, clip: bool) void {
+        const m = if (ui.model) |*mm| mm else return;
+        if (!validAppId(app_id) or m.hasApp(app_id)) return;
+        var buf: [128]u8 = undefined;
+        const cmd = guessCommand(&buf, app_id) orelse return;
+        const app: dockapp.DockApp = .{
+            .name = app_id,
+            .command = &.{cmd},
+            .app_id = app_id,
+            .place = if (clip) .clip else .dock,
+            .workspace = if (clip) ui.clip_ws else null,
+        };
+        _ = m.addApp(ui.gpa(), app) catch |err| {
+            std.log.warn("dock: cannot keep {s}: {t}", .{ app_id, err });
+            return;
+        };
+    }
+
+    /// Run what a menu row asked for on an application's windows. Called
+    /// from sync(), i.e. inside the manage sequence, where window state may
+    /// change.
+    fn runAppRequest(ui: *Ui) void {
+        const req = ui.app_request orelse return;
+        ui.app_request = null;
+        const wm = ui.wm;
+        const app = ui.slotApp(req.ref) orelse return;
+        const dest = types.workingOutput(wm);
+
+        var last: ?*types.Window = null;
+        var it = wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, wm)) {
+            if (w.closed or w.docked) continue;
+            const id = w.app_id orelse continue;
+            if (!app.matches(id)) continue;
+            switch (req.op) {
+                .kill => w.obj.close(),
+                .hide => workspace.minimize(wm, w),
+                .unhide => if (w.minimized) {
+                    const out = dest orelse continue;
+                    workspace.restore(wm, w, out.ws()) catch continue;
+                    last = w;
+                },
+                .bring_here => {
+                    const out = dest orelse continue;
+                    if (w.minimized) {
+                        workspace.restore(wm, w, out.ws()) catch continue;
+                    } else if (w.workspace) |src| {
+                        if (src != out.ws()) workspace.moveToWorkspace(wm, w, out.ws()) catch continue;
+                    }
+                    last = w;
+                },
+            }
+        }
+        if (last) |w| {
+            wm.focus_request = w;
+            wm.follow_request = true;
         }
     }
 
@@ -1146,6 +1548,7 @@ pub const Ui = struct {
         // Before the desktops: both lower themselves to the bottom of the
         // render list, and the last one lowered is the lowest. The desktop
         // catcher must stay below a lowered Dock.
+        ui.runAppRequest();
         ui.syncBars();
         ui.syncDesktops();
         ui.runRequest();
@@ -1164,9 +1567,10 @@ pub const Ui = struct {
     /// Render sequence: restacking only (rendering state is legal there).
     pub fn onRender(ui: *Ui) void {
         // Bottom to top: Dock/Clip, the windows hosted by the Dock, menus.
-        if (ui.dock_on_top) if (ui.dock.panel) |p| p.node.placeTop();
-        if (ui.clip_on_top) if (ui.clip.panel) |p| p.node.placeTop();
-        if (ui.dock_on_top) {
+        const dock_up = ui.raised(.dock);
+        if (dock_up) if (ui.dock.panel) |p| p.node.placeTop();
+        if (ui.raised(.clip)) if (ui.clip.panel) |p| p.node.placeTop();
+        if (dock_up) {
             var it = ui.wm.windows.first();
             while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
                 if (w.docked and !w.closed) w.node.placeTop();
@@ -1200,12 +1604,20 @@ pub const Ui = struct {
             std.log.err("dock: cannot build the model: {t}", .{err});
             break :blk null;
         };
-        ui.dock_on_top = wm.cfg.dock_on_top;
+        ui.dock_level = dock_mod.levelFor(wm.cfg.dock_on_top, wm.cfg.dock_auto_raise);
         ui.clip_on_top = wm.cfg.clip_on_top;
         ui.clip_collapsed = wm.cfg.clip_collapsed;
+        ui.clip_auto_collapse = wm.cfg.clip_auto_collapse;
+        ui.clip_auto_raise = wm.cfg.clip_auto_raise;
+        ui.dock_clicked = false;
+        ui.clip_clicked = false;
+        // Indices into the old model mean nothing now.
+        ui.press = null;
+        ui.app_request = null;
         for ([_]*Bar{ &ui.dock, &ui.clip }) |b| {
             b.hover = null;
             b.hover_arrow = .none;
+            b.drag = null;
             b.dirty = true;
         }
     }
@@ -1217,7 +1629,67 @@ pub const Ui = struct {
         b.ntiles = 0;
         b.hover = null;
         b.hover_arrow = .none;
+        b.drag = null;
         b.dirty = true;
+    }
+
+    /// Is this bar drawn above the windows right now? Window Maker's three
+    /// "Dock position" levels: always (top), while the pointer is on it or
+    /// a drag is going (auto), after a click until the focus moves on
+    /// (normal). The Clip has the same with its own switches.
+    fn raised(ui: *const Ui, kind: BarKind) bool {
+        const b = if (kind == .dock) &ui.dock else &ui.clip;
+        if (b.drag != null) return true;
+        return switch (kind) {
+            .dock => switch (ui.dock_level) {
+                .top => true,
+                .auto => b.hover != null,
+                .normal => ui.dock_clicked,
+            },
+            .clip => ui.clip_on_top or ui.clip_clicked or (ui.clip_auto_raise and b.hover != null),
+        };
+    }
+
+    /// Milliseconds on a clock that only goes forward, wrapping at 2^32 (all
+    /// comparisons use wrapping subtraction).
+    fn nowMs(ui: *const Ui) u32 {
+        const ts = std.Io.Clock.awake.now(ui.wm.io);
+        return @truncate(@as(u64, @intCast(@max(0, ts.toMilliseconds()))));
+    }
+
+    /// What `saveState` writes next to the entries.
+    fn savedState(ui: *const Ui) dockapp.State {
+        const cfg = &ui.wm.cfg;
+        return .{
+            .edge = cfg.dock_edge,
+            .offset = cfg.dock_offset,
+            .dock_on_top = ui.dock_level == .top,
+            .dock_auto_raise = ui.dock_level == .auto,
+            .clip_corner = cfg.clip_corner,
+            .clip_on_top = ui.clip_on_top,
+            // With Autocollapse the fold state changes all the time and is
+            // not worth remembering.
+            .clip_collapsed = if (ui.clip_auto_collapse) null else ui.clip_collapsed,
+            .clip_auto_collapse = ui.clip_auto_collapse,
+            .clip_auto_raise = ui.clip_auto_raise,
+        };
+    }
+
+    /// Write the Dock and Clip contents and switches to the state file
+    /// (`dock_save_state`, see wm_files.saveDockState). Never fatal.
+    fn saveState(ui: *Ui) void {
+        const wm = ui.wm;
+        if (!wm.cfg.dock_save_state) return;
+        const path = wm.dock_state_path orelse return;
+        const m = if (ui.model) |*mm| mm else return;
+        var arena: std.heap.ArenaAllocator = .init(ui.gpa());
+        defer arena.deinit();
+        const list = m.exportList(arena.allocator()) catch return;
+        wm_files.saveDockState(wm.io, ui.gpa(), path, list.apps, ui.savedState()) catch |err| {
+            std.log.warn("dock: cannot save the state to {s}: {t}", .{ path, err });
+            return;
+        };
+        std.log.info("dock: state saved to {s}", .{path});
     }
 
     /// Make the surface of `b` match `rect` (new surface if its size
@@ -1253,7 +1725,7 @@ pub const Ui = struct {
                 return;
             };
             switch (b.kind) {
-                .dock => dock_mod.drawDock(&slot.canvas, m, b.ntiles, b.hover),
+                .dock => dock_mod.drawDockDrag(&slot.canvas, m, b.ntiles, b.hover, b.drag),
                 .clip => dock_mod.drawClip(&slot.canvas, m, .{
                     .workspace = out.active,
                     .name = m.workspaceName(out.active),
@@ -1261,14 +1733,14 @@ pub const Ui = struct {
                     .on_left = dock_mod.clipOnLeft(ui.wm.cfg.clip_corner),
                     .hover = b.hover,
                     .hover_arrow = b.hover_arrow,
+                    .drag = b.drag,
                 }),
             }
             panel.present(slot);
             b.dirty = false;
         }
         place(panel, b.rect.x, b.rect.y);
-        const on_top = if (b.kind == .dock) ui.dock_on_top else ui.clip_on_top;
-        if (!on_top) panel.node.placeBottom();
+        if (!ui.raised(b.kind)) panel.node.placeBottom();
     }
 
     /// Mark the tiles whose application has a window; true if that changed.
@@ -1308,9 +1780,18 @@ pub const Ui = struct {
             return;
         };
 
-        if (ui.updateRunning(m)) {
+        if (ui.updateRunning(m) or m.expireLaunching(ui.nowMs(), launch_timeout_ms)) {
             ui.dock.dirty = true;
             ui.clip.dirty = true;
+        }
+
+        // A Dock/Clip raised by a click goes back down once the keyboard
+        // focus has moved to another window.
+        const focus_now: ?*types.Window = if (wm.seats.first()) |sd| sd.focused else null;
+        if (focus_now != ui.raise_focus) {
+            ui.raise_focus = focus_now;
+            ui.dock_clicked = false;
+            ui.clip_clicked = false;
         }
 
         const cfg = &wm.cfg;
@@ -1319,11 +1800,11 @@ pub const Ui = struct {
         var dock_rect: ?types.Rect = null;
         if (cfg.dock_enabled) {
             const n = @min(m.dockTiles(), dock_mod.tilesThatFit(primary.rect.h));
-            const r = dock_mod.dockRect(primary.rect, n, cfg);
+            const r = dock_mod.dockRectAt(primary.rect, n, cfg.dock_edge, cfg.dock_offset);
             ui.prepareBar(&ui.dock, primary, r, n);
             dock_rect = r;
             // Lowered, the Dock is just another thing windows can cover.
-            if (cfg.dock_reserve_space and ui.dock_on_top) switch (cfg.dock_edge) {
+            if (cfg.dock_reserve_space and ui.dock_level == .top) switch (cfg.dock_edge) {
                 .left => primary.reserved.left = dock_mod.tile,
                 .right => primary.reserved.right = dock_mod.tile,
             };
@@ -1378,41 +1859,170 @@ pub const Ui = struct {
         return me;
     }
 
+    /// "• label" for the choice that is on, "  label" otherwise (the menus
+    /// have no check marks).
+    fn marked(ui: *Ui, on: bool, label: []const u8) ![:0]const u8 {
+        return std.fmt.allocPrintSentinel(ui.a(), "{s} {s}", .{ if (on) "\u{2022}" else " ", label }, 0);
+    }
+
+    fn buildDockPositionLevel(ui: *Ui) !usize {
+        const me = ui.levels.items.len;
+        try ui.levels.append(ui.gpa(), undefined);
+        var rows: std.ArrayList(Row) = .empty;
+        for ([_]dock_mod.Level{ .normal, .auto, .top }) |l| {
+            try rows.append(ui.a(), .{
+                .label = try ui.marked(ui.dock_level == l, l.label()),
+                .kind = .{ .ui_cmd = .{ .set_dock_level = l } },
+            });
+        }
+        return ui.finishLevel(me, "Dock position", &rows);
+    }
+
+    fn buildClipOptionsLevel(ui: *Ui) !usize {
+        const me = ui.levels.items.len;
+        try ui.levels.append(ui.gpa(), undefined);
+        var rows: std.ArrayList(Row) = .empty;
+        try rows.append(ui.a(), .{ .label = try ui.marked(ui.clip_on_top, "Keep on Top"), .kind = .{ .ui_cmd = .toggle_clip_level } });
+        try rows.append(ui.a(), .{ .label = try ui.marked(ui.clip_collapsed, "Collapsed"), .kind = .{ .ui_cmd = .toggle_clip_collapse } });
+        try rows.append(ui.a(), .{ .label = try ui.marked(ui.clip_auto_collapse, "Autocollapse"), .kind = .{ .ui_cmd = .toggle_clip_auto_collapse } });
+        try rows.append(ui.a(), .{ .label = try ui.marked(ui.clip_auto_raise, "Autoraise"), .kind = .{ .ui_cmd = .toggle_clip_auto_raise } });
+        return ui.finishLevel(me, "Clip Options", &rows);
+    }
+
+    /// Programs with a window that have no Dock/Clip entry yet, one row each
+    /// (at most `max_keep_rows`). Window Maker's "Keep Icon".
+    fn buildKeepLevel(ui: *Ui, clip: bool) !?usize {
+        const m = if (ui.model) |*mm| mm else return null;
+        const me = ui.levels.items.len;
+        try ui.levels.append(ui.gpa(), undefined);
+        var rows: std.ArrayList(Row) = .empty;
+        var it = ui.wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
+            if (rows.items.len >= max_keep_rows) break;
+            if (w.closed) continue;
+            const id = w.app_id orelse continue;
+            if (!validAppId(id) or dockapp.isSelfDeclared(id) or m.hasApp(id)) continue;
+            var dup = false;
+            for (rows.items) |r| {
+                if (std.mem.eql(u8, r.label, clipUtf8(id, max_label_bytes))) dup = true;
+            }
+            if (dup) continue;
+            const stored = try ui.a().dupe(u8, id);
+            try rows.append(ui.a(), .{
+                .label = try ui.zdup(clipUtf8(id, 64)),
+                .kind = .{ .ui_cmd = .{ .keep = .{ .app_id = stored, .clip = clip } } },
+            });
+        }
+        if (rows.items.len == 0) {
+            _ = ui.levels.pop();
+            return null;
+        }
+        return try ui.finishLevel(me, "Keep Application", &rows);
+    }
+
+    /// Clip only: where an entry is shown (Window Maker's "Move Icon To").
+    fn buildMoveLevel(ui: *Ui, ref: SlotRef) !usize {
+        const me = ui.levels.items.len;
+        try ui.levels.append(ui.gpa(), undefined);
+        var rows: std.ArrayList(Row) = .empty;
+        const m = if (ui.model) |*mm| mm else return error.NoModel;
+        const cur: ?u32 = if (ui.slotApp(ref)) |app| app.workspace else null;
+        try rows.append(ui.a(), .{
+            .label = try ui.marked(cur == null, "All workspaces"),
+            .kind = .{ .ui_cmd = .{ .set_workspace = .{ .ref = ref, .ws = null } } },
+        });
+        const n = @min(ui.wm.cfg.workspace_count, max_move_rows);
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            const label = if (m.workspaceName(i)) |name|
+                try std.fmt.allocPrint(ui.a(), "{d}  {s}", .{ i + 1, clipUtf8(name, 40) })
+            else
+                try std.fmt.allocPrint(ui.a(), "{d}", .{i + 1});
+            const marked_label = try ui.marked(cur != null and cur.? == i, label);
+            try rows.append(ui.a(), .{
+                .label = marked_label,
+                .kind = .{ .ui_cmd = .{ .set_workspace = .{ .ref = ref, .ws = i } } },
+            });
+        }
+        return ui.finishLevel(me, "Move Icon To", &rows);
+    }
+
     fn buildBarMenu(ui: *Ui, kind: BarMenuKind, slot: ?SlotRef) !usize {
         if (kind == .workspaces) return ui.buildWorkspaceLevel();
+        if (kind == .info) return ui.buildTextLevel(.info_panel);
 
         const me = ui.levels.items.len;
         try ui.levels.append(ui.gpa(), undefined);
         var rows: std.ArrayList(Row) = .empty;
 
         var title: []const u8 = if (kind == .dock) "Dock" else "Clip";
+        var on_tile = false;
         if (slot) |ref| if (ui.slotApp(ref)) |app| {
+            on_tile = true;
             title = app.name;
-            const label = try std.fmt.allocPrintSentinel(ui.a(), "Launch {s}", .{clipUtf8(app.name, 64)}, 0);
-            try rows.append(ui.a(), .{ .label = label, .kind = .{ .ui_cmd = .{ .launch = ref } } });
+            const st = ui.appState(app);
+            const running = st.open > 0;
+            const all_hidden = running and st.hidden == st.open;
+
+            // Window Maker's per-icon entries, in its order.
+            try rows.append(ui.a(), .{ .label = "Launch", .kind = .{ .ui_cmd = .{ .launch = ref } } });
+            try rows.append(ui.a(), .{
+                .label = if (all_hidden) "Unhide Here" else "Bring Here",
+                .enabled = running,
+                .kind = .{ .ui_cmd = .{ .app_op = .{ .op = .bring_here, .ref = ref } } },
+            });
+            try rows.append(ui.a(), .{
+                .label = if (all_hidden) "Unhide" else "Hide",
+                .enabled = running,
+                .kind = .{ .ui_cmd = .{ .app_op = .{ .op = if (all_hidden) .unhide else .hide, .ref = ref } } },
+            });
+            if (ref.clip) {
+                const child = try ui.buildMoveLevel(ref);
+                try rows.append(ui.a(), .{ .label = "Move Icon To", .kind = .{ .submenu = child } });
+            }
+            try rows.append(ui.a(), .{
+                .label = if (app.locked) "Unlock" else "Lock",
+                .kind = .{ .ui_cmd = .{ .toggle_lock = ref } },
+            });
+            try rows.append(ui.a(), .{
+                .label = "Remove Icon",
+                .enabled = !app.locked,
+                .kind = .{ .ui_cmd = .{ .remove = ref } },
+            });
+            try rows.append(ui.a(), .{
+                .label = "Kill",
+                .enabled = running,
+                .kind = .{ .ui_cmd = .{ .app_op = .{ .op = .kill, .ref = ref } } },
+            });
         };
 
-        switch (kind) {
-            .dock => try rows.append(ui.a(), .{
-                .label = if (ui.dock_on_top) "Lower Dock" else "Keep Dock on Top",
-                .kind = .{ .ui_cmd = .toggle_dock_level },
-            }),
+        if (!on_tile) switch (kind) {
+            .dock => {
+                const pos = try ui.buildDockPositionLevel();
+                try rows.append(ui.a(), .{ .label = "Dock position", .kind = .{ .submenu = pos } });
+                if (try ui.buildKeepLevel(false)) |keep| {
+                    try rows.append(ui.a(), .{ .label = "Keep Application", .kind = .{ .submenu = keep } });
+                } else {
+                    try rows.append(ui.a(), .{ .label = "Keep Application", .enabled = false, .kind = .none });
+                }
+                const info = try ui.buildTextLevel(.info_panel);
+                try rows.append(ui.a(), .{ .label = "Info Panel", .kind = .{ .submenu = info } });
+            },
             .clip => {
-                try rows.append(ui.a(), .{
-                    .label = if (ui.clip_collapsed) "Expand Clip" else "Collapse Clip",
-                    .kind = .{ .ui_cmd = .toggle_clip_collapse },
-                });
-                try rows.append(ui.a(), .{
-                    .label = if (ui.clip_on_top) "Lower Clip" else "Keep Clip on Top",
-                    .kind = .{ .ui_cmd = .toggle_clip_level },
-                });
+                const opts = try ui.buildClipOptionsLevel();
+                try rows.append(ui.a(), .{ .label = "Clip Options", .kind = .{ .submenu = opts } });
+                if (try ui.buildKeepLevel(true)) |keep| {
+                    try rows.append(ui.a(), .{ .label = "Keep Application", .kind = .{ .submenu = keep } });
+                } else {
+                    try rows.append(ui.a(), .{ .label = "Keep Application", .enabled = false, .kind = .none });
+                }
                 try rows.append(ui.a(), .{ .label = "Next Workspace", .kind = .{ .builtin = .workspace_next } });
                 try rows.append(ui.a(), .{ .label = "Previous Workspace", .kind = .{ .builtin = .workspace_prev } });
                 const child = try ui.buildWorkspaceLevel();
                 try rows.append(ui.a(), .{ .label = "Workspaces", .kind = .{ .submenu = child } });
             },
-            .workspaces => unreachable,
-        }
+            .workspaces, .info => unreachable,
+        };
         return ui.finishLevel(me, title, &rows);
     }
 
@@ -2042,63 +2652,507 @@ test "barHit: Clip tiles and arrows, anchored left and right" {
     try std.testing.expectEqual(@as(?usize, 2), ui.barHit(&bar).tile);
 }
 
-test "buildBarMenu: Dock menu on an application tile and on the logo" {
-    var wm: types.WindowManager = undefined;
-    wm.gpa = std.testing.allocator;
-    wm.cfg = .{ .arena = .init(std.testing.allocator) };
-    defer wm.cfg.deinit();
-    var ui = testUi(std.testing.allocator, &wm);
-    defer {
-        ui.levels.deinit(std.testing.allocator);
-        ui.arena.deinit();
+var test_dummy: u8 = 0;
+
+/// A WindowManager + Ui + Output with a Dock model, enough for the menus,
+/// run-time switches and the drag logic (nothing here talks to river).
+const Fx = struct {
+    wm: types.WindowManager,
+    ui: Ui,
+    out: types.Output,
+    wins: [8]*types.Window = undefined,
+    nwins: usize = 0,
+
+    fn create(apps: []const dockapp.DockApp) !*Fx {
+        const a = std.testing.allocator;
+        const f = try a.create(Fx);
+        f.* = .{
+            .wm = .{
+                .gpa = a,
+                .io = undefined,
+                .cfg = .{ .arena = .init(a) },
+                .obj = @ptrCast(&test_dummy),
+                .obj_version = 6,
+                .outputs = undefined,
+                .windows = undefined,
+                .seats = undefined,
+            },
+            .ui = undefined,
+            .out = .{ .obj = @ptrCast(&test_dummy) },
+        };
+        f.out.rect = .{ .x = 0, .y = 0, .w = 1920, .h = 1080 };
+        f.wm.windows.init();
+        f.wm.outputs.init();
+        f.wm.seats.init();
+        f.wm.cfg.dock_save_state = false;
+        f.ui = testUi(a, &f.wm);
+        f.ui.model = try dock_mod.Model.init(a, .{ .apps = apps }, &.{}, 4);
+        return f;
     }
-    const apps = dockTestApps();
-    ui.model = try dock_mod.Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer ui.model.?.deinit();
 
-    // On the "term" tile: Launch + level toggle.
-    const top = try ui.buildBarMenu(.dock, .{ .clip = false, .index = 0 });
-    const lvl = ui.levels.items[top];
-    try std.testing.expectEqualStrings("term", lvl.title);
-    try std.testing.expectEqual(@as(usize, 2), lvl.rows.len);
-    try std.testing.expectEqualStrings("Launch term", lvl.rows[0].label);
-    try std.testing.expect(lvl.rows[0].kind.ui_cmd.launch.index == 0);
-    try std.testing.expectEqualStrings("Lower Dock", lvl.rows[1].label);
+    fn destroy(f: *Fx) void {
+        const a = std.testing.allocator;
+        f.ui.levels.deinit(a);
+        f.ui.arena.deinit();
+        if (f.ui.model) |*m| m.deinit();
+        for (f.wins[0..f.nwins]) |w| {
+            types.unlink(&w.link);
+            if (w.app_id) |id| a.free(id);
+            a.destroy(w);
+        }
+        f.wm.cfg.deinit();
+        a.destroy(f);
+    }
 
-    // The label follows the current state.
-    ui.resetMenu();
-    ui.dock_on_top = false;
-    const top2 = try ui.buildBarMenu(.dock, null);
-    try std.testing.expectEqualStrings("Dock", ui.levels.items[top2].title);
-    try std.testing.expectEqual(@as(usize, 1), ui.levels.items[top2].rows.len);
-    try std.testing.expectEqualStrings("Keep Dock on Top", ui.levels.items[top2].rows[0].label);
+    fn addWindow(f: *Fx, app_id: []const u8) !*types.Window {
+        const w = try std.testing.allocator.create(types.Window);
+        w.* = .{ .obj = @ptrCast(&test_dummy), .node = @ptrCast(&test_dummy) };
+        w.app_id = try std.testing.allocator.dupe(u8, app_id);
+        f.wm.windows.append(w);
+        f.wins[f.nwins] = w;
+        f.nwins += 1;
+        return w;
+    }
 
-    // A stale slot (the list was rebuilt while the menu was being asked
-    // for) is just not offered.
-    ui.resetMenu();
-    const top3 = try ui.buildBarMenu(.dock, .{ .clip = false, .index = 99 });
-    try std.testing.expectEqual(@as(usize, 1), ui.levels.items[top3].rows.len);
+    /// Dock surface of `n` tiles at the right edge of the output.
+    fn dockBar(f: *Fx, n: usize) *Bar {
+        f.ui.dock.output = &f.out;
+        f.ui.dock.ntiles = n;
+        f.ui.dock.rect = dock_mod.dockRectAt(f.out.rect, n, .right, 0);
+        return &f.ui.dock;
+    }
+};
+
+fn rowLabels(lvl: Level, out: *[16][]const u8) []const []const u8 {
+    for (lvl.rows, 0..) |r, i| out[i] = r.label;
+    return out[0..lvl.rows.len];
 }
 
-test "runUiCmd flips the run-time switches" {
-    var wm: types.WindowManager = undefined;
-    wm.cfg = .{ .arena = .init(std.testing.allocator) };
-    defer wm.cfg.deinit();
-    var ui = testUi(std.testing.allocator, &wm);
-    defer ui.arena.deinit();
+test "isDoubleClick: same button, bar and tile within the delay, wrapping time" {
+    const last: LastClick = .{ .time = 1000, .button = BTN_LEFT, .kind = .dock, .tile = 2, .valid = true };
+    try std.testing.expect(isDoubleClick(last, 1300, BTN_LEFT, .dock, 2));
+    try std.testing.expect(isDoubleClick(last, 1000 + double_click_ms, BTN_LEFT, .dock, 2));
+    try std.testing.expect(!isDoubleClick(last, 1000 + double_click_ms + 1, BTN_LEFT, .dock, 2));
+    try std.testing.expect(!isDoubleClick(last, 1100, BTN_RIGHT, .dock, 2));
+    try std.testing.expect(!isDoubleClick(last, 1100, BTN_LEFT, .clip, 2));
+    try std.testing.expect(!isDoubleClick(last, 1100, BTN_LEFT, .dock, 3));
+    try std.testing.expect(!isDoubleClick(.{}, 1, BTN_LEFT, .dock, 0)); // nothing before
+    // The millisecond counter wraps around 2^32.
+    const wrapped: LastClick = .{ .time = 0xffffff00, .button = BTN_LEFT, .kind = .dock, .tile = 1, .valid = true };
+    try std.testing.expect(isDoubleClick(wrapped, 0x50, BTN_LEFT, .dock, 1));
+    try std.testing.expect(!isDoubleClick(wrapped, 0x100, BTN_LEFT, .dock, 1));
+}
 
-    try std.testing.expect(ui.dock_on_top);
-    ui.runUiCmd(.toggle_dock_level);
-    try std.testing.expect(!ui.dock_on_top);
-    ui.runUiCmd(.toggle_dock_level);
-    try std.testing.expect(ui.dock_on_top);
+test "validAppId and guessCommand: only plain program names become entries" {
+    try std.testing.expect(validAppId("firefox"));
+    try std.testing.expect(validAppId("org.mozilla.firefox"));
+    try std.testing.expect(validAppId("my-app_2+"));
+    try std.testing.expect(!validAppId(""));
+    try std.testing.expect(!validAppId("has space"));
+    try std.testing.expect(!validAppId("a\"b"));
+    try std.testing.expect(!validAppId("../evil"));
+    try std.testing.expect(!validAppId("-rf"));
+    try std.testing.expect(!validAppId(".hidden"));
+    try std.testing.expect(!validAppId("x" ** 101));
+
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("firefox", guessCommand(&buf, "org.mozilla.firefox").?);
+    try std.testing.expectEqualStrings("alacritty", guessCommand(&buf, "Alacritty").?);
+    try std.testing.expectEqualStrings("foot", guessCommand(&buf, "foot").?);
+    try std.testing.expectEqualStrings("trailing.", guessCommand(&buf, "trailing.").?);
+}
+
+test "buildBarMenu: the logo's menu has Dock position (current one marked), Keep Application, Info" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    f.ui.dock_level = .auto;
+
+    const top = try f.ui.buildBarMenu(.dock, null);
+    const lvl = f.ui.levels.items[top];
+    try std.testing.expectEqualStrings("Dock", lvl.title);
+    try std.testing.expectEqual(@as(usize, 3), lvl.rows.len);
+    try std.testing.expectEqualStrings("Dock position", lvl.rows[0].label);
+    // No window of an unknown program: Keep Application is shown, greyed out.
+    try std.testing.expectEqualStrings("Keep Application", lvl.rows[1].label);
+    try std.testing.expect(!lvl.rows[1].enabled);
+    try std.testing.expectEqualStrings("Info Panel", lvl.rows[2].label);
+
+    const pos = f.ui.levels.items[lvl.rows[0].kind.submenu];
+    try std.testing.expectEqual(@as(usize, 3), pos.rows.len);
+    try std.testing.expect(std.mem.endsWith(u8, pos.rows[0].label, "Normal"));
+    try std.testing.expect(std.mem.endsWith(u8, pos.rows[1].label, "Auto raise & lower"));
+    try std.testing.expect(std.mem.endsWith(u8, pos.rows[2].label, "Keep on Top"));
+    try std.testing.expect(std.mem.startsWith(u8, pos.rows[1].label, "\u{2022}"));
+    try std.testing.expect(!std.mem.startsWith(u8, pos.rows[0].label, "\u{2022}"));
+    try std.testing.expectEqual(dock_mod.Level.top, pos.rows[2].kind.ui_cmd.set_dock_level);
+}
+
+test "buildBarMenu: Keep Application lists programs that have a window but no tile" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    _ = try f.addWindow("foot"); // "term" starts foot: already has a tile
+    _ = try f.addWindow("org.gnome.Nautilus");
+    _ = try f.addWindow("org.gnome.Nautilus"); // twice: listed once
+    _ = try f.addWindow("dockapp:clock"); // a DockApp is never offered
+    _ = try f.addWindow("bad id"); // not a plain name
+
+    const top = try f.ui.buildBarMenu(.dock, null);
+    const keep = f.ui.levels.items[f.ui.levels.items[top].rows[1].kind.submenu];
+    try std.testing.expectEqual(@as(usize, 1), keep.rows.len);
+    try std.testing.expectEqualStrings("org.gnome.Nautilus", keep.rows[0].label);
+    const k = keep.rows[0].kind.ui_cmd.keep;
+    try std.testing.expectEqualStrings("org.gnome.Nautilus", k.app_id);
+    try std.testing.expect(!k.clip);
+}
+
+test "buildBarMenu: an application tile gets Window Maker's entries, enabled by what runs" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+
+    // Not running: only Launch, Lock and Remove Icon do anything.
+    const top = try f.ui.buildBarMenu(.dock, .{ .clip = false, .index = 0 });
+    const lvl = f.ui.levels.items[top];
+    try std.testing.expectEqualStrings("term", lvl.title);
+    var buf: [16][]const u8 = undefined;
+    const labels = rowLabels(lvl, &buf);
+    const want = [_][]const u8{ "Launch", "Bring Here", "Hide", "Lock", "Remove Icon", "Kill" };
+    try std.testing.expectEqual(want.len, labels.len);
+    for (want, labels) |w, g| try std.testing.expectEqualStrings(w, g);
+    try std.testing.expect(lvl.rows[0].enabled);
+    try std.testing.expect(!lvl.rows[1].enabled);
+    try std.testing.expect(!lvl.rows[2].enabled);
+    try std.testing.expect(lvl.rows[4].enabled);
+    try std.testing.expect(!lvl.rows[5].enabled);
+    try std.testing.expect(lvl.rows[0].kind.ui_cmd.launch.index == 0);
+
+    // Running: Bring Here / Hide / Kill come alive.
+    f.ui.resetMenu();
+    const w = try f.addWindow("foot");
+    const t2 = f.ui.levels.items[try f.ui.buildBarMenu(.dock, .{ .clip = false, .index = 0 })];
+    try std.testing.expect(t2.rows[1].enabled and t2.rows[2].enabled and t2.rows[5].enabled);
+    try std.testing.expectEqualStrings("Hide", t2.rows[2].label);
+    try std.testing.expectEqual(AppOp.hide, t2.rows[2].kind.ui_cmd.app_op.op);
+
+    // All of its windows minimized: the labels turn around.
+    f.ui.resetMenu();
+    w.minimized = true;
+    const t3 = f.ui.levels.items[try f.ui.buildBarMenu(.dock, .{ .clip = false, .index = 0 })];
+    try std.testing.expectEqualStrings("Unhide Here", t3.rows[1].label);
+    try std.testing.expectEqualStrings("Unhide", t3.rows[2].label);
+    try std.testing.expectEqual(AppOp.unhide, t3.rows[2].kind.ui_cmd.app_op.op);
+
+    // A locked tile cannot be removed.
+    f.ui.resetMenu();
+    f.ui.model.?.dock[0].app.locked = true;
+    const t4 = f.ui.levels.items[try f.ui.buildBarMenu(.dock, .{ .clip = false, .index = 0 })];
+    try std.testing.expectEqualStrings("Unlock", t4.rows[3].label);
+    try std.testing.expect(!t4.rows[4].enabled);
+
+    // A stale slot (the list was rebuilt while the menu was being asked for)
+    // is just not offered: the logo menu comes instead.
+    f.ui.resetMenu();
+    const t5 = try f.ui.buildBarMenu(.dock, .{ .clip = false, .index = 99 });
+    try std.testing.expectEqualStrings("Dock", f.ui.levels.items[t5].title);
+}
+
+test "buildBarMenu: Clip menus, Clip Options with marks and Move Icon To" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    f.ui.clip_collapsed = true;
+    f.ui.clip_on_top = false;
+
+    const top = f.ui.levels.items[try f.ui.buildBarMenu(.clip, null)];
+    try std.testing.expectEqualStrings("Clip", top.title);
+    try std.testing.expectEqualStrings("Clip Options", top.rows[0].label);
+    const opts = f.ui.levels.items[top.rows[0].kind.submenu];
+    try std.testing.expectEqual(@as(usize, 4), opts.rows.len);
+    try std.testing.expect(std.mem.endsWith(u8, opts.rows[0].label, "Keep on Top"));
+    try std.testing.expect(!std.mem.startsWith(u8, opts.rows[0].label, "\u{2022}"));
+    try std.testing.expect(std.mem.endsWith(u8, opts.rows[1].label, "Collapsed"));
+    try std.testing.expect(std.mem.startsWith(u8, opts.rows[1].label, "\u{2022}"));
+    try std.testing.expect(std.mem.endsWith(u8, opts.rows[2].label, "Autocollapse"));
+    try std.testing.expect(std.mem.endsWith(u8, opts.rows[3].label, "Autoraise"));
+
+    // A Clip tile: Move Icon To lists "All workspaces" and the workspaces.
+    f.ui.resetMenu();
+    const tile_menu = f.ui.levels.items[try f.ui.buildBarMenu(.clip, .{ .clip = true, .index = 0 })];
+    try std.testing.expectEqualStrings("notes", tile_menu.title);
+    try std.testing.expectEqualStrings("Move Icon To", tile_menu.rows[3].label);
+    const mv = f.ui.levels.items[tile_menu.rows[3].kind.submenu];
+    try std.testing.expectEqual(@as(usize, 1 + 4), mv.rows.len);
+    try std.testing.expect(std.mem.endsWith(u8, mv.rows[0].label, "All workspaces"));
+    try std.testing.expect(std.mem.startsWith(u8, mv.rows[1].label, "\u{2022}")); // "notes" is on workspace 1
+    try std.testing.expectEqual(@as(?u32, 2), mv.rows[3].kind.ui_cmd.set_workspace.ws);
+}
+
+test "runUiCmd flips the run-time switches and edits the model" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const ui = &f.ui;
+
+    try std.testing.expectEqual(dock_mod.Level.top, ui.dock_level);
+    ui.runUiCmd(.{ .set_dock_level = .auto });
+    try std.testing.expectEqual(dock_mod.Level.auto, ui.dock_level);
+    ui.runUiCmd(.{ .set_dock_level = .normal });
+    try std.testing.expectEqual(dock_mod.Level.normal, ui.dock_level);
 
     ui.runUiCmd(.toggle_clip_level);
     try std.testing.expect(!ui.clip_on_top);
     ui.runUiCmd(.toggle_clip_collapse);
     try std.testing.expect(ui.clip_collapsed);
-    // A launch with no model (or a stale index) does nothing, not crash.
-    ui.runUiCmd(.{ .launch = .{ .clip = true, .index = 5 } });
+    ui.runUiCmd(.toggle_clip_auto_collapse);
+    ui.runUiCmd(.toggle_clip_auto_raise);
+    try std.testing.expect(ui.clip_auto_collapse and ui.clip_auto_raise);
+
+    // Lock and unlock a tile; a locked one is not removed.
+    ui.runUiCmd(.{ .toggle_lock = .{ .clip = false, .index = 0 } });
+    try std.testing.expect(ui.model.?.dock[0].app.locked);
+    ui.runUiCmd(.{ .remove = .{ .clip = false, .index = 0 } });
+    try std.testing.expectEqual(@as(usize, 1), ui.model.?.dock.len);
+    ui.runUiCmd(.{ .toggle_lock = .{ .clip = false, .index = 0 } });
+    ui.runUiCmd(.{ .remove = .{ .clip = false, .index = 0 } });
+    try std.testing.expectEqual(@as(usize, 0), ui.model.?.dock.len);
+
+    // Move a Clip entry to another workspace and to "all".
+    ui.runUiCmd(.{ .set_workspace = .{ .ref = .{ .clip = true, .index = 0 }, .ws = 3 } });
+    try std.testing.expectEqual(@as(?u32, 3), ui.model.?.clip[0].app.workspace);
+    ui.runUiCmd(.{ .set_workspace = .{ .ref = .{ .clip = true, .index = 0 }, .ws = null } });
+    try std.testing.expectEqual(@as(?u32, null), ui.model.?.clip[0].app.workspace);
+    // The Dock has no workspaces: ignored there.
+    ui.runUiCmd(.{ .set_workspace = .{ .ref = .{ .clip = false, .index = 0 }, .ws = 1 } });
+
+    // Keep Application makes an entry that matches its windows; twice and
+    // odd names do nothing.
+    ui.runUiCmd(.{ .keep = .{ .app_id = "org.gnome.Nautilus", .clip = false } });
+    try std.testing.expectEqual(@as(usize, 1), ui.model.?.dock.len);
+    const kept = ui.model.?.dock[0].app;
+    try std.testing.expectEqualStrings("nautilus", kept.command[0]);
+    try std.testing.expect(kept.matches("org.gnome.Nautilus"));
+    ui.runUiCmd(.{ .keep = .{ .app_id = "org.gnome.Nautilus", .clip = false } });
+    ui.runUiCmd(.{ .keep = .{ .app_id = "bad id", .clip = true } });
+    try std.testing.expectEqual(@as(usize, 1), ui.model.?.dock.len);
+    ui.clip_ws = 2;
+    ui.runUiCmd(.{ .keep = .{ .app_id = "foot2", .clip = true } });
+    try std.testing.expectEqual(@as(?u32, 2), ui.model.?.clip[ui.model.?.clip.len - 1].app.workspace);
+
+    // A launch with a stale index does nothing, not crash.
+    ui.runUiCmd(.{ .launch = .{ .clip = true, .index = 50 } });
+}
+
+test "runUiCmd app_op only records a request for sync() to run" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    f.ui.runUiCmd(.{ .app_op = .{ .op = .kill, .ref = .{ .clip = false, .index = 0 } } });
+    try std.testing.expectEqual(AppOp.kill, f.ui.app_request.?.op);
+}
+
+test "raised(): top always, auto while hovered, normal after a click, a drag lifts any" {
+    const f = try Fx.create(&.{});
+    defer f.destroy();
+    const ui = &f.ui;
+
+    ui.dock_level = .top;
+    try std.testing.expect(ui.raised(.dock));
+    ui.dock_level = .normal;
+    try std.testing.expect(!ui.raised(.dock));
+    ui.dock_clicked = true;
+    try std.testing.expect(ui.raised(.dock));
+    ui.dock_clicked = false;
+    ui.dock_level = .auto;
+    try std.testing.expect(!ui.raised(.dock));
+    ui.dock.hover = 1;
+    try std.testing.expect(ui.raised(.dock));
+    ui.dock.hover = null;
+    ui.dock_level = .normal;
+    ui.dock.drag = .{ .from = 1, .to = 2, .x = 0, .y = 0 };
+    try std.testing.expect(ui.raised(.dock));
+
+    ui.clip_on_top = false;
+    try std.testing.expect(!ui.raised(.clip));
+    ui.clip_auto_raise = true;
+    ui.clip.hover = 0;
+    try std.testing.expect(ui.raised(.clip));
+    ui.clip.hover = null;
+    ui.clip_clicked = true;
+    try std.testing.expect(ui.raised(.clip));
+}
+
+test "dragging a Dock tile: reorder, take away to remove, a locked tile stays" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "a", .command = &.{"a"}, .y = 0 },
+        .{ .name = "b", .command = &.{"b"}, .y = 1 },
+        .{ .name = "c", .command = &.{"c"}, .y = 2, .locked = true },
+    };
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const ui = &f.ui;
+    const bar = f.dockBar(4);
+    const m = &ui.model.?;
+
+    // Press "a" (tile 1), move a few pixels: below the threshold, no drag.
+    ui.press = .{ .kind = .dock_tile, .tile = 1, .slot = .{ .clip = false, .index = 0 }, .x = 30, .y = 90 };
+    ui.px = 32;
+    ui.py = 92;
+    try std.testing.expect(!ui.dragUpdate(bar));
+    try std.testing.expect(bar.drag == null);
+
+    // Down to tile 3: the drag shows where it would drop.
+    ui.px = 30;
+    ui.py = 3 * 64 + 10;
+    try std.testing.expect(ui.dragUpdate(bar));
+    try std.testing.expectEqual(@as(usize, 3), bar.drag.?.to);
+    try std.testing.expect(!bar.drag.?.detached);
+    try std.testing.expect(ui.finishPress(BTN_LEFT));
+    try std.testing.expect(ui.press == null and bar.drag == null);
+    try std.testing.expectEqualStrings("b", m.dock[0].app.name);
+    try std.testing.expectEqualStrings("c", m.dock[1].app.name);
+    try std.testing.expectEqualStrings("a", m.dock[2].app.name);
+
+    // Take "b" (now tile 1) far away from the Dock: it is removed.
+    ui.press = .{ .kind = .dock_tile, .tile = 1, .slot = .{ .clip = false, .index = 0 }, .x = 30, .y = 90 };
+    ui.px = -200;
+    ui.py = 100;
+    try std.testing.expect(ui.dragUpdate(bar));
+    try std.testing.expect(bar.drag.?.detached);
+    try std.testing.expect(ui.finishPress(BTN_LEFT));
+    try std.testing.expectEqual(@as(usize, 2), m.dock.len);
+    try std.testing.expectEqualStrings("c", m.dock[0].app.name);
+
+    // "c" is locked: pulling at it does nothing at all.
+    ui.press = .{ .kind = .dock_tile, .tile = 1, .slot = .{ .clip = false, .index = 0 }, .x = 30, .y = 90 };
+    ui.px = -200;
+    ui.py = 100;
+    try std.testing.expect(!ui.dragUpdate(bar));
+    try std.testing.expect(ui.press == null);
+    try std.testing.expectEqual(@as(usize, 2), m.dock.len);
+
+    // A release with nothing pressed (or another button) is not an event.
+    try std.testing.expect(!ui.finishPress(BTN_LEFT));
+    ui.press = .{ .kind = .dock_tile, .tile = 1, .slot = null, .x = 0, .y = 0 };
+    try std.testing.expect(!ui.finishPress(BTN_RIGHT));
+}
+
+test "dragging the logo moves the Dock to the other edge and along it" {
+    const f = try Fx.create(&.{});
+    defer f.destroy();
+    const ui = &f.ui;
+    const bar = f.dockBar(1);
+    try std.testing.expectEqual(config_mod.DockEdge.right, f.wm.cfg.dock_edge);
+
+    // Press the logo 30 px into the Dock, drag to global (100, 400).
+    ui.press = .{ .kind = .dock_logo, .tile = 0, .slot = null, .x = 30, .y = 30 };
+    ui.px = 100 - bar.rect.x;
+    ui.py = 400;
+    try std.testing.expect(ui.dragUpdate(bar));
+    try std.testing.expectEqual(config_mod.DockEdge.left, f.wm.cfg.dock_edge);
+    try std.testing.expectEqual(@as(i32, 370), f.wm.cfg.dock_offset);
+    try std.testing.expect(bar.drag == null);
+    try std.testing.expect(ui.finishPress(BTN_LEFT));
+}
+
+test "dragging the Clip's workspace tile picks the nearest corner" {
+    const f = try Fx.create(&.{});
+    defer f.destroy();
+    const ui = &f.ui;
+    ui.clip.output = &f.out;
+    ui.clip.ntiles = 1;
+    ui.clip.rect = dock_mod.clipRect(f.out.rect, 1, &f.wm.cfg, null);
+
+    ui.press = .{ .kind = .clip_body, .tile = 0, .slot = null, .x = 30, .y = 30 };
+    ui.px = 1800 - ui.clip.rect.x;
+    ui.py = 1000 - ui.clip.rect.y;
+    try std.testing.expect(ui.dragUpdate(&ui.clip));
+    try std.testing.expectEqual(config_mod.ClipCorner.bottom_right, f.wm.cfg.clip_corner);
+}
+
+test "dragging a Clip tile reorders within the row and takes away to remove" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "x", .command = &.{"x"}, .place = .clip, .x = 0 },
+        .{ .name = "y", .command = &.{"y"}, .place = .clip, .x = 1 },
+        .{ .name = "z", .command = &.{"z"}, .place = .clip, .x = 2 },
+    };
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const ui = &f.ui;
+    ui.clip.output = &f.out;
+    ui.clip_count = 3;
+    ui.clip_buf[0] = 0;
+    ui.clip_buf[1] = 1;
+    ui.clip_buf[2] = 2;
+    ui.clip.ntiles = 4;
+    ui.clip.rect = dock_mod.clipRect(f.out.rect, 4, &f.wm.cfg, null);
+    const m = &ui.model.?;
+
+    // Clip is anchored top-left: tile i is at x = i * 64. Take "x" (tile 1)
+    // over tile 3.
+    ui.press = .{ .kind = .clip_tile, .tile = 1, .slot = .{ .clip = true, .index = 0 }, .x = 90, .y = 30 };
+    ui.px = 3 * 64 + 20;
+    ui.py = 30;
+    try std.testing.expect(ui.dragUpdate(&ui.clip));
+    try std.testing.expectEqual(@as(usize, 3), ui.clip.drag.?.to);
+    try std.testing.expect(ui.finishPress(BTN_LEFT));
+    try std.testing.expectEqualStrings("y", m.clip[0].app.name);
+    try std.testing.expectEqualStrings("z", m.clip[1].app.name);
+    try std.testing.expectEqualStrings("x", m.clip[2].app.name);
+
+    // Pull "y" (tile 1) up and away.
+    ui.press = .{ .kind = .clip_tile, .tile = 1, .slot = .{ .clip = true, .index = 0 }, .x = 90, .y = 30 };
+    ui.px = 90;
+    ui.py = -300;
+    try std.testing.expect(ui.dragUpdate(&ui.clip));
+    try std.testing.expect(ui.clip.drag.?.detached);
+    try std.testing.expect(ui.finishPress(BTN_LEFT));
+    try std.testing.expectEqual(@as(usize, 2), m.clip.len);
+}
+
+test "saveState writes the model and the switches, loadable again" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+
+    const path = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-ui-state-{d}/dock.conf", .{std.c.getpid()});
+    defer a.free(path);
+    defer std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(path).?) catch {};
+
+    f.wm.io = io;
+    f.wm.dock_state_path = path;
+    f.wm.cfg.dock_save_state = true;
+    f.wm.cfg.dock_edge = .left;
+    f.wm.cfg.dock_offset = 77;
+    f.ui.dock_level = .auto;
+    f.ui.clip_collapsed = true;
+    f.ui.saveState();
+
+    const text = try std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, path, a, .limited(1 << 20));
+    defer a.free(text);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const list = try dockapp.parseOwn(arena.allocator(), text);
+    try std.testing.expectEqual(@as(usize, 3), list.apps.len);
+    const st = list.state.?;
+    try std.testing.expectEqual(config_mod.DockEdge.left, st.edge.?);
+    try std.testing.expectEqual(@as(i32, 77), st.offset.?);
+    try std.testing.expectEqual(false, st.dock_on_top.?);
+    try std.testing.expectEqual(true, st.dock_auto_raise.?);
+    try std.testing.expectEqual(true, st.clip_collapsed.?);
+
+    // With Autocollapse the fold state is not remembered.
+    f.ui.clip_auto_collapse = true;
+    try std.testing.expect(f.ui.savedState().clip_collapsed == null);
+
+    // Switched off: nothing is written.
+    f.wm.cfg.dock_save_state = false;
+    try std.Io.Dir.cwd().deleteFile(io, path);
+    f.ui.saveState();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, path, a, .limited(10)));
 }
 
 test "slotApp refuses indices past the end" {

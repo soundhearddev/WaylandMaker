@@ -447,6 +447,9 @@ pub const WindowManager = struct {
     /// and rebuilds when `dock_gen` changes (every (re)load bumps it).
     dockapps: dockapp.List = .{},
     dock_gen: u32 = 0,
+    /// Where the Dock saves what the user changed (null: not saved). Owned
+    /// by cfg's arena like `dockapps`.
+    dock_state_path: ?[]const u8 = null,
 
     /// Actions queued by key presses. `pressed` fires *outside* a manage
     /// sequence, but almost every request an action needs is only legal

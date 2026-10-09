@@ -188,6 +188,17 @@ pub const Config = struct {
     /// true: the Dock is drawn above windows (Window Maker's "Keep on top");
     /// false: below them ("Lowered").
     dock_on_top: bool = true,
+    /// Window Maker's "Auto raise & lower" (Dock position menu): only
+    /// counts while `dock_on_top` is off. The Dock then sits below windows
+    /// and comes up while the pointer is on it. `dock_level` sets both.
+    dock_auto_raise: bool = false,
+    /// Launch with ONE click on a Dock/Clip tile. Window Maker's default is
+    /// a double click (a single click only raises the Dock), which is also
+    /// the default here.
+    dock_single_click: bool = false,
+    /// Save moved/added/removed tiles and the Dock/Clip switches to the
+    /// state file (see docs/DOCKAPPS.md) and read it back at start-up.
+    dock_save_state: bool = true,
     /// Shrink the usable area by the Dock's width so tiled windows never end
     /// up under it. Ignored while the Dock is lowered.
     dock_reserve_space: bool = true,
@@ -198,6 +209,13 @@ pub const Config = struct {
     clip_on_top: bool = true,
     /// Start with only the Clip tile shown, without its workspace icons.
     clip_collapsed: bool = false,
+    /// Window Maker's "Autocollapse": the Clip folds up when the pointer
+    /// leaves it and unfolds when it comes back. (No delay: wmaker-wl has no
+    /// timers.)
+    clip_auto_collapse: bool = false,
+    /// Window Maker's "Autoraise": a Clip that is not `clip_on_top` comes up
+    /// while the pointer is on it.
+    clip_auto_raise: bool = false,
     /// Workspace names, in order. Missing/empty entries are shown as just
     /// the workspace number. Without this option the names of Window
     /// Maker's WMState (if read) are used.
@@ -539,10 +557,15 @@ fn applyOption(
     inline for (.{
         "dock_enabled",
         "dock_on_top",
+        "dock_auto_raise",
+        "dock_single_click",
+        "dock_save_state",
         "dock_reserve_space",
         "clip_enabled",
         "clip_on_top",
         "clip_collapsed",
+        "clip_auto_collapse",
+        "clip_auto_raise",
         "focus_new_windows",
         "workspace_wrap",
         "clip_scroll_workspaces",
@@ -587,6 +610,17 @@ fn applyOption(
             if (n >= max_bind_layouts) return error.Invalid;
             cfg.bind_layout = n;
         }
+    } else if (eql(u8, key, "dock_level")) {
+        // Window Maker's "Dock position" menu in one word.
+        if (eql(u8, value, "top")) {
+            cfg.dock_on_top = true;
+        } else if (eql(u8, value, "auto")) {
+            cfg.dock_on_top = false;
+            cfg.dock_auto_raise = true;
+        } else if (eql(u8, value, "normal")) {
+            cfg.dock_on_top = false;
+            cfg.dock_auto_raise = false;
+        } else return error.Invalid;
     } else if (eql(u8, key, "dock_edge")) {
         cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
     } else if (eql(u8, key, "clip_corner")) {
@@ -1132,4 +1166,48 @@ test "pixel options above max_pixels are refused instead of overflowing the layo
     try std.testing.expectEqual(@as(i32, 2), cfg.border_width);
     try std.testing.expectEqual(@as(i32, 10_000), cfg.outer_gap); // the limit itself is fine
     try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+fn parseText(arena: std.mem.Allocator, cfg: *Config, text: []const u8) !void {
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena, text, cfg, &binds, "<test>");
+}
+
+test "Dock options: dock_level sets both switches, new switches parse, defaults" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expect(cfg.dock_on_top);
+    try std.testing.expect(!cfg.dock_auto_raise);
+    try std.testing.expect(!cfg.dock_single_click);
+    try std.testing.expect(cfg.dock_save_state);
+    try std.testing.expect(!cfg.clip_auto_collapse);
+    try std.testing.expect(!cfg.clip_auto_raise);
+
+    try parseText(arena.allocator(), &cfg,
+        \\dock_level = auto
+        \\dock_single_click = yes
+        \\dock_save_state = no
+        \\clip_auto_collapse = yes
+        \\clip_auto_raise = true
+    );
+    try std.testing.expect(!cfg.dock_on_top);
+    try std.testing.expect(cfg.dock_auto_raise);
+    try std.testing.expect(cfg.dock_single_click);
+    try std.testing.expect(!cfg.dock_save_state);
+    try std.testing.expect(cfg.clip_auto_collapse);
+    try std.testing.expect(cfg.clip_auto_raise);
+
+    try parseText(arena.allocator(), &cfg, "dock_level = normal\n");
+    try std.testing.expect(!cfg.dock_on_top);
+    try std.testing.expect(!cfg.dock_auto_raise);
+
+    const before = cfg.parse_warnings;
+    try parseText(arena.allocator(), &cfg, "dock_level = nonsense\n");
+    try std.testing.expectEqual(before + 1, cfg.parse_warnings);
+    try std.testing.expect(!cfg.dock_on_top); // unchanged
+
+    try parseText(arena.allocator(), &cfg, "dock_level = auto\ndock_level = top\n");
+    try std.testing.expect(cfg.dock_on_top); // the later line wins
 }

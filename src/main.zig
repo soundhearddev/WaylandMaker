@@ -324,10 +324,26 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     // Dock/Clip contents. ui.zig deep-copies them when it sees a new
     // generation, so nothing outside this arena keeps pointing into it.
     wm.dockapps = files.dockapps;
+    wm.dock_state_path = files.dock_state_path;
+    // What the user changed with the mouse last time (Dock position, levels,
+    // Clip switches) wins over config.conf, exactly like the entries do.
+    if (files.dockapps.state) |st| applyDockState(&wm.cfg, st);
     wm.dock_gen +%= 1;
     // Copied, not borrowed: see gfx.Fonts.
     gfx.fonts.set(wm.cfg.font_menu_title, wm.cfg.font_menu, wm.cfg.font_dock);
     return files;
+}
+
+fn applyDockState(cfg: *config.Config, st: dockapp.State) void {
+    if (st.edge) |v| cfg.dock_edge = v;
+    if (st.offset) |v| cfg.dock_offset = v;
+    if (st.dock_on_top) |v| cfg.dock_on_top = v;
+    if (st.dock_auto_raise) |v| cfg.dock_auto_raise = v;
+    if (st.clip_corner) |v| cfg.clip_corner = v;
+    if (st.clip_on_top) |v| cfg.clip_on_top = v;
+    if (st.clip_collapsed) |v| cfg.clip_collapsed = v;
+    if (st.clip_auto_collapse) |v| cfg.clip_auto_collapse = v;
+    if (st.clip_auto_raise) |v| cfg.clip_auto_raise = v;
 }
 
 fn rebind(wm: *WindowManager) void {

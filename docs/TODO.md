@@ -42,7 +42,7 @@
       oder fokussiert es, wenn schon ein Fenster davon läuft (Vergleich über `DockApp.matches`:
       expliziter `app_id`, `dockapp:<name>`, Teile von `instance.Class`, `--class dockapp:…` im Befehl,
       Programmname); Mittelklick startet immer eine neue Instanz; Rechtsklick öffnet ein Menü (Launch,
-      „Lower Dock“/„Keep Dock on Top“). Läuft-Anzeige als kleines Dreieck unten links. PNG-Icons per
+      „Lower Dock“/„Keep Dock on Top“). Anzeige „läuft nicht“ siehe Dock-Überarbeitung unten. PNG-Icons per
       cairo (Pfad oder Name in `hicolor`/`pixmaps`), sonst der erste Buchstabe des Namens.
       Feste 64×64-DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`) werden direkt **in ihre
       Kachel gesetzt** (`ui.placeDocked`, über dem Dock gestapelt) und sind `omnipresent`.
@@ -69,10 +69,19 @@
       `None`, `#RGB`…`#RRRRGGGGBBBB`, `grayNN`, übliche X11-Namen; unbekannte Farbe = Magenta, damit ein
       falsches Icon auffällt). Größen werden vor jeder Allokation geprüft; kaputte Dateien lassen das Dock
       nie scheitern (die Kachel zeigt dann den Buchstaben).
-      *Noch offen:* SVG-Icons; Dock/Clip per Maus verschieben (Position kommt nur aus der Config);
-      Einträge per Drag & Drop hinzufügen/entfernen und Zustand zurückschreiben (wmaker-wl schreibt nie
-      in Nutzerdateien); „Collapse“ für das Dock; Attract-Icons des Clips; Mehr-Monitor (Dock/Clip
-      sitzen auf der ersten Ausgabe).
+      *Noch offen:* SVG-Icons; Drawers; „Settings…“-Dialog und „Rename Workspace“ (brauchen eigene
+      Texteingabe); Attract-Icons des Clips; Mehr-Monitor (Dock/Clip sitzen auf der ersten Ausgabe);
+      Verzögerung für Autocollapse/Auto raise (es gibt keine Timer).
+- [x] **Dock-Überarbeitung nach Window Makers Dock-System** (`dock.zig`, `dockapp.zig`, `ui.zig`,
+      `wm_files.zig`): Doppelklick startet (`dock_single_click` für einen Klick); *nicht* laufende Kachel =
+      drei Punkte unten links wie `dock_dots`, gerade gestartet = Raster (`launching`), Clip-Einträge auf
+      allen Workspaces = Eselsohr; Ziehen sortiert um, entfernt (weit weg loslassen) und verschiebt Dock
+      (Logo-Kachel, Rand und Offset) und Clip (Ecke); Menüs wie bei Window Maker (*Dock position*,
+      *Clip Options*, *Launch*, *Bring Here*, *Hide*, *Lock*, *Remove Icon*, *Kill*, *Keep Application*);
+      Stapelebenen *normal / auto / top* (`dock_level`); Clip *Autocollapse*/*Autoraise*. Zustand in
+      eigener Datei `$XDG_STATE_HOME/wmaker-wl/dock.conf`, atomar geschrieben, beim Start vor
+      `dockapps.conf` gelesen. Die fehlende `src/share/dockapps.conf` (der Test erwartete sie) ist
+      ergänzt. Details und Abweichungen vom Original: `docs/DOCKAPPS.md`.
 - [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf`, `RootMenu` und
       `WMWindowAttributes` neu ein und ersetzt alle Tastenkürzel im laufenden Betrieb, ohne Fenster oder
       Layout anzufassen (Autostart läuft bewusst nicht erneut). Signalhandler setzt nur ein Flag
