@@ -95,8 +95,10 @@ pub fn saveDockState(
     if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
-    try cwd.writeFile(io, .{ .sub_path = tmp, .data = aw.written() });
+    // Registered before the write: a write that fails half way (disk full)
+    // must not leave the temporary file behind either.
     errdefer cwd.deleteFile(io, tmp) catch {};
+    try cwd.writeFile(io, .{ .sub_path = tmp, .data = aw.written() });
     try cwd.rename(tmp, cwd, path, io);
 }
 

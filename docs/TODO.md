@@ -71,7 +71,7 @@
       nie scheitern (die Kachel zeigt dann den Buchstaben).
       *Noch offen:* SVG-Icons; Drawers; „Settings…“-Dialog und „Rename Workspace“ (brauchen eigene
       Texteingabe); Attract-Icons des Clips; Mehr-Monitor (Dock/Clip sitzen auf der ersten Ausgabe);
-      Verzögerung für Autocollapse/Auto raise (es gibt keine Timer).
+      Verzögerung für *Auto raise* (Autocollapse hat sie seit der Dock-Härtung unten).
 - [x] **Dock-Überarbeitung nach Window Makers Dock-System** (`dock.zig`, `dockapp.zig`, `ui.zig`,
       `wm_files.zig`): Doppelklick startet (`dock_single_click` für einen Klick); *nicht* laufende Kachel =
       drei Punkte unten links wie `dock_dots`, gerade gestartet = Raster (`launching`), Clip-Einträge auf
@@ -82,6 +82,35 @@
       eigener Datei `$XDG_STATE_HOME/wmaker-wl/dock.conf`, atomar geschrieben, beim Start vor
       `dockapps.conf` gelesen. Die fehlende `src/share/dockapps.conf` (der Test erwartete sie) ist
       ergänzt. Details und Abweichungen vom Original: `docs/DOCKAPPS.md`.
+- [x] **Dock-Härtung** (`wm_dock.zig`, `dock.zig`, `dockhost.zig`, `dockapp.zig`, `ui.zig`, `main.zig`;
+      ohne Compilerlauf geschrieben -- `zig build test` steht noch aus, siehe unten):
+      * *Event-Loop mit Timern*: `main.zig` nutzt statt `display.dispatch()` die `poll`-Schleife mit Timeout
+        (wie wlprefs); `Ui.nextTimeoutMs()` sagt, wann etwas fällig ist, `Ui.onTimer()` erledigt es nach
+        jedem Aufwachen. SIGHUP weckt weiter über EINTR.
+      * *Autocollapse mit Verzögerung* (Clip und Drawer): einklappen 700 ms nach dem Verlassen, aufklappen
+        250 ms nach dem Betreten (`fold_delay_ms`/`unfold_delay_ms`); ein nur überquerter oder kurz
+        verlassener Clip flackert nicht mehr.
+      * *„launching“ läuft ab, auch ohne weiteres Ereignis* (vorher erst beim nächsten Sync); ein Klick auf
+        eine gerade gestartete Kachel startet nicht noch einmal (`relaunch_guard_ms`, Mittelklick und
+        Menü-Launch starten weiter immer neu); ein Befehl, der gar nicht startet (`proc.spawnChecked`),
+        markiert die Kachel nicht mehr als „startet“.
+      * *Drawer bleiben heil*: `snapIcon` schiebt beim Ziehen die Kacheln eines Drawers beiseite; ließ man
+        woanders los, blieb dort eine Lücke. `wdock.consolidateAllDrawers` schließt sie beim Loslassen in
+        allen Drawers. Ein Drawer-Slot außerhalb des Bildschirms (Kapazität stammt aus einer größeren
+        Bildschirmgröße) wird nicht mehr vergeben.
+      * *Kacheln verlassen den Bildschirm nicht mehr*: Das Dock lässt sich nur so weit verschieben, dass alle
+        Kacheln und Drawers sichtbar bleiben (`Model.clampDockY`); wechselt das Clip die Ecke, spiegeln seine
+        Kacheln mit (`Model.mirrorClips`, die erste `layout`-Runde übernimmt die Ecke nur).
+      * *Beschädigte Zustandsdateien*: Rasterwerte jenseits von ±4096 (`dockapp.max_grid`) werden
+        verworfen statt `index * 64` überlaufen zu lassen (in Debug/ReleaseSafe ein Absturz des WM);
+        Positionen außerhalb der Reichweite eines Docks behandelt das Modell wie „keine Position“; ein
+        Drawer auf der Logo-Zeile oder auf der eines anderen Drawers wandert auf eine freie Zeile.
+      * *Kleinigkeiten*: Icon-Leck, wenn `slots.append` fehlschlug; zwei DockApps mit demselben Namen
+        liegen nicht mehr übereinander (nur die älteste wird gezeigt); eine zweite Maustaste während eines
+        Ziehens öffnet kein Menü mehr; ein halb geschriebenes `WMState.tmp` bleibt nicht liegen.
+      *Offen davon*: `zig build test` über die neuen Tests laufen lassen (alles hier ist ungeprüft
+      geschrieben); *Auto raise* ohne Verzögerung; Drawer-Kacheln gleiten beim Ziehen weiter erst beim
+      Loslassen zurück (nicht schon beim Verlassen des Drawers).
 - [x] **Live-Config-Reload (SIGHUP)**: `kill -HUP <pid>` liest `config.conf`, `RootMenu` und
       `WMWindowAttributes` neu ein und ersetzt alle Tastenkürzel im laufenden Betrieb, ohne Fenster oder
       Layout anzufassen (Autostart läuft bewusst nicht erneut). Signalhandler setzt nur ein Flag

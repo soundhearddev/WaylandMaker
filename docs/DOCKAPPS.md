@@ -98,3 +98,15 @@ Gespeichert wird alles in `WMState`: `Dock.Applications` (`Position = "0,y"`),
 Jede Dock-Fläche (Dock, Clip, jeder Drawer) ist **eine** Layer-Surface um ihre Kacheln plus einen
 Rand, auf den eine gezogene Kachel noch einrasten kann. Pointer-Eingaben nehmen nur die Kacheln
 an (Input-Region), alles andere geht durch.
+## Robustheit
+
+* **Eine Kachel, eine Instanz.** Laufen zwei DockApps mit demselben `app_id`, zeigt der Compositor nur die
+  älteste in der Kachel; die zweite bleibt unsichtbar, bis die erste endet (`dockhost.apply`).
+* **Das Dock bleibt sichtbar.** `Model.layout` schiebt das Dock nur so weit, dass jede Kachel und jeder Drawer
+  noch auf dem Bildschirm liegt; wechselt das Clip die Ecke, spiegeln seine Kacheln mit.
+* **Zustandsdatei mit Unsinn.** Positionen jenseits von ±4096 Kacheln (`dockapp.max_grid`) zählen als „keine
+  Position“, ein Drawer auf der Logo-Zeile oder auf der Zeile eines anderen Drawers bekommt eine freie Zeile.
+* **Autocollapse** wartet (700 ms zum Einklappen, 250 ms zum Aufklappen); der Timer läuft in der
+  `poll`-Schleife von `main.zig` (`Ui.nextTimeoutMs`/`Ui.onTimer`).
+* **Starten.** Ein zweiter einfacher Klick innerhalb von 1,5 s auf eine gerade gestartete Kachel startet nichts
+  noch einmal; Mittelklick und *Launch* im Menü starten immer eine neue Instanz.

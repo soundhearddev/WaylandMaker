@@ -331,7 +331,11 @@ pub fn findFreeSlot(scr: *const Screen, dock: *const Dock) Allocator.Error!?[2]i
     if (dock.kind == .drawer) {
         if (dock.icon_count >= dock.icons.len) return null;
         const n: i32 = @intCast(dock.icon_count);
-        return .{ n * (if (dock.on_right_side) @as(i32, -1) else 1), 0 };
+        const x = n * (if (dock.on_right_side) @as(i32, -1) else 1);
+        // The capacity was computed from a screen size that may be bigger
+        // than the real one: a slot beyond the screen edge is no slot.
+        if (!scr.onScreen(dock.x_pos + x * icon_size, dock.y_pos)) return null;
+        return .{ x, 0 };
     }
 
     var extra: usize = 0;
@@ -515,6 +519,14 @@ pub fn drawerConsolidateIcons(drawer: *Dock) void {
         max_remaining -= 1;
         sum -= @intCast(n);
     }
+}
+
+/// Close the holes of every Drawer. `snapIcon` slides the tiles of a Drawer
+/// aside while a tile is dragged over it (as the C code does) and nothing
+/// slides them back when the pointer moves on or the drag is given up, so
+/// whoever ends a drag calls this -- it is a no-op for a gap-free Drawer.
+pub fn consolidateAllDrawers(scr: *Screen) void {
+    for (scr.drawers.items) |d| drawerConsolidateIcons(d);
 }
 
 // ----------------------------------------------------------------------------
@@ -838,4 +850,48 @@ test "swap mirrors the dock and its drawers" {
     try std.testing.expectEqual(@as(i32, 0), dock.x_pos);
     try std.testing.expectEqual(@as(i32, 1), a.xindex);
     try std.testing.expectEqual(@as(i32, icon_size), a.x_pos);
+}
+
+test "drawer: a slot beyond the screen edge is no slot" {
+    var s = try testScreen(std.testing.allocator);
+    defer s.deinit();
+    const dock = s.dock.?;
+    // The capacity (30 tiles) comes from the wide screen the Drawer was
+    // made on ...
+    const dr = try create(&s, .drawer, dock.x_pos, icon_size);
+    // ... then the screen turns out to be only three tiles wide.
+    s.width = 3 * icon_size;
+    moveDock(&s, dock, s.width - icon_size, 0);
+    var placed: usize = 0;
+    while (try findFreeSlot(&s, dr)) |slot| {
+        const a = try newIcon(s.gpa);
+        try std.testing.expect(attachIcon(dr, a, slot[0], slot[1]));
+        placed += 1;
+        if (placed > 8) break; // must stop on its own
+    }
+    try std.testing.expectEqual(@as(usize, 2), placed);
+    for (dr.icons) |maybe| if (maybe) |i| try std.testing.expect(s.onScreen(i.x_pos, i.y_pos));
+}
+
+test "consolidateAllDrawers closes a hole that dragging left behind" {
+    var s = try testScreen(std.testing.allocator);
+    defer s.deinit();
+    const dock = s.dock.?;
+    const dr = try create(&s, .drawer, dock.x_pos, 2 * icon_size);
+    var icons: [3]*Icon = undefined;
+    for (&icons, 0..) |*p, k| {
+        p.* = try newIcon(s.gpa);
+        try std.testing.expect(attachIcon(dr, p.*, -@as(i32, @intCast(k)) - 1, 0));
+    }
+    // A hole at -1, as if a tile had been dragged over the first slot and
+    // away again: the others were pushed outwards.
+    slideAppicons(&icons, dr.on_right_side); // right side: outwards = left
+    try std.testing.expectEqual(@as(i32, -2), icons[0].xindex);
+    consolidateAllDrawers(&s);
+    try std.testing.expectEqual(@as(i32, -1), icons[0].xindex);
+    try std.testing.expectEqual(@as(i32, -2), icons[1].xindex);
+    try std.testing.expectEqual(@as(i32, -3), icons[2].xindex);
+    // Idempotent.
+    consolidateAllDrawers(&s);
+    try std.testing.expectEqual(@as(i32, -3), icons[2].xindex);
 }

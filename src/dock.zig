@@ -157,6 +157,10 @@ pub const Model = struct {
     dock_right: bool = true,
     dock_y: i32 = 0,
     clip_corner: config.ClipCorner = .top_left,
+    /// false until the first `layout`: the positions the entries came with
+    /// are already in the convention of the corner the config names, so
+    /// that first call must not mirror them.
+    laid_out: bool = false,
 
     pub const Error = error{ OutOfMemory, Full, NoDrawer };
 
@@ -186,7 +190,15 @@ pub const Model = struct {
         const dock = m.scr.dock.?;
         for (list.drawers, 0..) |d, i| {
             if (i >= max_drawers) break;
-            const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, dock.y_pos + d.row * tile);
+            // A hand-edited or damaged state file may put a Drawer on the
+            // logo's row or on another Drawer's: that would draw two tiles
+            // on top of each other. The index must stay (the entries refer
+            // to it), so such a Drawer moves to a free row instead.
+            var row = d.row;
+            if (row == 0 or wdock.getDrawer(&m.scr, row) != null) {
+                row = m.freeRow() orelse row;
+            }
+            const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, dock.y_pos + row * tile);
             dr.collapsed = d.collapsed;
             dr.auto_collapse = d.auto_collapse;
             try m.drawer_names.append(gpa, try a.dupe(u8, d.name));
@@ -235,6 +247,14 @@ pub const Model = struct {
     pub fn dockFreeRow(m: *const Model) ?i32 {
         const dock = m.scr.dock orelse return null;
         if (dock.icon_count >= dock.icons.len) return null;
+        return m.freeRow();
+    }
+
+    /// The first row of the Dock column that is free, searching 1, -1, 2,
+    /// -2, ...: not the logo's, none with a tile or a Drawer on it, and one
+    /// that lies on the screen.
+    fn freeRow(m: *const Model) ?i32 {
+        const dock = m.scr.dock orelse return null;
         var step: i32 = 1;
         while (step <= @as(i32, @intCast(dock.icons.len))) : (step += 1) {
             for ([_]i32{ step, -step }) |y| {
@@ -274,15 +294,19 @@ pub const Model = struct {
             },
         };
 
+        // A position further away than the dock could ever be long is a
+        // damaged value: the entry is placed like a new one.
+        const reach: u32 = @intCast(@max(dock.icons.len, wdock.dock_max_icons));
+        const in_reach = @abs(copy.x) <= reach and @abs(copy.y) <= reach;
         var xy: [2]i32 = undefined;
         switch (copy.place) {
             .dock => {
-                if (copy.y != 0 and !occupied(dock, 0, copy.y) and wdock.getDrawer(&m.scr, copy.y) == null) {
+                if (in_reach and copy.y != 0 and !occupied(dock, 0, copy.y) and wdock.getDrawer(&m.scr, copy.y) == null) {
                     xy = .{ 0, copy.y };
                 } else xy = .{ 0, m.dockFreeRow() orelse return error.Full };
             },
             .clip => {
-                if ((copy.x != 0 or copy.y != 0) and !occupied(dock, copy.x, copy.y)) {
+                if (in_reach and (copy.x != 0 or copy.y != 0) and !occupied(dock, copy.x, copy.y)) {
                     xy = .{ copy.x, copy.y };
                 } else xy = (try wdock.findFreeSlot(&m.scr, dock)) orelse return error.Full;
             },
@@ -294,6 +318,7 @@ pub const Model = struct {
 
         var new: Slot = .{ .app = copy, .gi = gi };
         new.icon = loadIcon(gpa, copy);
+        errdefer if (new.icon) |*i| i.deinit();
         try m.slots.append(gpa, new);
         return m.slots.items.len - 1;
     }
@@ -378,6 +403,19 @@ pub const Model = struct {
         if (s.app.command.len == 0) return;
         s.launching = true;
         s.launch_stamp = stamp;
+    }
+
+    /// Milliseconds until the first `launching` mark runs out (0: it has),
+    /// or null if no tile is launching. For the event loop's timeout.
+    pub fn nextLaunchExpiry(m: *const Model, now: u32, max_age: u32) ?u32 {
+        var best: ?u32 = null;
+        for (m.slots.items) |s| {
+            if (!s.alive or !s.launching) continue;
+            const age = now -% s.launch_stamp;
+            const left: u32 = if (age > max_age) 0 else max_age - age + 1;
+            if (best == null or left < best.?) best = left;
+        }
+        return best;
     }
 
     /// Clear `launching` on tiles older than `max_age` (wrapping clock).
@@ -472,19 +510,9 @@ pub const Model = struct {
         const dock = m.scr.dock orelse return null;
         if (m.scr.drawers.items.len >= max_drawers) return null;
         if (dock.icon_count + m.scr.drawers.items.len >= dock.icons.len) return null;
-        var row: ?i32 = null;
-        var step: i32 = 1;
-        search: while (step <= @as(i32, @intCast(dock.icons.len))) : (step += 1) {
-            for ([_]i32{ step, -step }) |y| {
-                if (occupied(dock, 0, y)) continue;
-                if (wdock.getDrawer(&m.scr, y) != null) continue;
-                if (!m.scr.onScreen(dock.x_pos, dock.y_pos + y * tile)) continue;
-                row = y;
-                break :search;
-            }
-        }
-        const y = row orelse return null;
-        const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, dock.y_pos + y * tile);
+        const row = m.freeRow() orelse return null;
+        const y = dock.y_pos + row * tile;
+        const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, y);
         dr.collapsed = true;
         m.drawer_names.append(m.gpa, m.arena.allocator().dupe(u8, name) catch {
             m.removeDrawerRaw(dr);
@@ -566,20 +594,68 @@ pub const Model = struct {
         m.scr.height = h;
         m.dock_right = dock_right;
         m.dock_y = dock_y;
+        // The Clip's tiles lie on the side of the corner that points into
+        // the screen (see wdock.findFreeSlot): when the Clip changes sides,
+        // they change sides with it, or they would end up off the screen.
+        const flip_x = m.laid_out and clipOnLeft(corner) != clipOnLeft(m.clip_corner);
+        const flip_y = m.laid_out and clipOnTop(corner) != clipOnTop(m.clip_corner);
+        m.laid_out = true;
         m.clip_corner = corner;
-        const dock = m.scr.dock orelse return;
-        if (dock.on_right_side != dock_right) wdock.swap(&m.scr, dock);
-        const x: i32 = if (dock_right) w - tile else 0;
-        const y = std.math.clamp(dock_y, 0, @max(0, h - tile));
-        if (dock.x_pos != x or dock.y_pos != y) wdock.moveDock(&m.scr, dock, x, y);
-        const cx: i32 = if (clipOnLeft(corner)) 0 else w - tile;
-        const cy: i32 = switch (corner) {
-            .top_left, .top_right => 0,
-            .bottom_left, .bottom_right => h - tile,
-        };
-        for (m.scr.clips.items) |c| {
-            if (c.x_pos != cx or c.y_pos != cy) wdock.moveDock(&m.scr, c, cx, cy);
+        if (flip_x or flip_y) mirrorClips(m, flip_x, flip_y);
+
+        if (m.scr.dock) |dock| {
+            if (dock.on_right_side != dock_right) wdock.swap(&m.scr, dock);
+            const x: i32 = if (dock_right) w - tile else 0;
+            const y = m.clampDockY(dock_y, h);
+            if (dock.x_pos != x or dock.y_pos != y) wdock.moveDock(&m.scr, dock, x, y);
         }
+        const cx: i32 = if (clipOnLeft(corner)) 0 else w - tile;
+        const cy: i32 = if (clipOnTop(corner)) 0 else h - tile;
+        for (m.scr.clips.items) |c| {
+            if (flip_x or flip_y or c.x_pos != cx or c.y_pos != cy) wdock.moveDock(&m.scr, c, cx, cy);
+        }
+    }
+
+    /// Mirror the tiles of every Clip across the Clip's own tile.
+    fn mirrorClips(m: *Model, flip_x: bool, flip_y: bool) void {
+        for (m.scr.clips.items) |c| {
+            for (c.icons) |maybe| {
+                const b = maybe orelse continue;
+                if (b.main) continue;
+                if (flip_x) b.xindex = -b.xindex;
+                if (flip_y) b.yindex = -b.yindex;
+            }
+        }
+    }
+
+    /// The topmost and the lowest row of the Dock column (the logo is row
+    /// 0), Drawers included.
+    fn rowRange(m: *const Model) [2]i32 {
+        const dock = m.scr.dock orelse return .{ 0, 0 };
+        var lo: i32 = 0;
+        var hi: i32 = 0;
+        for (dock.icons) |maybe| {
+            const i = maybe orelse continue;
+            lo = @min(lo, i.yindex);
+            hi = @max(hi, i.yindex);
+        }
+        for (m.scr.drawers.items) |d| {
+            const row = @divTrunc(d.y_pos - dock.y_pos, tile);
+            lo = @min(lo, row);
+            hi = @max(hi, row);
+        }
+        return .{ lo, hi };
+    }
+
+    /// The Dock's top edge for the wish `want`: as near to it as it can be
+    /// with every tile and every Drawer still on the screen. (If the column
+    /// is taller than the screen, only the logo is kept on it.)
+    fn clampDockY(m: *const Model, want: i32, h: i32) i32 {
+        const r = m.rowRange();
+        const lo = -r[0] * tile;
+        const hi = h - (r[1] + 1) * tile;
+        if (lo > hi) return std.math.clamp(want, 0, @max(0, h - tile));
+        return std.math.clamp(want, lo, hi);
     }
 
     pub fn currentClip(m: *const Model) *wdock.Dock {
@@ -744,6 +820,10 @@ fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
 
 pub fn clipOnLeft(corner: config.ClipCorner) bool {
     return corner == .top_left or corner == .bottom_left;
+}
+
+pub fn clipOnTop(corner: config.ClipCorner) bool {
+    return corner == .top_left or corner == .top_right;
 }
 
 /// The grid rectangle one dock's surface covers. `margin` adds the cells a
@@ -1409,4 +1489,102 @@ test "an .xpm icon file is loaded for a Dock tile and painted" {
     try std.testing.expect(m.slots.items[0].icon != null);
     try std.testing.expectEqual(@as(i32, 2), m.slots.items[0].icon.?.w);
     try std.testing.expect(m.slots.items[1].icon == null);
+}
+
+test "Model.layout: the Clip's tiles change sides with the Clip, the first layout only adopts the corner" {
+    const apps = [_]dockapp.DockApp{
+        // Saved while the Clip sat in the bottom right corner: tiles point
+        // up and to the left.
+        .{ .name = "c", .command = &.{"c"}, .place = .clip, .workspace = 0, .x = -2, .y = -1 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    const gi = m.slots.items[0].gi;
+
+    m.layout(1000, 800, true, 0, .bottom_right);
+    try std.testing.expectEqual(@as(i32, -2), gi.xindex);
+    try std.testing.expectEqual(@as(i32, -1), gi.yindex);
+
+    m.layout(1000, 800, true, 0, .top_left);
+    try std.testing.expectEqual(@as(i32, 2), gi.xindex);
+    try std.testing.expectEqual(@as(i32, 1), gi.yindex);
+    try std.testing.expect(m.scr.onScreen(gi.x_pos, gi.y_pos));
+
+    m.layout(1000, 800, true, 0, .top_right);
+    try std.testing.expectEqual(@as(i32, -2), gi.xindex);
+    try std.testing.expectEqual(@as(i32, 1), gi.yindex);
+    try std.testing.expectEqual(@as(i32, 936 - 2 * tile), gi.x_pos);
+    try std.testing.expectEqual(@as(i32, tile), gi.y_pos);
+}
+
+test "Model.layout: moving the Dock never pushes a tile or a Drawer off the screen" {
+    const apps = [_]dockapp.DockApp{ mk("a", .dock, 0, 1), mk("b", .dock, 0, 3) };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    const dock = m.scr.dock.?;
+
+    // The lowest tile is in row 3: the logo may go down to 800 - 4 tiles.
+    m.layout(1000, 800, true, 5000, .top_left);
+    try std.testing.expectEqual(@as(i32, 800 - 4 * tile), dock.y_pos);
+    for (m.slots.items) |s| try std.testing.expect(m.scr.onScreen(s.gi.x_pos, s.gi.y_pos));
+
+    m.layout(1000, 800, true, -50, .top_left);
+    try std.testing.expectEqual(@as(i32, 0), dock.y_pos);
+
+    // A Drawer above the logo keeps the Dock off the top edge.
+    m.layout(1000, 800, true, 300, .top_left);
+    const d = (try m.addDrawer("Drawer")).?;
+    try std.testing.expectEqual(@as(i32, -1), @divTrunc(d.y_pos - dock.y_pos, tile));
+    m.layout(1000, 800, true, 0, .top_left);
+    try std.testing.expectEqual(@as(i32, tile), dock.y_pos);
+    try std.testing.expectEqual(@as(i32, 0), d.y_pos);
+
+    // A column taller than the screen: the logo stays reachable.
+    m.layout(1000, 128, true, 0, .top_left);
+    try std.testing.expect(dock.y_pos >= 0 and dock.y_pos <= 128 - tile);
+}
+
+test "Model.init: a Drawer on the logo's row or on another Drawer's row moves to a free row" {
+    const drawers = [_]dockapp.DrawerInfo{ .{ .row = 0 }, .{ .row = 2 }, .{ .row = 2 } };
+    var m = try Model.init(std.testing.allocator, .{ .drawers = &drawers }, &.{}, 1);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(usize, 3), m.scr.drawers.items.len);
+    const dock = m.scr.dock.?;
+    var rows: [3]i32 = undefined;
+    for (m.scr.drawers.items, 0..) |d, i| rows[i] = @divTrunc(d.y_pos - dock.y_pos, tile);
+    try std.testing.expect(rows[0] != 0);
+    try std.testing.expectEqual(@as(i32, 2), rows[1]);
+    try std.testing.expect(rows[0] != rows[1] and rows[1] != rows[2] and rows[0] != rows[2]);
+}
+
+test "Model: a position far outside any dock is treated as no position" {
+    const apps = [_]dockapp.DockApp{
+        mk("a", .dock, 0, 1_000_000),
+        .{ .name = "c", .command = &.{"c"}, .place = .clip, .workspace = 0, .x = -900_000, .y = 3 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    // No overflow, and both tiles sit within a few rows of their dock.
+    try std.testing.expect(@abs(m.slots.items[0].gi.yindex) < 64);
+    try std.testing.expect(@abs(m.slots.items[1].gi.xindex) < 64);
+    try std.testing.expect(@abs(m.slots.items[1].gi.yindex) < 64);
+}
+
+test "nextLaunchExpiry: none, then the time left, then due -- and expireLaunching agrees" {
+    var m = try Model.init(std.testing.allocator, .{ .apps = &.{ mk("a", .dock, 0, 1), mk("b", .dock, 0, 2) } }, &.{}, 1);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(?u32, null), m.nextLaunchExpiry(1000, 100));
+    m.markLaunching(0, 1000);
+    m.markLaunching(1, 1050);
+    try std.testing.expectEqual(@as(?u32, 51), m.nextLaunchExpiry(1050, 100));
+    // At exactly max_age it is not over yet (expireLaunching wants `>`), one
+    // millisecond later it is: the timeout must never be 0 while nothing
+    // would expire, or the loop would spin.
+    try std.testing.expectEqual(@as(?u32, 1), m.nextLaunchExpiry(1100, 100));
+    try std.testing.expect(!m.expireLaunching(1100, 100));
+    try std.testing.expect(m.expireLaunching(1101, 100)); // the first tile
+    try std.testing.expectEqual(@as(?u32, 50), m.nextLaunchExpiry(1101, 100));
+    try std.testing.expectEqual(@as(?u32, 0), m.nextLaunchExpiry(1151, 100));
+    try std.testing.expect(m.expireLaunching(1151, 100));
+    try std.testing.expectEqual(@as(?u32, null), m.nextLaunchExpiry(1151, 100));
 }

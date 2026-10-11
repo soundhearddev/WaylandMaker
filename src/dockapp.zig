@@ -326,7 +326,9 @@ pub fn parseWMStateAllDiag(arena: std.mem.Allocator, text: []const u8, diag: ?*p
             var info: DrawerInfo = .{};
             if (readStr(d, "Name")) |n| info.name = n;
             if (readStr(d, "WMakerWLRow")) |r| {
-                if (std.fmt.parseInt(i32, r, 10) catch null) |row| info.row = row;
+                if (std.fmt.parseInt(i32, r, 10) catch null) |row| {
+                    if (@abs(row) <= max_grid) info.row = row;
+                }
             }
             if (d.get("Dock")) |dd| {
                 if (readBool(dd, "Collapsed")) |b| info.collapsed = b;
@@ -442,8 +444,14 @@ fn parsePosition(s: []const u8) ?[2]i32 {
     const ys = std.mem.trim(u8, s[comma + 1 ..], " \t");
     const x = std.fmt.parseInt(i32, xs, 10) catch return null;
     const y = std.fmt.parseInt(i32, ys, 10) catch return null;
+    // A grid cell is a tile: nothing real is thousands of tiles away, and a
+    // damaged file must not push `index * 64` past what an i32 can hold.
+    if (@abs(x) > max_grid or @abs(y) > max_grid) return null;
     return .{ x, y };
 }
+
+/// Largest grid coordinate (in tiles) read from a state file.
+pub const max_grid: u32 = 4096;
 
 // ----------------------------------------------------------------------------
 // Writing WMState
@@ -851,4 +859,20 @@ test "render skips what it cannot write faithfully, and says so" {
         .{ .name = "ok", .command = &.{"ok"}, .y = 1 },
     };
     try std.testing.expectEqual(@as(usize, 2), try render(&aw.writer, .{ .apps = &apps }, .{}));
+}
+
+test "parse WMState: absurd grid positions are ignored, not trusted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseWMStateAll(arena.allocator(),
+        \\{ Dock = { Applications = (
+        \\  { Command = a; Name = a; Position = "0,2000000000"; },
+        \\  { Command = b; Name = b; Position = "0,3"; }
+        \\); }; Drawers = ( { Name = d; WMakerWLRow = "-2000000000"; } ); }
+    );
+    try std.testing.expectEqual(@as(usize, 2), list.apps.len);
+    try std.testing.expectEqual(@as(i32, 0), list.apps[0].y); // unplaced: the model picks a row
+    try std.testing.expectEqual(@as(i32, 3), list.apps[1].y);
+    try std.testing.expectEqual(@as(usize, 1), list.drawers.len);
+    try std.testing.expectEqual(@as(i32, 1), list.drawers[0].row); // the default
 }

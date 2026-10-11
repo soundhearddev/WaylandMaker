@@ -358,7 +358,29 @@ const Bar = struct {
     dirty: bool = true,
     /// A tile is being dragged on this bar.
     drag: ?dock_mod.DragView = null,
+    /// Autocollapse: when (`Ui.nowMs`) this Clip/Drawer folds up after the
+    /// pointer left it, or unfolds after it came. null = nothing pending.
+    fold_at: ?u32 = null,
+    unfold_at: ?u32 = null,
 };
+
+/// Autocollapse waits a moment, like Window Maker: a pointer that only
+/// passes over the Clip does not unfold it, and one that slips off for an
+/// instant does not fold it up.
+const fold_delay_ms: u32 = 700;
+const unfold_delay_ms: u32 = 250;
+
+/// Has `at` (on the wrapping millisecond clock) been reached at `now`?
+fn timeDue(now: u32, at: u32) bool {
+    return now -% at < 0x8000_0000;
+}
+
+/// Lower `best` to the time left until `at`, if that is less.
+fn sooner(best: *?u32, now: u32, at: ?u32) void {
+    const t = at orelse return;
+    const left: u32 = if (timeDue(now, t)) 0 else t -% now;
+    if (best.* == null or left < best.*.?) best.* = left;
+}
 
 /// Window Maker's double click: two presses of the same button on the same
 /// tile within this many milliseconds.
@@ -367,6 +389,14 @@ const double_click_ms: u32 = 400;
 /// How long (ms) a tile stays covered by the launching raster when no window
 /// ever shows up.
 const launch_timeout_ms: u32 = 8000;
+
+/// A tile that was started this recently ignores a second start from a
+/// plain click (a double click in single-click mode, an impatient second
+/// click): without this the program would run twice. Window Maker ignores
+/// clicks for as long as a tile is launching; a shorter time here lets a
+/// launch that failed be retried at once. Middle click and the menu's
+/// Launch always start a new instance.
+const relaunch_guard_ms: u32 = 1500;
 
 const LastClick = struct {
     time: u32 = 0,
@@ -779,36 +809,93 @@ pub const Ui = struct {
         ui.raise_focus = if (ui.wm.seats.first()) |sd| sd.focused else null;
     }
 
-    fn onBarEnter(ui: *Ui, b: *Bar) void {
+    /// Is this Clip/Drawer folded (only its own tile shown)?
+    fn isFolded(ui: *const Ui, b: *const Bar) bool {
+        return switch (b.kind) {
+            .clip => ui.clip_collapsed,
+            .drawer => if (b.wd) |d| d.collapsed else false,
+            .dock => false,
+        };
+    }
+
+    /// Does it fold and unfold by itself (Autocollapse)?
+    fn autoFolds(ui: *const Ui, b: *const Bar) bool {
+        return switch (b.kind) {
+            .clip => ui.clip_auto_collapse,
+            .drawer => if (b.wd) |d| d.auto_collapse else false,
+            .dock => false,
+        };
+    }
+
+    fn setFolded(ui: *Ui, b: *Bar, folded: bool) void {
         switch (b.kind) {
-            .clip => if (ui.clip_auto_collapse and ui.clip_collapsed) {
-                ui.clip_collapsed = false;
-                ui.clip.dirty = true;
-                ui.wm.obj.manageDirty();
-            },
-            .drawer => if (b.wd) |d| if (d.auto_collapse and d.collapsed) {
-                d.collapsed = false;
-                b.dirty = true;
-                ui.wm.obj.manageDirty();
-            },
-            .dock => {},
+            .clip => ui.clip_collapsed = folded,
+            .drawer => if (b.wd) |d| {
+                d.collapsed = folded;
+            } else return,
+            .dock => return,
+        }
+        b.dirty = true;
+        ui.wm.obj.manageDirty();
+    }
+
+    fn onBarEnter(ui: *Ui, b: *Bar) void {
+        b.fold_at = null;
+        if (!ui.autoFolds(b) or !ui.isFolded(b)) return;
+        if (unfold_delay_ms == 0) {
+            ui.setFolded(b, false);
+        } else {
+            b.unfold_at = ui.nowMs() +% unfold_delay_ms;
         }
     }
 
     fn onBarLeave(ui: *Ui, b: *Bar) void {
+        b.unfold_at = null;
+        // A drag keeps the pointer on the bar it started on; the release
+        // is followed by a leave event of its own.
         if (ui.press != null) return;
-        switch (b.kind) {
-            .clip => if (ui.clip_auto_collapse and !ui.clip_collapsed) {
-                ui.clip_collapsed = true;
-                ui.clip.dirty = true;
+        if (!ui.autoFolds(b) or ui.isFolded(b)) return;
+        b.fold_at = ui.nowMs() +% fold_delay_ms;
+    }
+
+    /// How long the event loop may sleep: the time to the next thing the
+    /// Dock does on its own (a delayed fold or unfold, a launch mark that
+    /// runs out), -1 if there is none. Never longer than a minute.
+    pub fn nextTimeoutMs(ui: *Ui) i32 {
+        const now = ui.nowMs();
+        var best: ?u32 = null;
+        var buf: [2 + dock_mod.max_drawers]*Bar = undefined;
+        for (ui.allBars(&buf)) |b| {
+            sooner(&best, now, b.fold_at);
+            sooner(&best, now, b.unfold_at);
+        }
+        if (ui.model) |*m| {
+            if (m.nextLaunchExpiry(now, launch_timeout_ms)) |ms| sooner(&best, now, now +% ms);
+        }
+        const left = best orelse return -1;
+        return @intCast(@min(left, 60_000));
+    }
+
+    /// Called by the event loop after every wake-up: does whatever has come
+    /// due. Cheap when nothing has.
+    pub fn onTimer(ui: *Ui) void {
+        const now = ui.nowMs();
+        var buf: [2 + dock_mod.max_drawers]*Bar = undefined;
+        for (ui.allBars(&buf)) |b| {
+            if (b.unfold_at) |t| if (timeDue(now, t)) {
+                b.unfold_at = null;
+                if (ui.autoFolds(b) and ui.isFolded(b)) ui.setFolded(b, false);
+            };
+            if (b.fold_at) |t| if (timeDue(now, t)) {
+                b.fold_at = null;
+                if (ui.press == null and ui.autoFolds(b) and !ui.isFolded(b)) ui.setFolded(b, true);
+            };
+        }
+        if (ui.model) |*m| {
+            if (m.expireLaunching(now, launch_timeout_ms)) {
+                ui.markBarsDirty();
                 ui.wm.obj.manageDirty();
-            },
-            .drawer => if (b.wd) |d| if (d.auto_collapse and !d.collapsed) {
-                d.collapsed = true;
-                b.dirty = true;
-                ui.wm.obj.manageDirty();
-            },
-            .dock => {},
+            }
         }
     }
 
@@ -821,6 +908,11 @@ pub const Ui = struct {
             wm.obj.manageDirty();
             return;
         }
+        // Another button while a tile is held (a drag, or a press that may
+        // still become one) must not open a menu in the middle of it. A
+        // second LEFT press is let through: it means the release of the
+        // first one never arrived, and the Dock must not stay stuck.
+        if (ui.press != null and button != BTN_LEFT) return;
         const out = b.output orelse return;
         const model = if (ui.model) |*m| m else return;
         const hit = ui.barHit(b);
@@ -1059,6 +1151,10 @@ pub const Ui = struct {
             if (src) |sd| if (sd.kind == .drawer) wdock.drawerConsolidateIcons(sd);
             ui.clearPointers();
         }
+        // Dragging over a Drawer slides its tiles aside; if the tile went
+        // somewhere else (or nowhere) they have to come back, in EVERY
+        // Drawer, not just the one it was dropped on.
+        wdock.consolidateAllDrawers(&m.scr);
         ui.saveState();
         return true;
     }
@@ -1102,9 +1198,15 @@ pub const Ui = struct {
         }
         // A temporary DockApp tile has no command to start.
         if (app.command.len == 0) return;
-        proc.spawn(ui.wm, app.command);
+        const now = ui.nowMs();
+        if (!force_new) if (ui.model) |*m| if (m.slot(ref.index)) |sl| {
+            if (sl.launching and now -% sl.launch_stamp < relaunch_guard_ms) return;
+        };
+        // A command that could not even be started does not make the tile
+        // look as if it were starting.
+        if (!proc.spawnChecked(ui.wm, app.command)) return;
         if (ui.model) |*m| {
-            m.markLaunching(ref.index, ui.nowMs());
+            m.markLaunching(ref.index, now);
             ui.markBarsDirty();
         }
     }
@@ -1771,6 +1873,8 @@ pub const Ui = struct {
         b.hover = null;
         b.hover_arrow = .none;
         b.drag = null;
+        b.fold_at = null;
+        b.unfold_at = null;
         b.dirty = true;
     }
 
@@ -3679,4 +3783,25 @@ test "the Info panel names the version and the config file; Legal states the lic
         if (std.mem.indexOf(u8, r.label, "0BSD") != null) mentions_licence = true;
     }
     try std.testing.expect(mentions_licence);
+}
+
+test "timeDue and sooner: the wrapping millisecond clock" {
+    try std.testing.expect(timeDue(100, 100));
+    try std.testing.expect(timeDue(101, 100));
+    try std.testing.expect(!timeDue(99, 100));
+    // Across the wrap of the 32-bit clock.
+    try std.testing.expect(timeDue(5, 0xffff_fff0));
+    try std.testing.expect(!timeDue(0xffff_fff0, 5));
+
+    var best: ?u32 = null;
+    sooner(&best, 1000, null);
+    try std.testing.expectEqual(@as(?u32, null), best);
+    sooner(&best, 1000, 1700);
+    try std.testing.expectEqual(@as(?u32, 700), best);
+    sooner(&best, 1000, 1250);
+    try std.testing.expectEqual(@as(?u32, 250), best);
+    sooner(&best, 1000, 1900);
+    try std.testing.expectEqual(@as(?u32, 250), best);
+    sooner(&best, 1000, 900); // already due
+    try std.testing.expectEqual(@as(?u32, 0), best);
 }

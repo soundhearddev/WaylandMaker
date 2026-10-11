@@ -218,19 +218,35 @@ fn hide(win: *Window, why: []const u8) void {
 /// position, visibility, stacking. Idempotent and cheap; called in the
 /// manage and the render sequence, like the normal windows are.
 pub fn apply(wm: *WindowManager, host: Host) void {
+    // The tiles that already have a DockApp in them this pass: a second
+    // instance (same app_id) would be drawn right on top of the first, so
+    // only the oldest is shown until it goes away.
+    var used: [max_hosted]usize = undefined;
+    var n_used: usize = 0;
     var it = wm.dock_windows.first();
     while (it) |w| : (it = types.nextDockWindow(w, wm)) {
         if (w.closed) continue;
-        applyOne(w, host);
+        applyOne(w, host, &used, &n_used);
     }
 }
 
-fn applyOne(win: *Window, host: Host) void {
+/// How many DockApps are tracked for the "one per tile" rule; further ones
+/// are simply not checked.
+const max_hosted = 64;
+
+fn applyOne(win: *Window, host: Host, used: *[max_hosted]usize, n_used: *usize) void {
     const out = host.out orelse return hide(win, "there is no Dock on an output (dock_enabled = false?)");
     const m = host.model orelse return hide(win, "the Dock has no model");
     const id = win.app_id orelse return hide(win, "no app_id");
     const idx = m.dockSlotFor(id) orelse return hide(win, "no Dock tile for it (invalid name, or the Dock is full)");
     const gi = m.slots.items[idx].gi;
+    for (used[0..n_used.*]) |u| {
+        if (u == idx) return hide(win, "another DockApp with the same name already sits in its tile");
+    }
+    if (n_used.* < used.len) {
+        used[n_used.*] = idx;
+        n_used.* += 1;
+    }
 
     // The client draws everything itself and has one size.
     if (win.sent_tiled == null) {

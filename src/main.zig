@@ -24,6 +24,10 @@ const wl = wayland.client.wl;
 const river = wayland.client.river;
 const wp = wayland.client.wp;
 
+const cpoll = @cImport({
+    @cInclude("poll.h");
+});
+
 const root = @import("root.zig");
 
 const types = root.types;
@@ -163,26 +167,58 @@ pub fn main(init: std.process.Init) !void {
     dockapp.runAutoLaunch(startup.dockapps, dockappSpawn);
 
     installSighupHandler();
-    while (!wm.quit) {
-        const err = display.dispatch();
-        if (err == .INTR) {
-            // A signal interrupted the blocking read. SIGCHLD is ignored
-            // and needs nothing; SIGHUP only set a flag (see
-            // installSighupHandler's doc comment) and needs a manage
-            // sequence to actually apply it. manage_dirty() is a normal
-            // Wayland request, so it must be sent from here, not from the
-            // signal handler itself.
-            if (reload_requested.load(.monotonic)) wm.obj.manageDirty();
-            continue;
-        }
-        if (err != .SUCCESS) break;
-    }
+    runLoop(wm, display);
 
     if (wm.quit) {
         // exit_session needs protocol version 4; older river versions only
         // support stopping the window manager.
         if (wm.obj_version >= 4) wm.obj.exitSession() else wm.obj.stop();
         _ = display.flush();
+    }
+}
+
+/// The event loop: the documented libwayland sequence for poll(2), with a
+/// timeout. A plain `display.dispatch()` cannot wake up on its own, and the
+/// Dock has things to do at a given time (fold a Clip after the pointer left
+/// it, end a tile's "launching" mark): `Ui.nextTimeoutMs` says when, and
+/// `Ui.onTimer` does it after every wake-up.
+///
+/// A signal makes poll(2) return -1 (EINTR). SIGCHLD is ignored and needs
+/// nothing; SIGHUP only set a flag (see installSighupHandler's doc comment)
+/// and needs a manage sequence to actually apply it. manage_dirty() is a
+/// normal Wayland request, so it is sent from here, not from the signal
+/// handler itself.
+fn runLoop(wm: *WindowManager, display: *wl.Display) void {
+    while (!wm.quit) {
+        // Nothing may be left in the queue when we go to sleep.
+        while (!display.prepareRead()) {
+            if (display.dispatchPending() != .SUCCESS) return;
+        }
+        const flushed = display.flush();
+        if (flushed != .SUCCESS and flushed != .AGAIN) {
+            display.cancelRead();
+            return;
+        }
+
+        const timeout: c_int = if (wm.ui) |u| u.nextTimeoutMs() else -1;
+        var fds = [1]cpoll.struct_pollfd{.{
+            .fd = display.getFd(),
+            .events = @intCast(cpoll.POLLIN | (if (flushed == .AGAIN) cpoll.POLLOUT else 0)),
+            .revents = 0,
+        }};
+        const rc = cpoll.poll(&fds, 1, timeout);
+
+        if (rc > 0 and fds[0].revents & cpoll.POLLIN != 0) {
+            if (display.readEvents() != .SUCCESS) return;
+        } else {
+            display.cancelRead();
+            // The compositor went away.
+            if (rc > 0 and fds[0].revents & (cpoll.POLLERR | cpoll.POLLHUP) != 0) return;
+        }
+        if (display.dispatchPending() != .SUCCESS) return;
+
+        if (reload_requested.load(.monotonic)) wm.obj.manageDirty();
+        if (wm.ui) |u| u.onTimer();
     }
 }
 
