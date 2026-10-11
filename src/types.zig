@@ -169,6 +169,8 @@ pub const Window = struct {
     sent_y: i32 = std.math.minInt(i32),
     visible: ?bool = null,
     sent_fullscreen: ?*Output = null,
+    /// Last clip box sent (window-relative; null = never sent / none).
+    sent_clip: ?Rect = null,
 
     /// Column the window was in before it was "consumed"/detached, used
     /// only to restore floating -> tiled placement (see workspace.zig).

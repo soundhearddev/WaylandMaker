@@ -198,7 +198,15 @@ fn computeFloating(ws: *Workspace, cfg: *const config.Config) void {
     var it = ws.floating.first();
     while (it) |win| : (it = types.nextFloating(win)) {
         if (!win.has_float_rect) initFloatRect(win, out, cfg);
-        keepReachable(&win.float_rect, out.rect);
+        // Output-local work area: the part of the window you grab must not
+        // end up under the Dock either.
+        const work = out.workArea();
+        keepReachable(&win.float_rect, .{
+            .x = work.x - out.rect.x,
+            .y = work.y - out.rect.y,
+            .w = work.w,
+            .h = work.h,
+        });
         win.target = .{
             .x = out.rect.x + win.float_rect.x,
             .y = out.rect.y + win.float_rect.y,
@@ -238,10 +246,10 @@ pub fn initFloatRect(win: *Window, out: *const Output, cfg: *const config.Config
 /// window can never be lost off the edge. Output-local coordinates.
 pub fn keepReachable(r: *Rect, bounds: Rect) void {
     const grab: i32 = 48;
-    const min_x = grab - r.w;
-    const max_x = bounds.w - grab;
-    const min_y = 0; // the top edge (where you grab it) must stay on screen
-    const max_y = bounds.h - grab;
+    const min_x = bounds.x + grab - r.w;
+    const max_x = bounds.x + bounds.w - grab;
+    const min_y = bounds.y; // the top edge (where you grab it) must stay on screen
+    const max_y = bounds.y + bounds.h - grab;
     r.x = std.math.clamp(r.x, min_x, @max(min_x, max_x));
     r.y = std.math.clamp(r.y, min_y, @max(min_y, max_y));
 }
@@ -266,6 +274,18 @@ test "stackHeights single window uses everything" {
     const a = stackHeights(1, 500, 8);
     try std.testing.expectEqual(@as(i32, 500), a.base);
     try std.testing.expectEqual(@as(usize, 0), a.extra);
+}
+
+test "keepReachable keeps the grab zone out of a reserved strip" {
+    // 64px reserved on the left (a Dock): the window may not be pushed
+    // further left than its last 48px of grab zone beyond the strip.
+    var r: Rect = .{ .x = -5000, .y = 100, .w = 400, .h = 300 };
+    keepReachable(&r, .{ .x = 64, .y = 0, .w = 1856, .h = 1080 });
+    try std.testing.expectEqual(@as(i32, 64 + 48 - 400), r.x);
+    // On the right: at least 48px stay left of the reserved strip.
+    var q: Rect = .{ .x = 9000, .y = 100, .w = 400, .h = 300 };
+    keepReachable(&q, .{ .x = 0, .y = 0, .w = 1856, .h = 1080 });
+    try std.testing.expectEqual(@as(i32, 1856 - 48), q.x);
 }
 
 test "keepReachable never loses the window" {

@@ -201,7 +201,8 @@ pub const Config = struct {
     /// state file (see docs/DOCKAPPS.md) and read it back at start-up.
     dock_save_state: bool = true,
     /// Shrink the usable area by the Dock's width so tiled windows never end
-    /// up under it. Ignored while the Dock is lowered.
+    /// up under it (whatever the Dock's level). A fullscreen window still
+    /// covers the whole output, the Dock then sits behind it.
     dock_reserve_space: bool = true,
     /// Draw the Clip: one tile with workspace arrows plus the DockApps whose
     /// `place = clip` belongs to the current workspace.

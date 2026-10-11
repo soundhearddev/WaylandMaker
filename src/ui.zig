@@ -1795,6 +1795,11 @@ pub const Ui = struct {
     /// the windows (the focused one was raised); the DockApps (dockhost.apply)
     /// and then the menus (`onRenderMenus`) go on top of this.
     pub fn onRenderBars(ui: *Ui) void {
+        // A real fullscreen window covers the Dock and the Clip: it goes
+        // above them (they are not raised below, see `raised`).
+        if (ui.fullscreenWindow()) |fs| {
+            if (fs.visible == true) fs.node.placeTop();
+        }
         if (ui.raised(.dock)) if (ui.dock.panel) |p| p.node.placeTop();
         if (ui.raised(.clip)) if (ui.clip.panel) |p| p.node.placeTop();
         for (ui.drawer_bars.items) |b| {
@@ -1878,8 +1883,18 @@ pub const Ui = struct {
         b.dirty = true;
     }
 
+    /// The fullscreen window of the workspace shown on the Dock's output.
+    fn fullscreenWindow(ui: *const Ui) ?*types.Window {
+        const out = ui.dock.output orelse ui.clip.output orelse return null;
+        if (out.workspace_count == 0) return null;
+        return out.ws().fullscreen;
+    }
+
     fn raised(ui: *const Ui, kind: BarKind) bool {
         if (ui.dock.drag != null or ui.clip.drag != null) return true;
+        // Fullscreen: the Dock and the Clip go behind the window. Their
+        // space stays reserved (syncBars), so nothing moves around.
+        if (ui.fullscreenWindow() != null) return false;
         return switch (kind) {
             .dock, .drawer => switch (ui.dock_level) {
                 .top => true,
@@ -2068,8 +2083,13 @@ pub const Ui = struct {
 
         if (cfg.dock_enabled) {
             ui.prepareBar(&ui.dock, primary, m.scr.dock.?, false);
-            // Lowered, the Dock is just another thing windows can cover.
-            if (cfg.dock_reserve_space and ui.dock_level == .top) switch (cfg.dock_edge) {
+            // The Dock's column is taken out of the work area whatever its
+            // level (top / auto / lowered): tiled windows are laid out and
+            // clipped next to it (layout.compute, window.applyClip).
+            // A fullscreen window does not change this: it covers the
+            // whole output on its own, and the other windows keep their
+            // places for when it ends.
+            if (cfg.dock_reserve_space) switch (cfg.dock_edge) {
                 .left => primary.reserved.left = dock_mod.tile,
                 .right => primary.reserved.right = dock_mod.tile,
             };

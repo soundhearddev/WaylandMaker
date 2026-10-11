@@ -45,8 +45,11 @@
       cairo (Pfad oder Name in `hicolor`/`pixmaps`), sonst der erste Buchstabe des Namens.
       Feste 64×64-DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`) werden direkt **in ihre
       Kachel gesetzt** (`ui.placeDocked`, über dem Dock gestapelt) und sind `omnipresent`.
-      Der Arbeitsbereich schrumpft um das Dock (`Output.reserved`), außer es ist „lowered“ oder
-      `dock_reserve_space = false`.
+      Der Arbeitsbereich schrumpft um das Dock (`Output.reserved`), egal auf welcher Ebene es liegt,
+      außer `dock_reserve_space = false`. Getilte Fenster werden per `set_clip_box` an der Kante des
+      Arbeitsbereichs abgeschnitten (gescrollte Spalten rutschen nicht unter das Dock), Floating-Fenster
+      behalten ihre Greifzone im Arbeitsbereich. Im echten Vollbild liegt das Dock hinter dem Fenster,
+      der Platz bleibt reserviert.
       *Clip:* Kachel mit Workspace-Nummer und -Name, Pfeil oben rechts = nächster, unten links =
       vorheriger Workspace (wie in Window Maker), Mausrad schaltet ebenfalls; daneben in einer Reihe die
       Einträge mit `place = clip`, pro Workspace (`workspace = N`) oder für alle. Rechtsklick: Clip-Menü

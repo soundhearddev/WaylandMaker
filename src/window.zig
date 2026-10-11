@@ -477,7 +477,62 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
         win.sent_border = shown;
     }
 
+    applyClip(wm, win);
+
     if (focused) win.node.placeTop();
+}
+
+/// Clip a tiled window to the work area, so a column scrolled sideways
+/// slides *under the edge of the work area* (next to the Dock) instead of
+/// under the Dock. Floating windows are not clipped. river_window_v1
+/// set_clip_box needs version 2; without it nothing is clipped.
+fn applyClip(wm: *WindowManager, win: *Window) void {
+    if (wm.obj_version < 2) return;
+    const ws = win.workspace orelse return;
+
+    var want: ?types.Rect = null;
+    if (win.mode == .tiled) want = clipBox(win.target, win.borderWidth(&wm.cfg), ws.output.workArea());
+
+    if (std.meta.eql(want, win.sent_clip)) return;
+    if (want) |b| {
+        win.obj.setClipBox(b.x, b.y, b.w, b.h);
+    } else {
+        win.obj.setClipBox(0, 0, 0, 0); // size 0 = no clipping
+    }
+    win.sent_clip = want;
+}
+
+/// The part of a window (content `target` plus `bw` of border on each side)
+/// that lies inside `work`, relative to the window's top left corner.
+/// null = it lies completely inside, nothing to clip. A window completely
+/// outside gets a 1x1 box that does not touch it (a 0 size would turn
+/// clipping off).
+pub fn clipBox(target: types.Rect, bw: i32, work: types.Rect) ?types.Rect {
+    const x0 = @max(target.x - bw, work.x);
+    const y0 = @max(target.y - bw, work.y);
+    const x1 = @min(target.right() + bw, work.right());
+    const y1 = @min(target.bottom() + bw, work.bottom());
+    if (x1 <= x0 or y1 <= y0) {
+        return .{ .x = target.w + bw + 16, .y = target.h + bw + 16, .w = 1, .h = 1 };
+    }
+    if (x0 == target.x - bw and y0 == target.y - bw and x1 == target.right() + bw and y1 == target.bottom() + bw) {
+        return null;
+    }
+    return .{ .x = x0 - target.x, .y = y0 - target.y, .w = x1 - x0, .h = y1 - y0 };
+}
+
+test "clipBox: inside = no clip, scrolled under the Dock = cut at the edge, outside = nothing" {
+    const work: types.Rect = .{ .x = 64, .y = 0, .w = 936, .h = 800 };
+    try std.testing.expectEqual(@as(?types.Rect, null), clipBox(.{ .x = 100, .y = 10, .w = 400, .h = 300 }, 2, work));
+    // Starts 36px left of the work area (x = 28): the left 36px are cut.
+    const c = clipBox(.{ .x = 28, .y = 10, .w = 400, .h = 300 }, 0, work).?;
+    try std.testing.expectEqual(@as(i32, 36), c.x);
+    try std.testing.expectEqual(@as(i32, 364), c.w);
+    try std.testing.expectEqual(@as(i32, 300), c.h);
+    // Completely under the Dock strip.
+    const o = clipBox(.{ .x = -400, .y = 10, .w = 400, .h = 300 }, 0, work).?;
+    try std.testing.expectEqual(@as(i32, 1), o.w);
+    try std.testing.expect(o.x >= 400);
 }
 
 /// river takes 32-bit RGBA per channel, premultiplied; 0xffffffff = 100 %.
