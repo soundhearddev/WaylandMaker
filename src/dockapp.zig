@@ -11,19 +11,19 @@
 // wmaker-wl-only values use keys prefixed `WMakerWL`, which real Window
 // Maker ignores.
 //
-// How a DockApp gets into the Dock (same idea as Window Maker, expressed
-// the Wayland way):
+// How a DockApp gets into the Dock (see dockhost.zig for all of it):
 //
 //   * A DockApp is an ordinary program. Start it from `autostart`, from a
 //     menu, from a terminal -- or let an entry with `AutoLaunch = Yes` start
-//     it. It declares itself by setting its app_id to `dockapp:<name>` and
-//     asking for a fixed size (64x64).
-//   * wmaker-wl does NOT manage such a window as a window. It is put into a
-//     Dock tile, cannot be focused, tiled, minimized or closed with the
-//     close key. A DockApp without a matching entry gets a temporary tile
-//     for as long as it runs ("attached"); "Keep Icon" in the tile's menu
-//     makes the tile permanent (it is then saved in WMState, with the
-//     command `<name>`, so name the app_id after the program).
+//     it. It declares itself with ONE tag: its app_id is `dockapp:<name>`.
+//   * That tag makes it an icon, not a window: it is out of the window list,
+//     the layout and the focus, sits in a Dock tile at a size the compositor
+//     chooses (what it asked for, at most one tile) and cannot be closed
+//     with the close key. Only "Kill" in the tile's menu ends it.
+//   * A DockApp without a matching entry gets a temporary tile for as long as
+//     it runs ("attached"); "Keep Icon" in the tile's menu makes the tile
+//     permanent (it is then saved in WMState, with the command `<name>`, so
+//     name the app_id after the program).
 //   * Normal applications are docked with "Keep Application" and are
 //     started and focused from their tile.
 //
@@ -37,7 +37,6 @@
 const std = @import("std");
 const plist = @import("plist.zig");
 const config = @import("config.zig");
-const wm_attr = @import("wm_attr.zig");
 
 // ----------------------------------------------------------------------------
 // Self-declaring DockApps: no config file at all
@@ -79,33 +78,31 @@ pub fn isSelfDeclared(app_id: ?[]const u8) bool {
     return false;
 }
 
-/// Sensible defaults for a self-declared DockApp: no title bar or border
-/// (it's a small tile, not a normal window), floating (a fixed-size tile
-/// should never join the tiling layout), omnipresent (the Dock does not
-/// change with the workspace, so what sits in it must not either), hidden
-/// from the Windows menu
-/// (see ui.zig's buildWindowLevel), and unfocusable -- a dock tile is
-/// meant to be looked at and clicked, not to steal keyboard focus the
-/// moment it starts or to show up in Alt-equivalent focus cycling
-/// (focus_previous, click-to-focus; see main.zig's focusable()). Returned
-/// as `Attributes` with everything else left `null`, so `withDefaults`
-/// lets an explicit attributes.conf rule for this app_id override any
-/// part of this -- an interactive DockApp that *does* want keyboard focus
-/// (a small mixer with a text field, say) sets `Unfocusable = No` for its
-/// own app_id and keeps every other default.
-pub fn defaultAttrs() wm_attr.Attributes {
-    return .{
-        .no_titlebar = true,
-        .no_border = true,
-        .floating = true,
-        .omnipresent = true,
-        .skip_window_list = true,
-        .unfocusable = true,
-    };
+/// May `id` become the name and app_id of a new Dock entry? Only plain
+/// program identifiers: no blanks, quotes, slashes or control characters,
+/// so nothing odd ends up in the saved state file or on a command line.
+pub fn validAppId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 100) return false;
+    for (id) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_' or c == '+';
+        if (!ok) return false;
+    }
+    return id[0] != '.' and id[0] != '-';
 }
 
 /// Where an entry lives: the Dock or the Clip.
-pub const Place = enum { dock, clip };
+pub const Place = enum { dock, clip, drawer };
+
+/// A Drawer of the Dock (Window Maker's WM_DRAWER): a row of tiles that
+/// hangs off the Dock at tile row `row` (relative to the Dock's first tile).
+/// Its applications are the DockApps with `place == .drawer` and
+/// `drawer == index in List.drawers`.
+pub const DrawerInfo = struct {
+    name: []const u8 = "Drawer",
+    row: i32 = 1,
+    collapsed: bool = true,
+    auto_collapse: bool = true,
+};
 
 /// One dock slot. `x`/`y` are Window Maker's grid coordinates (in tiles),
 /// not pixels (dock.zig's tile is 64px, Window Maker's own default). In the
@@ -139,6 +136,8 @@ pub const DockApp = struct {
     app_id: ?[]const u8 = null,
     /// Window Maker's "Lock": the tile cannot be dragged away or removed.
     locked: bool = false,
+    /// Index into `List.drawers` when `place == .drawer`.
+    drawer: u32 = 0,
     /// A DockApp that is running without an entry of its own: its tile exists
     /// only while it runs and is never saved (see dock.zig `Model.attach`).
     attached: bool = false,
@@ -203,6 +202,8 @@ pub const List = struct {
     /// Workspace names from Window Maker's WMState (index = workspace).
     /// config.conf's `workspace_names` wins over these.
     workspace_names: []const []const u8 = &.{},
+    /// The Dock's Drawers, in order.
+    drawers: []const DrawerInfo = &.{},
     /// Grid y of the Dock's logo tile (WMState's "Logo.WMDock" entry).
     /// Entries above it have a smaller y; ties go below the logo.
     logo_y: i32 = 0,
@@ -318,8 +319,35 @@ pub fn parseWMStateAllDiag(arena: std.mem.Allocator, text: []const u8, diag: ?*p
         }
     }
 
+    var drawers: std.ArrayList(DrawerInfo) = .empty;
+    if (root.get("Drawers")) |ds| {
+        has_state = true;
+        for (ds.items() orelse &.{}, 0..) |d, i| {
+            var info: DrawerInfo = .{};
+            if (readStr(d, "Name")) |n| info.name = n;
+            if (readStr(d, "WMakerWLRow")) |r| {
+                if (std.fmt.parseInt(i32, r, 10) catch null) |row| info.row = row;
+            }
+            if (d.get("Dock")) |dd| {
+                if (readBool(dd, "Collapsed")) |b| info.collapsed = b;
+                if (readBool(dd, "AutoCollapse")) |b| info.auto_collapse = b;
+                if (dd.get("Applications")) |items| {
+                    for (items.items() orelse &.{}) |entry| {
+                        if (isLogoEntry(entry)) continue;
+                        var app = parseWMStateEntry(arena, entry) orelse continue;
+                        app.place = .drawer;
+                        app.drawer = @intCast(i);
+                        try apps.append(arena, app);
+                    }
+                }
+            }
+            try drawers.append(arena, info);
+        }
+    }
+
     result.apps = try apps.toOwnedSlice(arena);
     result.workspace_names = try names.toOwnedSlice(arena);
+    result.drawers = try drawers.toOwnedSlice(arena);
     if (has_state) result.state = st;
     return result;
 }
@@ -561,6 +589,28 @@ pub fn render(w: *std.Io.Writer, list: List, state: State) std.Io.Writer.Error!u
         }
         try w.writeAll("\n  );\n");
     }
+    if (list.drawers.len > 0) {
+        try w.writeAll("  Drawers = (\n");
+        for (list.drawers, 0..) |d, di| {
+            if (di > 0) try w.writeAll(",\n");
+            try w.writeAll("    {\n      Name = \"");
+            try writeEscaped(w, d.name);
+            try w.print("\";\n      WMakerWLRow = \"{d}\";\n      Dock = {{\n", .{d.row});
+            try w.print("        Collapsed = {s};\n        AutoCollapse = {s};\n", .{ yn(d.collapsed), yn(d.auto_collapse) });
+            var dfirst = true;
+            try w.writeAll("        Applications = (\n");
+            for (list.apps) |app| {
+                if (app.place != .drawer or app.drawer != di or app.attached) continue;
+                if (!writable(app)) {
+                    skipped += 1;
+                    continue;
+                }
+                try writeEntry(w, app, &dfirst);
+            }
+            try w.writeAll("\n        );\n      };\n    }");
+        }
+        try w.writeAll("\n  );\n");
+    }
     try w.writeAll("}\n");
     return skipped;
 }
@@ -656,40 +706,6 @@ test "isSelfDeclared recognises both prefixes, case-sensitively" {
     try std.testing.expect(!isSelfDeclared("DockApp:clock"));
     try std.testing.expect(!isSelfDeclared("firefox"));
     try std.testing.expect(!isSelfDeclared(null));
-}
-
-test "defaultAttrs: no title bar, no border, floating, hidden from the window list" {
-    const a = defaultAttrs();
-    try std.testing.expect(a.is("no_titlebar"));
-    try std.testing.expect(a.is("no_border"));
-    try std.testing.expect(a.is("floating"));
-    try std.testing.expect(a.is("skip_window_list"));
-    // Everything else is left null, so an attributes.conf rule can still
-    // set e.g. StartWorkspace for this app_id without a conflict.
-    try std.testing.expect(a.start_workspace == null);
-}
-
-test "self-declared defaults lose to an explicit attributes.conf rule, per option" {
-    // Mirrors window.zig's app_id handling: wm.attrs.lookup() first, then
-    // withDefaults(dockapp.defaultAttrs()) fills in only what the file
-    // left unset.
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const r = try wm_attr.parse(arena.allocator(),
-        \\{ "dockapp:clock" = { NoBorder = No; }; }
-    );
-    const looked_up = r.table.lookup("dockapp:clock");
-    const final = looked_up.withDefaults(defaultAttrs());
-
-    // The file said NoBorder = No: that wins over defaultAttrs()'s true.
-    try std.testing.expectEqual(false, final.no_border.?);
-    // NoTitlebar wasn't mentioned in the file, so the self-declared
-    // default (true) still applies.
-    try std.testing.expect(final.is("no_titlebar"));
-}
-
-test "defaultAttrs: omnipresent, so the Dock follows the user" {
-    try std.testing.expect(defaultAttrs().is("omnipresent"));
 }
 
 test "matches: explicit app_id, dockapp name, instance.Class, program name" {

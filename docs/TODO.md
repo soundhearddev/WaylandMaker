@@ -78,7 +78,7 @@
       allen Workspaces = Eselsohr; Ziehen sortiert um, entfernt (weit weg loslassen) und verschiebt Dock
       (Logo-Kachel, Rand und Offset) und Clip (Ecke); Menüs wie bei Window Maker (*Dock position*,
       *Clip Options*, *Launch*, *Bring Here*, *Hide*, *Lock*, *Remove Icon*, *Kill*, *Keep Application*);
-      Stapelebenen *normal / auto / top* (`dock_level`); Clip *Autocollapse*/*Autoraise*. Zustand in
+      Stapelebenen *normal / auto / top* (Dock-Menü, in `WMState` gespeichert); Clip *Autocollapse*/*Autoraise*. Zustand in
       eigener Datei `$XDG_STATE_HOME/wmaker-wl/dock.conf`, atomar geschrieben, beim Start vor
       `dockapps.conf` gelesen. Die fehlende `src/share/dockapps.conf` (der Test erwartete sie) ist
       ergänzt. Details und Abweichungen vom Original: `docs/DOCKAPPS.md`.

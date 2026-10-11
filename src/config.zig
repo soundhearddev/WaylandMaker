@@ -180,7 +180,7 @@ pub const Config = struct {
     // ---- Dock and Clip (see dock.zig) -------------------------------------------
     /// Draw the Dock: a column of 64 px tiles on one screen edge. Its first
     /// tile is the Window Maker logo tile, the others are the DockApps of
-    /// dockapps.conf / WMState that have `place = dock` (the default).
+    /// WMState.
     dock_enabled: bool = true,
     dock_edge: DockEdge = .right,
     /// Distance of the Dock's top edge from the top of the screen, in px.
@@ -190,7 +190,8 @@ pub const Config = struct {
     dock_on_top: bool = true,
     /// Window Maker's "Auto raise & lower" (Dock position menu): only
     /// counts while `dock_on_top` is off. The Dock then sits below windows
-    /// and comes up while the pointer is on it. `dock_level` sets both.
+    /// and comes up while the pointer is on it. (The Dock menu sets the level at
+    /// run time; it is saved in WMState.)
     dock_auto_raise: bool = false,
     /// Launch with ONE click on a Dock/Clip tile. Window Maker's default is
     /// a double click (a single click only raises the Dock), which is also
@@ -224,7 +225,7 @@ pub const Config = struct {
     // ---- dock apps ----------------------------------------------------------
     /// Run every `autolaunch = yes` DockApp once when the session comes up
     /// (see dockapp.zig). Looked up first as
-    /// ~/.config/wmaker-wl/dockapps.conf, then (if enable_wmaker_compat
+    /// $XDG_STATE_HOME/wmaker-wl/WMState, then (if enable_wmaker_compat
     /// allows it) parsed out of Window Maker's own
     /// ~/GNUstep/Defaults/WMState. Neither needs to exist.
     enable_dockapps: bool = true,
@@ -610,17 +611,6 @@ fn applyOption(
             if (n >= max_bind_layouts) return error.Invalid;
             cfg.bind_layout = n;
         }
-    } else if (eql(u8, key, "dock_level")) {
-        // Window Maker's "Dock position" menu in one word.
-        if (eql(u8, value, "top")) {
-            cfg.dock_on_top = true;
-        } else if (eql(u8, value, "auto")) {
-            cfg.dock_on_top = false;
-            cfg.dock_auto_raise = true;
-        } else if (eql(u8, value, "normal")) {
-            cfg.dock_on_top = false;
-            cfg.dock_auto_raise = false;
-        } else return error.Invalid;
     } else if (eql(u8, key, "dock_edge")) {
         cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
     } else if (eql(u8, key, "clip_corner")) {
@@ -1173,7 +1163,7 @@ fn parseText(arena: std.mem.Allocator, cfg: *Config, text: []const u8) !void {
     try parse(arena, text, cfg, &binds, "<test>");
 }
 
-test "Dock options: dock_level sets both switches, new switches parse, defaults" {
+test "Dock options: the new switches parse, defaults" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
@@ -1186,7 +1176,8 @@ test "Dock options: dock_level sets both switches, new switches parse, defaults"
     try std.testing.expect(!cfg.clip_auto_raise);
 
     try parseText(arena.allocator(), &cfg,
-        \\dock_level = auto
+        \\dock_on_top = no
+        \\dock_auto_raise = yes
         \\dock_single_click = yes
         \\dock_save_state = no
         \\clip_auto_collapse = yes
@@ -1199,15 +1190,10 @@ test "Dock options: dock_level sets both switches, new switches parse, defaults"
     try std.testing.expect(cfg.clip_auto_collapse);
     try std.testing.expect(cfg.clip_auto_raise);
 
-    try parseText(arena.allocator(), &cfg, "dock_level = normal\n");
-    try std.testing.expect(!cfg.dock_on_top);
-    try std.testing.expect(!cfg.dock_auto_raise);
-
+    // `dock_level` is not a config key (the Dock menu and the saved state
+    // carry the level), so it is reported, not silently half-applied.
     const before = cfg.parse_warnings;
-    try parseText(arena.allocator(), &cfg, "dock_level = nonsense\n");
+    try parseText(arena.allocator(), &cfg, "dock_level = top\n");
     try std.testing.expectEqual(before + 1, cfg.parse_warnings);
-    try std.testing.expect(!cfg.dock_on_top); // unchanged
-
-    try parseText(arena.allocator(), &cfg, "dock_level = auto\ndock_level = top\n");
-    try std.testing.expect(cfg.dock_on_top); // the later line wins
+    try std.testing.expect(!cfg.dock_on_top);
 }

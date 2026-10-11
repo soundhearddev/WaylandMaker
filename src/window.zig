@@ -24,7 +24,7 @@ const config = @import("config.zig");
 const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const seatmod = @import("seat.zig");
-const dockapp = @import("dockapp.zig");
+const dockhost = @import("dockhost.zig");
 
 const Window = types.Window;
 const WindowManager = types.WindowManager;
@@ -52,7 +52,42 @@ fn find(wm: *WindowManager, obj: *river.WindowV1) ?*Window {
     while (it) |w| : (it = types.nextWindow(w, wm)) {
         if (w.obj == obj) return w;
     }
+    var dit = wm.dock_windows.first();
+    while (dit) |w| : (dit = types.nextDockWindow(w, wm)) {
+        if (w.obj == obj) return w;
+    }
     return null;
+}
+
+/// A DockApp is an icon: it reports its size and name, and that is all of
+/// its events that mean anything. It cannot ask to be moved, resized or made
+/// fullscreen, and its role never changes again.
+fn dockEvent(wm: *WindowManager, win: *Window, event: river.WindowV1.Event) void {
+    switch (event) {
+        .closed => {
+            win.closed = true;
+            wm.obj.manageDirty();
+        },
+        .dimensions => |d| {
+            win.actual_w = d.width;
+            win.actual_h = d.height;
+            win.ready = true;
+            wm.obj.manageDirty();
+        },
+        .dimensions_hint => |h| {
+            win.min_w = h.min_width;
+            win.min_h = h.min_height;
+            win.max_w = h.max_width;
+            win.max_h = h.max_height;
+            wm.obj.manageDirty();
+        },
+        .app_id => |a| {
+            setString(wm, &win.app_id, a.app_id);
+            wm.obj.manageDirty();
+        },
+        .title => |t| setString(wm, &win.title, t.title),
+        else => {},
+    }
 }
 
 fn setString(wm: *WindowManager, dst: *?[]u8, src: ?[*:0]const u8) void {
@@ -62,6 +97,7 @@ fn setString(wm: *WindowManager, dst: *?[]u8, src: ?[*:0]const u8) void {
 
 fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManager) void {
     const win = find(wm, obj) orelse return;
+    if (win.role == .dockapp) return dockEvent(wm, win, event);
     switch (event) {
         .closed => {
             win.closed = true;
@@ -93,21 +129,16 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
 
         .app_id => |a| {
             setString(wm, &win.app_id, a.app_id);
-            // Decoration attributes follow the real app_id; where the window
-            // lives was decided when it was placed. A self-declared DockApp
-            // (app_id "dockapp:..."/"dockapp-...", see dockapp.zig) gets
-            // sensible tile defaults with NO config file needed; an explicit
-            // attributes.conf rule for this app_id still wins per option
-            // (Table.lookup already applies most-specific-first, and
-            // withDefaults only fills what the file left unset).
-            win.attrs = wm.attrs.lookup(win.app_id);
-            if (dockapp.isSelfDeclared(win.app_id)) {
-                win.attrs = win.attrs.withDefaults(dockapp.defaultAttrs());
+            // The tag `dockapp:<name>` makes this an icon, not a window, from
+            // now on and whatever state it was in (see dockhost.zig).
+            if (dockhost.isDockApp(win.app_id)) {
+                dockhost.adopt(wm, win);
+                wm.obj.manageDirty();
+                return;
             }
-            // The app_id is very often the FIRST thing that reveals a
-            // DockApp; if it shows up after first placement already
-            // tiled it, float it now instead of leaving it stuck with a
-            // full border for the rest of its life. See recheckFloating.
+            // Decoration attributes follow the real app_id; where the window
+            // lives was decided when it was placed.
+            win.attrs = wm.attrs.lookup(win.app_id);
             recheckFloating(wm, win);
             wm.obj.manageDirty();
         },
@@ -209,11 +240,7 @@ pub fn placeNew(wm: *WindowManager) void {
         if (!win.new or win.closed) continue;
         const out = targetOutput(wm) orelse continue;
 
-        const attrs_looked_up = wm.attrs.lookup(win.app_id);
-        const attrs = if (dockapp.isSelfDeclared(win.app_id))
-            attrs_looked_up.withDefaults(dockapp.defaultAttrs())
-        else
-            attrs_looked_up;
+        const attrs = wm.attrs.lookup(win.app_id);
         win.attrs = attrs;
 
         var ws = out.ws();
@@ -286,6 +313,12 @@ pub fn reap(wm: *WindowManager) void {
         const next = types.nextWindow(win, wm);
         if (win.closed) destroy(wm, win);
         it = next;
+    }
+    var dit = wm.dock_windows.first();
+    while (dit) |win| {
+        const next = types.nextDockWindow(win, wm);
+        if (win.closed) destroy(wm, win);
+        dit = next;
     }
 }
 

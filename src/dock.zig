@@ -1,28 +1,31 @@
 // SPDX-License-Identifier: 0BSD
 //
-// The Dock (Window Maker's "WMDock") and the Clip ("WMClip"): model,
-// geometry, hit testing and drawing. No Wayland types in here, like
-// gfx.zig, so all of it is unit-testable without a compositor; ui.zig owns
-// the surfaces and the pointer.
+// The Dock (Window Maker's "WMDock"), the Clip ("WMClip") and the Drawers:
+// model, geometry and drawing. No Wayland types in here, like gfx.zig, so
+// all of it is unit-testable without a compositor; ui.zig owns the surfaces
+// and the pointer.
 //
-//   Dock   A column of 64 px tiles on the left or right screen edge. The
-//          logo tile ("WM") is part of it; the others are the DockApps with
-//          `place = dock`. A click starts the application, or focuses it if
-//          a window of it is already open. A small mark in the corner of a
-//          tile says "running". A fixed-size DockApp window (app_id
-//          `dockapp:<name>`, at most 64x64) that matches a tile is put right
-//          into that tile by ui.zig's placeDocked, which is how wmclock-style
-//          applets live in Window Maker's dock.
+// The model is Window Maker's own (see wm_dock.zig, a port of dock.c): every
+// icon has a grid position (xindex, yindex) relative to the first tile of
+// its dock.
 //
-//   Clip   One tile with the workspace on it: its number and name, an arrow
-//          in the upper right corner (next workspace) and one in the lower
-//          left corner (previous workspace), exactly where Window Maker puts
-//          them. Next to it, in one row, the DockApps with `place = clip`
-//          that belong to the CURRENT workspace.
+//   Dock    The logo tile and a COLUMN of tiles on the left or right screen
+//           edge. Rows may be left empty. A fixed-size DockApp window
+//           (app_id `dockapp:<name>`, at most 64x64) is put right into its
+//           tile by dockhost.zig.
+//   Clip    The workspace tile (number, name, an arrow upper right = next
+//           and lower left = previous workspace) in a screen corner, and
+//           the applications of the CURRENT workspace placed around it,
+//           each one touching another. Tiles marked omnipresent follow the
+//           workspace.
+//   Drawer  A tile that hangs off the Dock and opens a ROW of tiles towards
+//           the middle of the screen. Collapsed (only its tile) until the
+//           pointer comes.
 //
-// The tiles are drawn on one surface each (one for the Dock, one for the
-// Clip). `Model` is a deep copy of what wm.dockapps held when it was built,
-// so a config reload cannot leave it pointing into a freed arena.
+// Every dock is drawn on one surface that covers its tiles plus a margin
+// where a dragged tile can still snap to. `Model` is a deep copy of what
+// wm.dockapps held when it was built, so a config reload cannot leave it
+// pointing into a freed arena.
 
 const std = @import("std");
 const gfx = @import("gfx.zig");
@@ -30,6 +33,7 @@ const config = @import("config.zig");
 const dockapp = @import("dockapp.zig");
 const xpm = @import("xpm.zig");
 const types = @import("types.zig");
+const wdock = @import("wm_dock.zig");
 
 const Rect = types.Rect;
 
@@ -72,12 +76,17 @@ const col_fade: gfx.Color = .{ .r = 0xd8, .g = 0xd8, .b = 0xdc, .a = 0xb0 };
 pub const Slot = struct {
     app: dockapp.DockApp,
     icon: ?gfx.Icon = null,
+    /// The grid icon. Owned by the model; it sits in a wdock.Dock while the
+    /// slot is alive.
+    gi: *wdock.Icon,
+    /// false once the tile was taken away: the index stays reserved so
+    /// references held by menus and presses never point at another tile.
+    alive: bool = true,
     /// A window of this application is open (set by ui.zig every sync).
     running: bool = false,
     /// The application was started from this tile and has no window yet
     /// (Window Maker's `launching`). Cleared by `setRunning` as soon as a
-    /// window matches, or by ui.zig after a time-out (a program that never
-    /// opens a window must not leave the tile covered forever).
+    /// window matches, or by ui.zig after a time-out.
     launching: bool = false,
     /// Value of ui.zig's sync counter when `launching` was set.
     launch_stamp: u32 = 0,
@@ -109,62 +118,47 @@ pub fn levelFor(on_top: bool, auto: bool) Level {
     return if (auto) .auto else .normal;
 }
 
-/// What one Dock tile is.
-pub const Tile = union(enum) {
-    logo,
-    /// Index into `Model.dock`.
-    app: usize,
+// ----------------------------------------------------------------------------
+// The model
+// ----------------------------------------------------------------------------
+
+/// Most Drawers there can be.
+pub const max_drawers: usize = 8;
+
+/// The tiles a surface shows, as an inclusive grid rectangle.
+pub const Cells = struct {
+    minx: i32 = 0,
+    miny: i32 = 0,
+    maxx: i32 = 0,
+    maxy: i32 = 0,
+
+    pub fn cols(c: Cells) i32 {
+        return c.maxx - c.minx + 1;
+    }
+
+    pub fn rows(c: Cells) i32 {
+        return c.maxy - c.miny + 1;
+    }
 };
 
-/// Most tiles a Dock or a Clip ever holds (also bounds the scratch arrays
-/// of `moveDockTile`). A screen is never taller than this many tiles.
-pub const max_dock_tiles: usize = 64;
-
-/// Which of the ORIGINAL tiles is shown at position `t` once tile `from`
-/// has been moved to position `to` (everything between shifts by one).
-/// Used for the live preview while dragging and by `Model.moveDockTile`,
-/// so what is drawn is what is dropped.
-pub fn reorderIndex(from: usize, to: usize, t: usize) usize {
-    if (t == to) return from;
-    if (from < to) {
-        // from+1 .. to move up by one
-        return if (t >= from and t < to) t + 1 else t;
-    }
-    // to .. from-1 move down by one
-    return if (t > to and t <= from) t - 1 else t;
-}
-
-/// How far (px) from the Dock a dragged tile may be taken before letting go
-/// removes it instead of reordering (Window Maker's DOCK_DETTACH_THRESHOLD
-/// is about this much, too).
-pub const detach_distance: i32 = 56;
-
-/// Is the pointer (surface-local x) far enough outside a Dock/Clip column
-/// of width `tile` to count as "taking the tile away"?
-pub fn detached(x: i32, y: i32, w: i32, h: i32) bool {
-    return x < -detach_distance or x > w + detach_distance or y < -detach_distance or y > h + detach_distance;
-}
-
-/// Tile position the pointer at surface-local `y` is over while a Dock
-/// tile is dragged: clamped, so dragging past either end drops there.
-pub fn dropTile(y: i32, ntiles: usize) usize {
-    if (ntiles == 0) return 0;
-    if (y < 0) return 0;
-    const t: usize = @intCast(@divTrunc(y, tile));
-    return @min(t, ntiles - 1);
-}
+const Order = enum { y, x, abs_x };
 
 pub const Model = struct {
-    /// Owns every string in `dock`/`clip`/`names`.
+    /// Owns every string in `slots`, `names` and `drawer_names`.
     arena: std.heap.ArenaAllocator,
-    /// Dock entries, sorted top to bottom.
-    dock: []Slot,
-    /// All Clip entries, sorted left to right (see `clipFor`).
-    clip: []Slot,
-    names: []const []const u8,
-    /// Dock entries that sit ABOVE the logo tile.
-    above_logo: usize,
+    gpa: std.mem.Allocator,
+    scr: wdock.Screen,
+    slots: std.ArrayList(Slot) = .empty,
+    names: []const []const u8 = &.{},
     workspace_count: u32,
+    /// Parallel to scr.drawers.
+    drawer_names: std.ArrayList([]const u8) = .empty,
+    /// Where the Dock and the Clip are (output-local, see `layout`).
+    dock_right: bool = true,
+    dock_y: i32 = 0,
+    clip_corner: config.ClipCorner = .top_left,
+
+    pub const Error = error{ OutOfMemory, Full, NoDrawer };
 
     /// Build from `list`. `cfg_names` (config.conf) win over the names the
     /// list carries (Window Maker's WMState). Icons are loaded here, so
@@ -175,305 +169,283 @@ pub const Model = struct {
         cfg_names: []const []const u8,
         workspace_count: u32,
     ) !Model {
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        errdefer arena.deinit();
-        const a = arena.allocator();
+        var m: Model = .{
+            .arena = .init(gpa),
+            .gpa = gpa,
+            .scr = .{ .gpa = gpa, .width = 1920, .height = 1080 },
+            .workspace_count = @max(1, workspace_count),
+        };
+        errdefer m.deinit();
+        const a = m.arena.allocator();
 
-        var dock: std.ArrayList(Slot) = .empty;
-        var clip: std.ArrayList(Slot) = .empty;
-        errdefer for ([_]*std.ArrayList(Slot){ &dock, &clip }) |l| for (l.items) |*s| if (s.icon) |*i| i.deinit();
-
-        for (list.apps) |app| {
-            const copy = try dupeApp(a, app);
-            var slot: Slot = .{ .app = copy };
-            slot.icon = loadIcon(gpa, copy);
-            switch (copy.place) {
-                .dock => try dock.append(a, slot),
-                .clip => try clip.append(a, slot),
-            }
+        m.scr.dock = try wdock.create(&m.scr, .dock, m.scr.width - tile, 0);
+        for (0..m.workspace_count) |_| {
+            const clip = try wdock.create(&m.scr, .clip, 0, 0);
+            try m.scr.clips.append(gpa, clip);
         }
-
-        // Stable sorts: entries with the same position keep file order.
-        std.mem.sort(Slot, dock.items, {}, dockLess);
-        std.mem.sort(Slot, clip.items, {}, clipLess);
-
-        var above: usize = 0;
-        for (dock.items) |s| {
-            if (s.app.y < list.logo_y) above += 1;
+        const dock = m.scr.dock.?;
+        for (list.drawers, 0..) |d, i| {
+            if (i >= max_drawers) break;
+            const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, dock.y_pos + d.row * tile);
+            dr.collapsed = d.collapsed;
+            dr.auto_collapse = d.auto_collapse;
+            try m.drawer_names.append(gpa, try a.dupe(u8, d.name));
         }
-
-        if (dock.items.len > max_dock_tiles) dock.shrinkRetainingCapacity(max_dock_tiles);
-        if (clip.items.len > max_dock_tiles) clip.shrinkRetainingCapacity(max_dock_tiles);
 
         const names = if (cfg_names.len > 0) cfg_names else list.workspace_names;
-        var names_copy = try a.alloc([]const u8, names.len);
+        const names_copy = try a.alloc([]const u8, names.len);
         for (names, 0..) |n, i| names_copy[i] = try a.dupe(u8, n);
+        m.names = names_copy;
 
-        var model: Model = .{
-            .arena = arena,
-            .dock = try dock.toOwnedSlice(a),
-            .clip = try clip.toOwnedSlice(a),
-            .names = names_copy,
-            .above_logo = above,
-            .workspace_count = workspace_count,
-        };
-        // Only now, so a (valid) hand-written position like `0,5` is kept
-        // by the sort above, but what is saved from here on is gap free.
-        model.renumberDock();
-        return model;
+        for (list.apps) |app| {
+            _ = m.insert(app) catch |err| {
+                std.log.warn("dock: entry `{s}` dropped: {t}", .{ app.name, err });
+            };
+        }
+        return m;
     }
 
     pub fn deinit(m: *Model) void {
-        for (m.dock) |*s| if (s.icon) |*i| i.deinit();
-        for (m.clip) |*s| if (s.icon) |*i| i.deinit();
+        for (m.slots.items) |*s| if (s.icon) |*i| i.deinit();
+        m.slots.deinit(m.gpa);
+        m.drawer_names.deinit(m.gpa);
+        // Frees every dock with the icons still in it.
+        m.scr.deinit();
         m.arena.deinit();
         m.* = undefined;
     }
 
-    /// Number of tiles in the Dock: the logo plus every entry.
-    pub fn dockTiles(m: *const Model) usize {
-        return m.dock.len + 1;
+    // ---- placing --------------------------------------------------------------
+
+    fn clipOf(m: *const Model, ws: u32) *wdock.Dock {
+        const n = m.scr.clips.items.len;
+        return m.scr.clips.items[@min(@as(usize, ws), n - 1)];
     }
 
-    pub fn dockTile(m: *const Model, t: usize) ?Tile {
-        if (t >= m.dockTiles()) return null;
-        if (t == m.above_logo) return .logo;
-        return .{ .app = if (t < m.above_logo) t else t - 1 };
-    }
-
-    /// Indices into `clip` of the entries shown on workspace `ws` (0-based):
-    /// those with no workspace and those with exactly this one. Written into
-    /// `out`; returns the part that was filled (never more than out.len).
-    pub fn clipFor(m: *const Model, ws: u32, out: []usize) []usize {
-        var n: usize = 0;
-        for (m.clip, 0..) |s, i| {
-            if (n == out.len) break;
-            if (s.app.workspace) |w| if (w != ws) continue;
-            out[n] = i;
-            n += 1;
+    fn occupied(dock: *const wdock.Dock, x: i32, y: i32) bool {
+        for (dock.icons) |maybe| {
+            if (maybe) |i| if (i.xindex == x and i.yindex == y) return true;
         }
-        return out[0..n];
+        return false;
     }
 
-    /// "Main" for workspace 0 if it is named so, else null.
+    /// First free row of the Dock column, searching 1, -1, 2, -2, ... Skips
+    /// rows a Drawer hangs on. (wDockFindFreeSlot would also use the sides
+    /// of the Dock here; the Dock is a single column.)
+    pub fn dockFreeRow(m: *const Model) ?i32 {
+        const dock = m.scr.dock orelse return null;
+        if (dock.icon_count >= dock.icons.len) return null;
+        var step: i32 = 1;
+        while (step <= @as(i32, @intCast(dock.icons.len))) : (step += 1) {
+            for ([_]i32{ step, -step }) |y| {
+                if (occupied(dock, 0, y)) continue;
+                if (wdock.getDrawer(&m.scr, y) != null) continue;
+                if (!m.scr.onScreen(dock.x_pos, dock.y_pos + y * tile)) continue;
+                return y;
+            }
+        }
+        return null;
+    }
+
+    fn insert(m: *Model, app: dockapp.DockApp) !usize {
+        const a = m.arena.allocator();
+        const gpa = m.gpa;
+        const copy = try dupeApp(a, app);
+
+        const gi = try gpa.create(wdock.Icon);
+        errdefer gpa.destroy(gi);
+        gi.* = .{
+            .has_command = copy.command.len > 0,
+            .lock = copy.locked,
+            .auto_launch = copy.autolaunch,
+            .tag = m.slots.items.len,
+        };
+
+        var omnipresent = false;
+        const dock: *wdock.Dock = switch (copy.place) {
+            .dock => m.scr.dock.?,
+            .clip => blk: {
+                omnipresent = copy.workspace == null;
+                break :blk m.clipOf(copy.workspace orelse @intCast(m.scr.current_workspace));
+            },
+            .drawer => blk: {
+                if (copy.drawer >= m.scr.drawers.items.len) return error.NoDrawer;
+                break :blk m.scr.drawers.items[copy.drawer];
+            },
+        };
+
+        var xy: [2]i32 = undefined;
+        switch (copy.place) {
+            .dock => {
+                if (copy.y != 0 and !occupied(dock, 0, copy.y) and wdock.getDrawer(&m.scr, copy.y) == null) {
+                    xy = .{ 0, copy.y };
+                } else xy = .{ 0, m.dockFreeRow() orelse return error.Full };
+            },
+            .clip => {
+                if ((copy.x != 0 or copy.y != 0) and !occupied(dock, copy.x, copy.y)) {
+                    xy = .{ copy.x, copy.y };
+                } else xy = (try wdock.findFreeSlot(&m.scr, dock)) orelse return error.Full;
+            },
+            .drawer => xy = (try wdock.findFreeSlot(&m.scr, dock)) orelse return error.Full,
+        }
+        if (!wdock.attachIcon(dock, gi, xy[0], xy[1])) return error.Full;
+        errdefer wdock.detach(&m.scr, dock, gi);
+        if (omnipresent) _ = wdock.makeIconOmnipresent(&m.scr, gi, true);
+
+        var new: Slot = .{ .app = copy, .gi = gi };
+        new.icon = loadIcon(gpa, copy);
+        try m.slots.append(gpa, new);
+        return m.slots.items.len - 1;
+    }
+
+    /// Put a new tile in the first free place of the Dock (`place = dock`),
+    /// of the CURRENT workspace's Clip (`place = clip`) or of Drawer
+    /// `app.drawer`. "Keep Application" and the "Move Icon To" menu use it.
+    pub fn addApp(m: *Model, app: dockapp.DockApp) !usize {
+        var copy = app;
+        copy.x = 0;
+        copy.y = 0;
+        if (copy.place == .clip and copy.workspace != null) copy.workspace = @intCast(m.scr.current_workspace);
+        return m.insert(copy);
+    }
+
+    // ---- looking -----------------------------------------------------------------
+
     pub fn workspaceName(m: *const Model, ws: u32) ?[]const u8 {
         if (ws >= m.names.len) return null;
         const n = m.names[ws];
         return if (n.len == 0) null else n;
     }
 
-    /// Update every slot's `running` flag from the app_ids of the open
-    /// windows. Returns true if any flag changed (=> redraw).
-    pub fn setRunning(m: *Model, app_ids: []const []const u8) bool {
-        var changed = false;
-        for ([_][]Slot{ m.dock, m.clip }) |list| {
-            for (list) |*s| {
-                var run = false;
-                for (app_ids) |id| {
-                    if (s.app.matches(id)) {
-                        run = true;
-                        break;
-                    }
-                }
-                if (s.running != run) {
-                    s.running = run;
-                    changed = true;
-                }
-                // A window has appeared: the start is over.
-                if (run and s.launching) {
-                    s.launching = false;
-                    changed = true;
-                }
-            }
+    /// The live slot `index`, if it is one.
+    pub fn slot(m: *const Model, index: usize) ?*Slot {
+        if (index >= m.slots.items.len) return null;
+        const s = &m.slots.items[index];
+        return if (s.alive) s else null;
+    }
+
+    /// The slot of a grid icon (null for a dock's own main tile).
+    pub fn slotOf(m: *const Model, gi: *const wdock.Icon) ?*Slot {
+        if (gi.main) return null;
+        return m.slot(gi.tag);
+    }
+
+    /// The Dock tile whose entry matches a window with this app_id.
+    pub fn dockSlotFor(m: *const Model, app_id: []const u8) ?usize {
+        for (m.slots.items, 0..) |s, i| {
+            if (!s.alive) continue;
+            const d = s.gi.dock orelse continue;
+            if (d.kind != .dock) continue;
+            if (s.app.matches(app_id)) return i;
         }
-        return changed;
+        return null;
     }
 
-    /// Mark an entry as just started (draws the raster) and remember when.
-    pub fn markLaunching(m: *Model, clip: bool, index: usize, stamp: u32) void {
-        const list = if (clip) m.clip else m.dock;
-        if (index >= list.len) return;
-        if (list[index].running) return;
-        list[index].launching = true;
-        list[index].launch_stamp = stamp;
-    }
-
-    /// End `launching` of every entry started more than `max_age` syncs ago
-    /// (a program that never opens a window). True if anything changed.
-    pub fn expireLaunching(m: *Model, now: u32, max_age: u32) bool {
-        var changed = false;
-        for ([_][]Slot{ m.dock, m.clip }) |list| {
-            for (list) |*s| {
-                if (s.launching and now -% s.launch_stamp > max_age) {
-                    s.launching = false;
-                    changed = true;
-                }
-            }
-        }
-        return changed;
-    }
-
-    /// Move the Dock tile `from` (an application tile, never the logo) so
-    /// that it ends up at tile position `to`, everything in between shifting
-    /// by one. Crossing the logo tile changes how many entries sit above it.
-    /// The y of every entry is renumbered (Window Maker's grid: the logo is
-    /// 0, tiles above it negative, below it 0, 1, 2 ... in `Position`-terms
-    /// of WMState) so the new order survives being written out and read
-    /// back. False if nothing moved.
-    pub fn moveDockTile(m: *Model, from: usize, to: usize) bool {
-        const n = m.dockTiles();
-        if (from >= n or to >= n or from == to) return false;
-        if (m.dockTile(from).? == .logo) return false;
-
-        // Sequence of tiles before and after, as Tile values.
-        var before: [max_dock_tiles]Tile = undefined;
-        if (n > max_dock_tiles) return false;
-        for (0..n) |t| before[t] = m.dockTile(t).?;
-
-        var after: [max_dock_tiles]Tile = undefined;
-        for (0..n) |t| after[t] = before[reorderIndex(from, to, t)];
-
-        // Rebuild `dock` in the new order. Slots are plain values, so copy
-        // through a scratch array (a slot owns an icon: it is moved, not
-        // duplicated, and the old array is overwritten completely).
-        var scratch: [max_dock_tiles]Slot = undefined;
-        var k: usize = 0;
-        var logo_at: usize = 0;
-        for (0..n) |t| switch (after[t]) {
-            .logo => logo_at = t,
-            .app => |i| {
-                scratch[k] = m.dock[i];
-                k += 1;
-            },
-        };
-        @memcpy(m.dock[0..k], scratch[0..k]);
-        m.above_logo = logo_at;
-        m.renumberDock();
-        return true;
-    }
-
-    /// y of every Dock entry from its position (see moveDockTile).
-    fn renumberDock(m: *Model) void {
-        for (m.dock, 0..) |*s, i| {
-            s.app.y = if (i < m.above_logo)
-                @as(i32, @intCast(i)) - @as(i32, @intCast(m.above_logo))
-            else
-                @as(i32, @intCast(i - m.above_logo));
-        }
-    }
-
-    /// Remove Dock entry `index` (an index into `dock`). Its icon is freed.
-    pub fn removeDock(m: *Model, index: usize) bool {
-        if (index >= m.dock.len) return false;
-        if (m.dock[index].app.locked) return false;
-        if (m.dock[index].icon) |*i| i.deinit();
-        if (index < m.above_logo) m.above_logo -= 1;
-        std.mem.copyForwards(Slot, m.dock[index .. m.dock.len - 1], m.dock[index + 1 ..]);
-        m.dock = m.dock[0 .. m.dock.len - 1];
-        m.renumberDock();
-        return true;
-    }
-
-    /// Move Clip entry `from` to index `to` (both indices into `clip`, which
-    /// is ordered by x); the entries in between shift by one and every x is
-    /// renumbered, so the order survives being saved.
-    pub fn moveClipEntry(m: *Model, from: usize, to: usize) bool {
-        if (from >= m.clip.len or to >= m.clip.len or from == to) return false;
-        const item = m.clip[from];
-        if (from < to) {
-            std.mem.copyForwards(Slot, m.clip[from..to], m.clip[from + 1 .. to + 1]);
-        } else {
-            std.mem.copyBackwards(Slot, m.clip[to + 1 .. from + 1], m.clip[to..from]);
-        }
-        m.clip[to] = item;
-        for (m.clip, 0..) |*sl, i| {
-            sl.app.x = @intCast(i);
-            sl.app.y = 0;
-        }
-        return true;
-    }
-
-    /// Remove Clip entry `index` (an index into `clip`).
-    pub fn removeClip(m: *Model, index: usize) bool {
-        if (index >= m.clip.len) return false;
-        if (m.clip[index].app.locked) return false;
-        if (m.clip[index].icon) |*i| i.deinit();
-        std.mem.copyForwards(Slot, m.clip[index .. m.clip.len - 1], m.clip[index + 1 ..]);
-        m.clip = m.clip[0 .. m.clip.len - 1];
-        return true;
-    }
-
-    /// Add `app` (copied into the model) at the end of the Dock or the
-    /// Clip, with its icon. Returns the new index.
-    pub fn addApp(m: *Model, gpa: std.mem.Allocator, app: dockapp.DockApp) !usize {
-        const a = m.arena.allocator();
-        var copy = try dupeApp(a, app);
-        var slot: Slot = .{ .app = copy };
-        slot.icon = loadIcon(gpa, copy);
-        errdefer if (slot.icon) |*i| i.deinit();
-        switch (copy.place) {
-            .dock => {
-                if (m.dock.len + 1 > max_dock_tiles) return error.TooMany;
-                const list = try a.alloc(Slot, m.dock.len + 1);
-                @memcpy(list[0..m.dock.len], m.dock);
-                copy.y = @as(i32, @intCast(m.dock.len - m.above_logo));
-                slot.app = copy;
-                list[m.dock.len] = slot;
-                m.dock = list;
-                return m.dock.len - 1;
-            },
-            .clip => {
-                if (m.clip.len + 1 > max_dock_tiles) return error.TooMany;
-                const list = try a.alloc(Slot, m.clip.len + 1);
-                @memcpy(list[0..m.clip.len], m.clip);
-                var last_x: i32 = -1;
-                for (m.clip) |c| last_x = @max(last_x, c.app.x);
-                copy.x = last_x + 1;
-                slot.app = copy;
-                list[m.clip.len] = slot;
-                m.clip = list;
-                return m.clip.len - 1;
-            },
-        }
-    }
-
-    /// Does an entry (Dock or Clip) already start this application?
     pub fn hasApp(m: *const Model, app_id: []const u8) bool {
-        for ([_][]const Slot{ m.dock, m.clip }) |list| {
-            for (list) |s| if (s.app.matches(app_id)) return true;
+        for (m.slots.items) |s| {
+            if (s.alive and s.app.matches(app_id)) return true;
         }
         return false;
     }
 
-    /// Everything the Model holds as one list (Dock in tile order, then the
-    /// Clip), for writing it out. Temporary (`attached`) tiles are left out.
-    /// The strings stay owned by the Model.
-    pub fn exportList(m: *const Model, a: std.mem.Allocator) !dockapp.List {
-        var out: std.ArrayList(dockapp.DockApp) = .empty;
-        try out.ensureTotalCapacity(a, m.dock.len + m.clip.len);
-        for (m.dock) |s| if (!s.app.attached) out.appendAssumeCapacity(s.app);
-        for (m.clip) |s| if (!s.app.attached) out.appendAssumeCapacity(s.app);
-        return .{ .apps = try out.toOwnedSlice(a), .workspace_names = m.names, .logo_y = 0 };
+    /// Mark the tiles whose application has a window; true if that changed.
+    /// A window ends `launching`.
+    pub fn setRunning(m: *Model, app_ids: []const []const u8) bool {
+        var changed = false;
+        for (m.slots.items) |*s| {
+            if (!s.alive) continue;
+            var run = false;
+            for (app_ids) |id| {
+                if (s.app.matches(id)) {
+                    run = true;
+                    break;
+                }
+            }
+            if (s.running != run) {
+                s.running = run;
+                changed = true;
+            }
+            if (run and s.launching) {
+                s.launching = false;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
+    pub fn markLaunching(m: *Model, index: usize, stamp: u32) void {
+        const s = m.slot(index) orelse return;
+        if (s.app.command.len == 0) return;
+        s.launching = true;
+        s.launch_stamp = stamp;
+    }
+
+    /// Clear `launching` on tiles older than `max_age` (wrapping clock).
+    pub fn expireLaunching(m: *Model, now: u32, max_age: u32) bool {
+        var changed = false;
+        for (m.slots.items) |*s| {
+            if (s.alive and s.launching and now -% s.launch_stamp > max_age) {
+                s.launching = false;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // ---- changing --------------------------------------------------------------
+
+    /// Take a tile away (not if it is locked). In a Drawer the others close
+    /// the gap.
+    pub fn removeSlot(m: *Model, index: usize) bool {
+        const s = m.slot(index) orelse return false;
+        if (s.app.locked) return false;
+        const dock = s.gi.dock orelse return false;
+        wdock.detach(&m.scr, dock, s.gi);
+        if (dock.kind == .drawer) wdock.drawerFillTheGap(dock, s.gi, false);
+        m.gpa.destroy(s.gi);
+        if (s.icon) |*i| i.deinit();
+        s.icon = null;
+        s.alive = false;
+        return true;
+    }
+
+    /// Apply a snap result of `wdock.snapIcon`: the tile now sits at `xy`
+    /// of `dest`, which may be another dock. False if it did not fit.
+    pub fn dropSlot(m: *Model, index: usize, dest: *wdock.Dock, xy: [2]i32) bool {
+        const s = m.slot(index) orelse return false;
+        const src = s.gi.dock orelse return false;
+        if (src == dest) {
+            wdock.reattachIcon(dest, s.gi, xy[0], xy[1]);
+            return true;
+        }
+        if (dest.kind == .dock and s.app.command.len == 0) return false;
+        if (!wdock.moveIconBetweenDocks(&m.scr, src, dest, s.gi, xy[0], xy[1])) return false;
+        s.app.place = switch (dest.kind) {
+            .dock => .dock,
+            .clip => .clip,
+            .drawer => .drawer,
+        };
+        if (dest.kind == .clip) s.app.workspace = @intCast(m.scr.current_workspace);
+        if (src.kind == .drawer) wdock.drawerFillTheGap(src, s.gi, false);
+        return true;
+    }
+
+    // ---- temporary tiles for DockApps -------------------------------------------
+
     /// A self-declared DockApp (`dockapp:<name>`) is running but has no tile:
-    /// give it a temporary one at the end of the Dock, like Window Maker
-    /// gives a freshly started DockApp an icon. It is not saved and goes
-    /// away with the program (`pruneAttached`). Returns the new index.
-    pub fn attach(m: *Model, gpa: std.mem.Allocator, name: []const u8) !usize {
-        return m.addApp(gpa, .{ .name = name, .command = &.{}, .attached = true });
+    /// give it a temporary one in the Dock. It is not saved and goes away
+    /// with the program (`pruneAttached`). Returns the slot index.
+    pub fn attach(m: *Model, name: []const u8) !usize {
+        return m.insert(.{ .name = name, .command = &.{}, .attached = true });
     }
 
     /// Remove every temporary tile whose program has quit. True if any went.
     pub fn pruneAttached(m: *Model) bool {
         var changed = false;
-        var i: usize = m.dock.len;
-        while (i > 0) {
-            i -= 1;
-            const s = m.dock[i];
-            if (s.app.attached and !s.running and !s.launching) {
-                _ = m.removeDock(i);
-                changed = true;
+        for (m.slots.items, 0..) |*s, i| {
+            if (s.alive and s.app.attached and !s.running and !s.launching) {
+                s.app.locked = false;
+                if (m.removeSlot(i)) changed = true;
             }
         }
         return changed;
@@ -482,34 +454,221 @@ pub const Model = struct {
     /// "Keep Icon": make a temporary tile permanent. The command is the
     /// DockApp's name (name the app_id after the program).
     pub fn keepAttached(m: *Model, index: usize) bool {
-        if (index >= m.dock.len or !m.dock[index].app.attached) return false;
+        const s = m.slot(index) orelse return false;
+        if (!s.app.attached) return false;
         const a = m.arena.allocator();
-        const s = &m.dock[index];
         const argv = a.alloc([]const u8, 1) catch return false;
         argv[0] = s.app.name;
         s.app.command = argv;
         s.app.attached = false;
+        s.gi.has_command = true;
         return true;
     }
 
-    /// The Dock entry that a docked window with this app_id belongs to, and
-    /// only if the window can be hosted by it: `app_id` must be
-    /// self-declared (`dockapp:...`), see ui.zig's placeDocked.
-    pub fn dockSlotFor(m: *const Model, app_id: []const u8) ?usize {
-        if (dockapp.declaredName(app_id) == null) return null;
-        for (m.dock, 0..) |s, i| if (s.app.matches(app_id)) return i;
+    // ---- Drawers --------------------------------------------------------------
+
+    /// addADrawer: a new Drawer on the first free row next to the Dock.
+    pub fn addDrawer(m: *Model, name: []const u8) !?*wdock.Dock {
+        const dock = m.scr.dock orelse return null;
+        if (m.scr.drawers.items.len >= max_drawers) return null;
+        if (dock.icon_count + m.scr.drawers.items.len >= dock.icons.len) return null;
+        var row: ?i32 = null;
+        var step: i32 = 1;
+        search: while (step <= @as(i32, @intCast(dock.icons.len))) : (step += 1) {
+            for ([_]i32{ step, -step }) |y| {
+                if (occupied(dock, 0, y)) continue;
+                if (wdock.getDrawer(&m.scr, y) != null) continue;
+                if (!m.scr.onScreen(dock.x_pos, dock.y_pos + y * tile)) continue;
+                row = y;
+                break :search;
+            }
+        }
+        const y = row orelse return null;
+        const dr = try wdock.create(&m.scr, .drawer, dock.x_pos, dock.y_pos + y * tile);
+        dr.collapsed = true;
+        m.drawer_names.append(m.gpa, m.arena.allocator().dupe(u8, name) catch {
+            m.removeDrawerRaw(dr);
+            return error.OutOfMemory;
+        }) catch {
+            m.removeDrawerRaw(dr);
+            return error.OutOfMemory;
+        };
+        return dr;
+    }
+
+    fn removeDrawerRaw(m: *Model, d: *wdock.Dock) void {
+        wdock.removeDrawer(&m.scr, d);
+    }
+
+    /// Drag a Drawer's tile: it goes to the Dock row nearest to `top_y`
+    /// (output-local top edge of the tile) if that row is free.
+    pub fn moveDrawerToward(m: *Model, d: *wdock.Dock, top_y: i32) bool {
+        const dock = m.scr.dock orelse return false;
+        const row = @divFloor(top_y - dock.y_pos + @divTrunc(tile, 2), tile);
+        const y = dock.y_pos + row * tile;
+        if (row == 0 or occupied(dock, 0, row) or !m.scr.onScreen(dock.x_pos, y)) return false;
+        if (wdock.getDrawer(&m.scr, row)) |other| {
+            if (other != d) return false;
+            return true;
+        }
+        wdock.moveDock(&m.scr, d, d.x_pos, y);
+        return true;
+    }
+
+    /// "Move Icon To" (Clip tiles): show the tile on workspace `ws`, or on
+    /// all of them (null).
+    pub fn setSlotWorkspace(m: *Model, index: usize, ws: ?u32) bool {
+        const s = m.slot(index) orelse return false;
+        if (s.app.place != .clip) return false;
+        const gi = s.gi;
+        const src = gi.dock orelse return false;
+        if (ws == null) {
+            if (wdock.makeIconOmnipresent(&m.scr, gi, true) == .failed) return false;
+            s.app.workspace = null;
+            return true;
+        }
+        _ = wdock.makeIconOmnipresent(&m.scr, gi, false);
+        const dest = m.clipOf(ws.?);
+        s.app.workspace = ws;
+        if (dest == src) return true;
+        const xy: [2]i32 = if (occupied(dest, gi.xindex, gi.yindex))
+            ((wdock.findFreeSlot(&m.scr, dest) catch null) orelse return false)
+        else
+            .{ gi.xindex, gi.yindex };
+        return wdock.moveIconBetweenDocks(&m.scr, src, dest, gi, xy[0], xy[1]);
+    }
+
+    pub fn drawerIndex(m: *const Model, d: *const wdock.Dock) ?usize {
+        for (m.scr.drawers.items, 0..) |x, i| if (x == d) return i;
         return null;
     }
+
+    /// Remove a Drawer and the tiles in it (locked ones too: the Drawer is
+    /// going away).
+    pub fn removeDrawer(m: *Model, d: *wdock.Dock) void {
+        const di = m.drawerIndex(d) orelse return;
+        for (m.slots.items, 0..) |*s, i| {
+            if (s.alive and s.gi.dock == d) {
+                s.app.locked = false;
+                _ = m.removeSlot(i);
+            }
+        }
+        _ = m.drawer_names.orderedRemove(di);
+        wdock.removeDrawer(&m.scr, d);
+    }
+
+    // ---- placement on the output ---------------------------------------------
+
+    /// Tell the model how big the output is and where the Dock and the Clip
+    /// are on it (output-local coordinates). Moves everything; cheap.
+    pub fn layout(m: *Model, w: i32, h: i32, dock_right: bool, dock_y: i32, corner: config.ClipCorner) void {
+        m.scr.width = w;
+        m.scr.height = h;
+        m.dock_right = dock_right;
+        m.dock_y = dock_y;
+        m.clip_corner = corner;
+        const dock = m.scr.dock orelse return;
+        if (dock.on_right_side != dock_right) wdock.swap(&m.scr, dock);
+        const x: i32 = if (dock_right) w - tile else 0;
+        const y = std.math.clamp(dock_y, 0, @max(0, h - tile));
+        if (dock.x_pos != x or dock.y_pos != y) wdock.moveDock(&m.scr, dock, x, y);
+        const cx: i32 = if (clipOnLeft(corner)) 0 else w - tile;
+        const cy: i32 = switch (corner) {
+            .top_left, .top_right => 0,
+            .bottom_left, .bottom_right => h - tile,
+        };
+        for (m.scr.clips.items) |c| {
+            if (c.x_pos != cx or c.y_pos != cy) wdock.moveDock(&m.scr, c, cx, cy);
+        }
+    }
+
+    pub fn currentClip(m: *const Model) *wdock.Dock {
+        return m.clipOf(@intCast(m.scr.current_workspace));
+    }
+
+    /// The Clip follows the workspace: omnipresent tiles move along.
+    pub fn setWorkspace(m: *Model, ws: u32) void {
+        if (ws >= m.scr.clips.items.len or ws == m.scr.current_workspace) return;
+        wdock.clipUpdateForWorkspaceChange(&m.scr, ws);
+    }
+
+    // ---- saving ----------------------------------------------------------------
+
+    const SortCtx = struct {
+        order: Order,
+        fn lt(ctx: SortCtx, a: *const Slot, b: *const Slot) bool {
+            return switch (ctx.order) {
+                .y => a.gi.yindex < b.gi.yindex,
+                .x => if (a.gi.xindex != b.gi.xindex) a.gi.xindex < b.gi.xindex else a.gi.yindex < b.gi.yindex,
+                .abs_x => @abs(a.gi.xindex) < @abs(b.gi.xindex),
+            };
+        }
+    };
+
+    fn appendSorted(
+        m: *const Model,
+        a: std.mem.Allocator,
+        out: *std.ArrayList(dockapp.DockApp),
+        dock: *const wdock.Dock,
+        order: Order,
+        place: dockapp.Place,
+        ws: ?u32,
+        drawer: u32,
+        omni: ?bool,
+    ) !void {
+        var tmp: std.ArrayList(*const Slot) = .empty;
+        defer tmp.deinit(a);
+        for (m.slots.items) |*s| {
+            if (!s.alive or s.app.attached or s.gi.dock != dock) continue;
+            if (omni) |o| if (s.gi.omnipresent != o) continue;
+            try tmp.append(a, s);
+        }
+        std.mem.sort(*const Slot, tmp.items, SortCtx{ .order = order }, SortCtx.lt);
+        for (tmp.items) |s| {
+            var app = s.app;
+            app.place = place;
+            app.workspace = ws;
+            app.drawer = drawer;
+            app.x = s.gi.xindex;
+            app.y = s.gi.yindex;
+            try out.append(a, app);
+        }
+    }
+
+    /// Everything the Model holds as one list, for writing it out.
+    /// Temporary (`attached`) tiles are left out. The strings stay owned by
+    /// the Model.
+    pub fn exportList(m: *const Model, a: std.mem.Allocator) !dockapp.List {
+        var out: std.ArrayList(dockapp.DockApp) = .empty;
+        const dock = m.scr.dock.?;
+        try m.appendSorted(a, &out, dock, .y, .dock, null, 0, null);
+        for (m.scr.clips.items, 0..) |c, ws| {
+            try m.appendSorted(a, &out, c, .x, .clip, @intCast(ws), 0, false);
+        }
+        // Omnipresent tiles live in the current Clip but belong to all
+        // workspaces: `workspace = null`.
+        try m.appendSorted(a, &out, m.currentClip(), .x, .clip, null, 0, true);
+        for (m.scr.drawers.items, 0..) |d, di| {
+            try m.appendSorted(a, &out, d, .abs_x, .drawer, null, @intCast(di), null);
+        }
+
+        const drawers = try a.alloc(dockapp.DrawerInfo, m.scr.drawers.items.len);
+        for (m.scr.drawers.items, 0..) |d, i| {
+            drawers[i] = .{
+                .name = m.drawer_names.items[i],
+                .row = @divTrunc(d.y_pos - dock.y_pos, tile),
+                .collapsed = d.collapsed,
+                .auto_collapse = d.auto_collapse,
+            };
+        }
+        return .{
+            .apps = try out.toOwnedSlice(a),
+            .workspace_names = m.names,
+            .drawers = drawers,
+            .logo_y = 0,
+        };
+    }
 };
-
-fn dockLess(_: void, a: Slot, b: Slot) bool {
-    return a.app.y < b.app.y;
-}
-
-fn clipLess(_: void, a: Slot, b: Slot) bool {
-    if (a.app.x != b.app.x) return a.app.x < b.app.x;
-    return a.app.y < b.app.y;
-}
 
 fn dupeApp(a: std.mem.Allocator, app: dockapp.DockApp) !dockapp.DockApp {
     var copy = app;
@@ -580,92 +739,68 @@ fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
 }
 
 // ----------------------------------------------------------------------------
-// Geometry (all in global coordinates, like types.Output.rect)
+// Geometry (output-local grid <-> surface pixels)
 // ----------------------------------------------------------------------------
-
-/// Tiles that fit along `len` pixels (at least 1: the logo/Clip tile is
-/// always there).
-pub fn tilesThatFit(len: i32) usize {
-    return @intCast(@max(1, @divTrunc(len, tile)));
-}
-
-/// The Dock's rectangle on `out` for `ntiles` tiles.
-pub fn dockRect(out: Rect, ntiles: usize, cfg: *const config.Config) Rect {
-    return dockRectAt(out, ntiles, cfg.dock_edge, cfg.dock_offset);
-}
-
-/// Same, for a run-time position: the Dock can be dragged to another edge
-/// or offset (ui.zig keeps its own `edge`/`offset`, started from config.conf
-/// or the saved state).
-pub fn dockRectAt(out: Rect, ntiles: usize, edge: config.DockEdge, offset: i32) Rect {
-    const h: i32 = @as(i32, @intCast(ntiles)) * tile;
-    const x = switch (edge) {
-        .left => out.x,
-        .right => out.right() - tile,
-    };
-    const y = std.math.clamp(out.y + offset, out.y, @max(out.y, out.bottom() - h));
-    return .{ .x = x, .y = y, .w = tile, .h = h };
-}
-
-/// Which edge and offset a Dock dragged so that its top-left lies at global
-/// (gx, gy) belongs to: the nearer screen half wins the edge, the offset is
-/// the distance from the top of the output (clamped by `dockRectAt`).
-pub fn dockPlacementFor(out: Rect, gx: i32, gy: i32) struct { edge: config.DockEdge, offset: i32 } {
-    const centre = gx + @divTrunc(tile, 2);
-    const edge: config.DockEdge = if (centre < out.x + @divTrunc(out.w, 2)) .left else .right;
-    return .{ .edge = edge, .offset = @max(0, gy - out.y) };
-}
-
-/// The Clip's rectangle for `ntiles` tiles in a row. The tile with the
-/// workspace arrows is the outermost one (see `clipTileX`). If it would
-/// land on the Dock it moves sideways, next to it.
-pub fn clipRect(out: Rect, ntiles: usize, cfg: *const config.Config, dock: ?Rect) Rect {
-    const w: i32 = @as(i32, @intCast(ntiles)) * tile;
-    const left = clipOnLeft(cfg.clip_corner);
-    var r: Rect = .{
-        .x = if (left) out.x else out.right() - w,
-        .y = switch (cfg.clip_corner) {
-            .top_left, .top_right => out.y,
-            .bottom_left, .bottom_right => out.bottom() - tile,
-        },
-        .w = w,
-        .h = tile,
-    };
-    if (dock) |d| {
-        if (r.x < d.right() and d.x < r.right() and r.y < d.bottom() and d.y < r.bottom()) {
-            r.x = if (left) d.right() else d.x - w;
-        }
-    }
-    return r;
-}
 
 pub fn clipOnLeft(corner: config.ClipCorner) bool {
     return corner == .top_left or corner == .bottom_left;
 }
 
-/// x (inside the Clip's surface) of tile `i` of `n`; tile 0 is the one with
-/// the workspace arrows, the others follow away from the screen edge.
-pub fn clipTileX(i: usize, n: usize, on_left: bool) i32 {
-    const idx: i32 = @intCast(if (on_left) i else n - 1 - i);
-    return idx * tile;
+/// The grid rectangle one dock's surface covers. `margin` adds the cells a
+/// dragged tile can still snap to (3 rows around the Dock, 1 cell around a
+/// Clip, 1 column at the end of a Drawer); the surface has to be that big
+/// before a drag starts, because a surface replaced mid-drag loses the
+/// pointer grab. `only_main`: a collapsed Clip or Drawer shows its tile only.
+pub fn cellsOf(d: *const wdock.Dock, only_main: bool, margin: bool) Cells {
+    var c: Cells = .{};
+    if (!only_main) {
+        for (d.icons) |maybe| {
+            const i = maybe orelse continue;
+            c.minx = @min(c.minx, i.xindex);
+            c.maxx = @max(c.maxx, i.xindex);
+            c.miny = @min(c.miny, i.yindex);
+            c.maxy = @max(c.maxy, i.yindex);
+        }
+    }
+    if (margin and !only_main) {
+        const mx: i32, const my: i32 = switch (d.kind) {
+            .dock => .{ 0, 3 },
+            .clip => .{ 1, 1 },
+            .drawer => .{ 1, 0 },
+        };
+        c.minx -= mx;
+        c.maxx += mx;
+        c.miny -= my;
+        c.maxy += my;
+    }
+    return c;
 }
 
-/// The Dock tile at surface-local y, if any.
-pub fn dockTileAt(y: i32, ntiles: usize) ?usize {
-    if (y < 0) return null;
-    const t: usize = @intCast(@divTrunc(y, tile));
-    return if (t < ntiles) t else null;
+/// The grid cell under surface-local pixel (x, y).
+pub fn cellAt(c: Cells, x: i32, y: i32) [2]i32 {
+    return .{ c.minx + @divFloor(x, tile), c.miny + @divFloor(y, tile) };
 }
 
-/// Tile position (1 .. ntiles-1; 0 is the workspace tile and never taken)
-/// the pointer at surface-local `x` is over while a Clip tile is dragged.
-/// Clamped, so dragging past either end drops there. With no application
-/// tile at all there is nothing to drop on: 1 is returned anyway.
-pub fn clipDropTile(x: i32, ntiles: usize, on_left: bool) usize {
-    if (ntiles <= 1) return 1;
-    const raw: usize = if (x < 0) 0 else @min(@as(usize, @intCast(@divTrunc(x, tile))), ntiles - 1);
-    const t = if (on_left) raw else ntiles - 1 - raw;
-    return @max(t, 1);
+/// The icon of `d` in grid cell `xy`.
+pub fn iconAt(d: *const wdock.Dock, xy: [2]i32) ?*wdock.Icon {
+    for (d.icons) |maybe| {
+        if (maybe) |i| if (i.xindex == xy[0] and i.yindex == xy[1]) return i;
+    }
+    return null;
+}
+
+/// Surface-local pixel position of grid cell (x, y).
+pub fn cellPx(c: Cells, x: i32, y: i32) [2]i32 {
+    return .{ (x - c.minx) * tile, (y - c.miny) * tile };
+}
+
+/// Which edge and offset a Dock dragged so that its first tile lies at
+/// output-local (gx, gy) belongs to: the nearer screen half wins the edge,
+/// the offset is the distance from the top of the output.
+pub fn dockPlacementFor(out: Rect, gx: i32, gy: i32) struct { edge: config.DockEdge, offset: i32 } {
+    const centre = gx + @divTrunc(tile, 2);
+    const edge: config.DockEdge = if (centre < out.x + @divTrunc(out.w, 2)) .left else .right;
+    return .{ .edge = edge, .offset = @max(0, gy - out.y) };
 }
 
 /// The corner of `out` that global point (gx, gy) is nearest to: where a
@@ -676,45 +811,9 @@ pub fn clipCornerFor(out: Rect, gx: i32, gy: i32) config.ClipCorner {
     return if (top) (if (left) .top_left else .top_right) else (if (left) .bottom_left else .bottom_right);
 }
 
-/// The Clip tile at surface-local x, if any (0 = the workspace tile).
-pub fn clipTileAt(x: i32, ntiles: usize, on_left: bool) ?usize {
-    if (x < 0) return null;
-    const idx: usize = @intCast(@divTrunc(x, tile));
-    if (idx >= ntiles) return null;
-    return if (on_left) idx else ntiles - 1 - idx;
-}
-
-/// Where a window goes when it is hosted by the Dock, in global
-/// coordinates, or null if it cannot be. `dock` is the Dock's rectangle and
-/// `ntiles` the tiles actually drawn. Only a window that declared itself a
-/// DockApp (app_id `dockapp:<name>`, see `Model.dockSlotFor`) with a FIXED
-/// size of at most one tile qualifies: anything resizable (a terminal
-/// started with `--class dockapp:htop`) would be stretched to the
-/// compositor's minimum window size and sprawl over its neighbours, so it
-/// stays an ordinary floating window and its tile just launches/focuses it.
-/// The window is centred in its tile.
-pub fn dockedRect(
-    m: *const Model,
-    dock: Rect,
-    ntiles: usize,
-    app_id: []const u8,
-    min_w: i32,
-    min_h: i32,
-    max_w: i32,
-    max_h: i32,
-) ?Rect {
-    if (max_w <= 0 or max_h <= 0 or min_w != max_w or min_h != max_h) return null;
-    if (max_w > tile or max_h > tile) return null;
-    const slot = m.dockSlotFor(app_id) orelse return null;
-    const t: usize = if (slot < m.above_logo) slot else slot + 1;
-    if (t >= ntiles) return null;
-    return .{
-        .x = dock.x + @divTrunc(tile - max_w, 2),
-        .y = dock.y + @as(i32, @intCast(t)) * tile + @divTrunc(tile - max_h, 2),
-        .w = max_w,
-        .h = max_h,
-    };
-}
+// ----------------------------------------------------------------------------
+// Drawing
+// ----------------------------------------------------------------------------
 
 pub const Arrow = enum { none, prev, next };
 
@@ -726,10 +825,6 @@ pub fn clipArrowAt(x: i32, y: i32) Arrow {
     if (x < arrow and y >= tile - arrow) return .prev;
     return .none;
 }
-
-// ----------------------------------------------------------------------------
-// Drawing
-// ----------------------------------------------------------------------------
 
 fn drawFrame(cv: *gfx.Canvas, x: i32, y: i32, hot: bool, from: ?gfx.Color, to: ?gfx.Color) void {
     const f = from orelse if (hot) col_hot_from else col_tile_from;
@@ -778,7 +873,7 @@ fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, fon
 
 /// One application tile at (x, y). A tile whose docked window is on top of
 /// it is still drawn: the window simply covers it.
-fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool, in_clip: bool) void {
+fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool) void {
     drawFrame(cv, x, y, hot, null, null);
     const off = @divTrunc(tile - icon_size, 2);
     if (slot.icon) |icon| {
@@ -800,73 +895,8 @@ fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool, in
     // Only an entry that can be started says "not running" (a hand-made
     // entry without a command has nothing to show).
     if (!slot.running and slot.app.command.len > 0) drawNotRunning(cv, x, y);
-    if (in_clip and slot.app.workspace == null) drawOmnipresent(cv, x, y);
+    if (slot.gi.omnipresent) drawOmnipresent(cv, x, y);
     if (slot.launching) drawLaunching(cv, x, y);
-}
-
-/// A tile being dragged out of the Dock (or the Clip), for drawing.
-pub const DragView = struct {
-    /// Tile position the drag started on (Dock) / Clip tile index.
-    from: usize,
-    /// Position the tile would be dropped at (see `reorderIndex`).
-    to: usize,
-    /// Pointer, surface-local; the dragged tile is drawn under it.
-    x: i32,
-    y: i32,
-    /// Taken far from the bar: letting go removes it. The tile stays where
-    /// it was, drawn faded.
-    detached: bool = false,
-};
-
-/// The whole Dock surface (tile * ntiles high). `hover` is a tile index.
-pub fn drawDock(cv: *gfx.Canvas, m: *const Model, ntiles: usize, hover: ?usize) void {
-    drawDockDrag(cv, m, ntiles, hover, null);
-}
-
-/// Same, with a tile being dragged. The other tiles show the order the drop
-/// would give (the gap travels with the pointer, like Window Maker's slots);
-/// the dragged tile floats under the pointer.
-pub fn drawDockDrag(cv: *gfx.Canvas, m: *const Model, ntiles: usize, hover: ?usize, drag: ?DragView) void {
-    cv.clear(col_clear);
-    var t: usize = 0;
-    while (t < ntiles) : (t += 1) {
-        const y: i32 = @as(i32, @intCast(t)) * tile;
-        const hot = hover != null and hover.? == t;
-        var src = t;
-        if (drag) |d| if (!d.detached) {
-            // The dragged tile's own slot stays empty while it floats.
-            if (t == d.to) {
-                drawSlotGap(cv, 0, y);
-                continue;
-            }
-            src = reorderIndex(d.from, d.to, t);
-        };
-        drawDockTile(cv, m, src, y, hot and drag == null);
-    }
-    if (drag) |d| {
-        const grabbed = m.dockTile(d.from) orelse return;
-        if (d.detached) {
-            // Faded in place: this is what would disappear.
-            const y: i32 = @as(i32, @intCast(d.from)) * tile;
-            drawFade(cv, 0, y);
-        } else {
-            const fy = std.math.clamp(d.y - @divTrunc(tile, 2), 0, @as(i32, @intCast(ntiles)) * tile - tile);
-            switch (grabbed) {
-                .logo => drawDockTile(cv, m, d.from, fy, true),
-                .app => |i| drawAppTile(cv, 0, fy, &m.dock[i], true, false),
-            }
-        }
-    }
-}
-
-fn drawDockTile(cv: *gfx.Canvas, m: *const Model, t: usize, y: i32, hot: bool) void {
-    switch (m.dockTile(t) orelse return) {
-        .logo => {
-            drawFrame(cv, 0, y, hot, col_logo_from, col_logo_to);
-            drawCentered(cv, "WM", 0, y + 16, tile, font_logo, col_light);
-        },
-        .app => |i| drawAppTile(cv, 0, y, &m.dock[i], hot, false),
-    }
 }
 
 /// The empty slot a dragged tile will drop into: a recessed tile.
@@ -880,89 +910,6 @@ fn drawFade(cv: *gfx.Canvas, x: i32, y: i32) void {
     cv.fillRect(x, y, tile, tile, col_fade);
 }
 
-/// What the Clip shows besides its tiles.
-pub const ClipView = struct {
-    /// Workspace (0-based) and its name, if it has one.
-    workspace: u32,
-    name: ?[]const u8,
-    /// Indices into `Model.clip` of the application tiles, in order.
-    apps: []const usize,
-    on_left: bool,
-    /// Hovered tile (0 = the workspace tile) and, on it, the arrow.
-    hover: ?usize = null,
-    hover_arrow: Arrow = .none,
-    /// An application tile being dragged (`from`/`to` are tile positions,
-    /// 1 .. apps.len; 0, the workspace tile, never moves).
-    drag: ?DragView = null,
-};
-
-/// The whole Clip surface: 1 + apps.len tiles wide.
-pub fn drawClip(cv: *gfx.Canvas, m: *const Model, v: ClipView) void {
-    cv.clear(col_clear);
-    const n = v.apps.len + 1;
-
-    // The workspace tile.
-    const x0 = clipTileX(0, n, v.on_left);
-    const hot0 = v.hover != null and v.hover.? == 0;
-    drawFrame(cv, x0, 0, hot0 and v.hover_arrow == .none, null, null);
-
-    var num_buf: [12:0]u8 = undefined;
-    const num = std.fmt.bufPrintZ(&num_buf, "{d}", .{v.workspace + 1}) catch "?";
-    if (v.name) |name| {
-        drawCentered(cv, num, x0, 10, tile, font_number, col_text);
-        var name_buf: [24:0]u8 = undefined;
-        const clipped = clipName(&name_buf, name);
-        drawCentered(cv, clipped, x0, 41, tile, gfx.fonts.dockLabel(), col_text);
-    } else {
-        drawCentered(cv, num, x0, 20, tile, font_number, col_text);
-    }
-
-    // The two arrows (Window Maker: upper right = next, lower left = prev).
-    const fa: f64 = @floatFromInt(arrow);
-    const fx: f64 = @floatFromInt(x0);
-    const ft: f64 = @floatFromInt(tile);
-    const next_col = if (hot0 and v.hover_arrow == .next) col_arrow_hot else col_arrow;
-    const prev_col = if (hot0 and v.hover_arrow == .prev) col_arrow_hot else col_arrow;
-    cv.fillPolygon(&.{
-        .{ fx + ft - 3 - fa, 3 },
-        .{ fx + ft - 3, 3 },
-        .{ fx + ft - 3, 3 + fa },
-    }, next_col);
-    cv.fillPolygon(&.{
-        .{ fx + 3, ft - 3 - fa },
-        .{ fx + 3, ft - 3 },
-        .{ fx + 3 + fa, ft - 3 },
-    }, prev_col);
-
-    // The applications of this workspace.
-    var grabbed: ?usize = null; // index into v.apps
-    for (v.apps, 0..) |_, k| {
-        const i = k + 1;
-        const x = clipTileX(i, n, v.on_left);
-        const hot = v.hover != null and v.hover.? == i and v.drag == null;
-        var src = k;
-        if (v.drag) |d| if (d.from >= 1 and d.from <= v.apps.len and d.to >= 1 and d.to <= v.apps.len) {
-            grabbed = d.from - 1;
-            if (!d.detached) {
-                if (k == d.to - 1) {
-                    drawSlotGap(cv, x, 0);
-                    continue;
-                }
-                src = reorderIndex(d.from - 1, d.to - 1, k);
-            }
-        };
-        drawAppTile(cv, x, 0, &m.clip[v.apps[src]], hot, true);
-    }
-    if (v.drag) |d| if (grabbed) |g| {
-        if (d.detached) {
-            drawFade(cv, clipTileX(g + 1, n, v.on_left), 0);
-        } else {
-            const gx = std.math.clamp(d.x - @divTrunc(tile, 2), 0, @as(i32, @intCast(n)) * tile - tile);
-            drawAppTile(cv, gx, 0, &m.clip[v.apps[g]], true, true);
-        }
-    };
-}
-
 /// `name` cut so it still fits the tile; never splits a UTF-8 sequence.
 fn clipName(buf: *[24:0]u8, name: []const u8) [:0]const u8 {
     var end: usize = @min(name.len, buf.len);
@@ -973,205 +920,135 @@ fn clipName(buf: *[24:0]u8, name: []const u8) [:0]const u8 {
     return buf[0..end :0];
 }
 
+/// A tile being dragged, for drawing.
+pub const DragView = struct {
+    /// The tile in the air.
+    icon: *const wdock.Icon,
+    /// Where it would land, if that is in this bar's dock (grid cell).
+    target: ?[2]i32 = null,
+    /// It snaps nowhere: letting go removes it. The tile stays where it was,
+    /// drawn faded.
+    detached: bool = false,
+    /// Pointer, surface-local; the dragged tile is drawn under it.
+    x: i32,
+    y: i32,
+};
+
+/// What `drawBar` needs to know besides the model.
+pub const View = struct {
+    dock: *const wdock.Dock,
+    cells: Cells,
+    /// Collapsed Clip / Drawer: only its own tile.
+    only_main: bool = false,
+    hover: ?*const wdock.Icon = null,
+    hover_arrow: Arrow = .none,
+    drag: ?DragView = null,
+    /// The Clip's workspace tile shows this (0-based) number and name.
+    workspace: u32 = 0,
+    name: ?[]const u8 = null,
+    /// A drag is going on and this bar is where it would land.
+    target: ?[2]i32 = null,
+};
+
+fn drawMainTile(cv: *gfx.Canvas, v: View, x: i32, y: i32, hot: bool) void {
+    switch (v.dock.kind) {
+        .dock => {
+            drawFrame(cv, x, y, hot, col_logo_from, col_logo_to);
+            drawCentered(cv, "WM", x, y + 16, tile, font_logo, col_light);
+        },
+        .clip => {
+            const hot0 = hot and v.hover_arrow == .none;
+            drawFrame(cv, x, y, hot0, null, null);
+            var num_buf: [12:0]u8 = undefined;
+            const num = std.fmt.bufPrintZ(&num_buf, "{d}", .{v.workspace + 1}) catch "?";
+            if (v.name) |name| {
+                drawCentered(cv, num, x, y + 10, tile, font_number, col_text);
+                var name_buf: [24:0]u8 = undefined;
+                const clipped = clipName(&name_buf, name);
+                drawCentered(cv, clipped, x, y + 41, tile, gfx.fonts.dockLabel(), col_text);
+            } else {
+                drawCentered(cv, num, x, y + 20, tile, font_number, col_text);
+            }
+            // The two arrows (Window Maker: upper right = next, lower left = prev).
+            const fa: f64 = @floatFromInt(arrow);
+            const fx: f64 = @floatFromInt(x);
+            const fy: f64 = @floatFromInt(y);
+            const ft: f64 = @floatFromInt(tile);
+            const next_col = if (hot and v.hover_arrow == .next) col_arrow_hot else col_arrow;
+            const prev_col = if (hot and v.hover_arrow == .prev) col_arrow_hot else col_arrow;
+            cv.fillPolygon(&.{
+                .{ fx + ft - 3 - fa, fy + 3 },
+                .{ fx + ft - 3, fy + 3 },
+                .{ fx + ft - 3, fy + 3 + fa },
+            }, next_col);
+            cv.fillPolygon(&.{
+                .{ fx + 3, fy + ft - 3 - fa },
+                .{ fx + 3, fy + ft - 3 },
+                .{ fx + 3 + fa, fy + ft - 3 },
+            }, prev_col);
+        },
+        .drawer => {
+            drawFrame(cv, x, y, hot, null, null);
+            // A chevron towards where the Drawer opens (away from it when it is open).
+            const left_open = v.dock.on_right_side;
+            const points_left = if (v.only_main) left_open else !left_open;
+            const cx: f64 = @floatFromInt(x + @divTrunc(tile, 2));
+            const cy: f64 = @floatFromInt(y + @divTrunc(tile, 2));
+            const s: f64 = 10;
+            if (points_left) {
+                cv.fillPolygon(&.{ .{ cx - s, cy }, .{ cx + s, cy - s }, .{ cx + s, cy + s } }, col_arrow);
+            } else {
+                cv.fillPolygon(&.{ .{ cx + s, cy }, .{ cx - s, cy - s }, .{ cx - s, cy + s } }, col_arrow);
+            }
+        },
+    }
+}
+
+/// One whole dock surface: every tile at its grid cell, the empty cells
+/// transparent. A tile being dragged leaves its cell empty and floats under
+/// the pointer; the cell it would land in is shown recessed.
+pub fn drawBar(cv: *gfx.Canvas, m: *const Model, v: View) void {
+    cv.clear(col_clear);
+    if (v.target) |t| {
+        const p = cellPx(v.cells, t[0], t[1]);
+        drawSlotGap(cv, p[0], p[1]);
+    }
+    for (v.dock.icons) |maybe| {
+        const gi = maybe orelse continue;
+        if (v.only_main and !gi.main) continue;
+        const p = cellPx(v.cells, gi.xindex, gi.yindex);
+        var lifted = false;
+        if (v.drag) |d| if (d.icon == gi) {
+            lifted = !d.detached;
+        };
+        if (lifted) continue;
+        const hot = v.hover == gi and v.drag == null;
+        if (gi.main) {
+            drawMainTile(cv, v, p[0], p[1], hot);
+        } else if (m.slotOf(gi)) |s| {
+            drawAppTile(cv, p[0], p[1], s, hot);
+        }
+        if (v.drag) |d| if (d.icon == gi and d.detached) drawFade(cv, p[0], p[1]);
+    }
+    if (v.drag) |d| if (!d.detached) {
+        const w = v.cells.cols() * tile;
+        const h = v.cells.rows() * tile;
+        const fx = std.math.clamp(d.x - @divTrunc(tile, 2), 0, @max(0, w - tile));
+        const fy = std.math.clamp(d.y - @divTrunc(tile, 2), 0, @max(0, h - tile));
+        if (m.slotOf(d.icon)) |s| {
+            drawAppTile(cv, fx, fy, s, true);
+        } else if (d.icon.main) {
+            drawMainTile(cv, v, fx, fy, true);
+        }
+    };
+}
+
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 
-fn testApp(name: []const u8, place: dockapp.Place, x: i32, y: i32, ws: ?u32) dockapp.DockApp {
-    return .{ .name = name, .command = &.{name}, .place = place, .x = x, .y = y, .workspace = ws };
-}
-
-test "Model: dock sorted by y, logo inserted at logo_y, ties go below the logo" {
-    const apps = [_]dockapp.DockApp{
-        testApp("c", .dock, 0, 2, null),
-        testApp("a", .dock, 0, -1, null),
-        testApp("b", .dock, 0, 0, null), // same y as the logo: below it
-        testApp("d", .dock, 0, 2, null), // same y as c: file order kept
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps, .logo_y = 0 }, &.{}, 4);
-    defer m.deinit();
-
-    try std.testing.expectEqual(@as(usize, 5), m.dockTiles());
-    try std.testing.expectEqual(@as(usize, 1), m.above_logo);
-    // a, LOGO, b, c, d
-    try std.testing.expectEqualStrings("a", m.dock[m.dockTile(0).?.app].app.name);
-    try std.testing.expect(m.dockTile(1).? == .logo);
-    try std.testing.expectEqualStrings("b", m.dock[m.dockTile(2).?.app].app.name);
-    try std.testing.expectEqualStrings("c", m.dock[m.dockTile(3).?.app].app.name);
-    try std.testing.expectEqualStrings("d", m.dock[m.dockTile(4).?.app].app.name);
-    try std.testing.expect(m.dockTile(5) == null);
-}
-
-test "Model: an empty list is just the logo tile" {
-    var m = try Model.init(std.testing.allocator, .{}, &.{}, 4);
-    defer m.deinit();
-    try std.testing.expectEqual(@as(usize, 1), m.dockTiles());
-    try std.testing.expect(m.dockTile(0).? == .logo);
-}
-
-test "Model: clipFor shows 'all workspaces' entries and the current workspace's" {
-    const apps = [_]dockapp.DockApp{
-        testApp("everywhere", .clip, 0, 0, null),
-        testApp("ws0", .clip, 1, 0, 0),
-        testApp("ws1", .clip, 2, 0, 1),
-        testApp("dock", .dock, 0, 0, null),
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    try std.testing.expectEqual(@as(usize, 3), m.clip.len);
-
-    var buf: [8]usize = undefined;
-    const on0 = m.clipFor(0, &buf);
-    try std.testing.expectEqual(@as(usize, 2), on0.len);
-    try std.testing.expectEqualStrings("everywhere", m.clip[on0[0]].app.name);
-    try std.testing.expectEqualStrings("ws0", m.clip[on0[1]].app.name);
-
-    const on1 = m.clipFor(1, &buf);
-    try std.testing.expectEqual(@as(usize, 2), on1.len);
-    try std.testing.expectEqualStrings("ws1", m.clip[on1[1]].app.name);
-
-    // The output buffer bounds the result.
-    var tiny: [1]usize = undefined;
-    try std.testing.expectEqual(@as(usize, 1), m.clipFor(0, &tiny).len);
-}
-
-test "Model: names, config.conf wins over WMState" {
-    const from_state: []const []const u8 = &.{ "A", "B" };
-    const from_cfg: []const []const u8 = &.{ "", "Web" };
-    {
-        var m = try Model.init(std.testing.allocator, .{ .workspace_names = from_state }, &.{}, 4);
-        defer m.deinit();
-        try std.testing.expectEqualStrings("A", m.workspaceName(0).?);
-        try std.testing.expect(m.workspaceName(2) == null);
-    }
-    {
-        var m = try Model.init(std.testing.allocator, .{ .workspace_names = from_state }, from_cfg, 4);
-        defer m.deinit();
-        try std.testing.expect(m.workspaceName(0) == null); // empty = unnamed
-        try std.testing.expectEqualStrings("Web", m.workspaceName(1).?);
-    }
-}
-
-test "Model: setRunning reports a change exactly once" {
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "term", .command = &.{"foot"} },
-        .{ .name = "web", .command = &.{"firefox"}, .place = .clip },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-
-    const open: []const []const u8 = &.{ "foot", "other" };
-    try std.testing.expect(m.setRunning(open));
-    try std.testing.expect(m.dock[0].running);
-    try std.testing.expect(!m.clip[0].running);
-    try std.testing.expect(!m.setRunning(open)); // nothing new
-    try std.testing.expect(m.setRunning(&.{})); // closed again
-    try std.testing.expect(!m.dock[0].running);
-}
-
-test "Model: only self-declared windows can be hosted by a Dock tile" {
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "clock", .command = &.{"wl-clock"} },
-        .{ .name = "term", .command = &.{"foot"} },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    try std.testing.expectEqual(@as(?usize, 0), m.dockSlotFor("dockapp:clock"));
-    // `foot` matches the entry, but a normal window is not a dockapp.
-    try std.testing.expectEqual(@as(?usize, null), m.dockSlotFor("foot"));
-    try std.testing.expectEqual(@as(?usize, null), m.dockSlotFor("dockapp:nothing"));
-}
-
-test "Model: deep copy survives the source going away" {
-    var src: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    var m: Model = undefined;
-    {
-        const a = src.allocator();
-        const argv = try a.alloc([]const u8, 1);
-        argv[0] = try a.dupe(u8, "foot");
-        const apps = try a.alloc(dockapp.DockApp, 1);
-        apps[0] = .{ .name = try a.dupe(u8, "term"), .command = argv };
-        m = try Model.init(std.testing.allocator, .{ .apps = apps }, &.{}, 2);
-    }
-    src.deinit();
-    defer m.deinit();
-    try std.testing.expectEqualStrings("term", m.dock[0].app.name);
-    try std.testing.expectEqualStrings("foot", m.dock[0].app.command[0]);
-}
-
-test "dockRect: edge, offset and clamping" {
-    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    const out: Rect = .{ .x = 100, .y = 0, .w = 1920, .h = 1080 };
-
-    var r = dockRect(out, 3, &cfg);
-    try std.testing.expectEqual(Rect{ .x = 100 + 1920 - 64, .y = 0, .w = 64, .h = 192 }, r);
-
-    cfg.dock_edge = .left;
-    cfg.dock_offset = 200;
-    r = dockRect(out, 3, &cfg);
-    try std.testing.expectEqual(Rect{ .x = 100, .y = 200, .w = 64, .h = 192 }, r);
-
-    // An offset that would push the column off the bottom is pulled back.
-    cfg.dock_offset = 5000;
-    r = dockRect(out, 3, &cfg);
-    try std.testing.expectEqual(@as(i32, 1080 - 192), r.y);
-}
-
-test "clipRect: corners, and stepping aside for the Dock" {
-    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    const out: Rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
-
-    cfg.clip_corner = .top_left;
-    try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 192, .h = 64 }, clipRect(out, 3, &cfg, null));
-    cfg.clip_corner = .bottom_right;
-    try std.testing.expectEqual(Rect{ .x = 1000 - 192, .y = 800 - 64, .w = 192, .h = 64 }, clipRect(out, 3, &cfg, null));
-
-    // Dock on the right, Clip in the top right corner: the Clip moves left.
-    cfg.dock_edge = .right;
-    cfg.clip_corner = .top_right;
-    const dock = dockRect(out, 4, &cfg);
-    const r = clipRect(out, 2, &cfg, dock);
-    try std.testing.expectEqual(dock.x - 128, r.x);
-    // Same on the left.
-    cfg.dock_edge = .left;
-    cfg.clip_corner = .top_left;
-    const dock_l = dockRect(out, 4, &cfg);
-    try std.testing.expectEqual(dock_l.right(), clipRect(out, 2, &cfg, dock_l).x);
-    // No overlap, no move: Dock below the Clip.
-    cfg.dock_offset = 200;
-    const low = dockRect(out, 4, &cfg);
-    try std.testing.expectEqual(@as(i32, 0), clipRect(out, 2, &cfg, low).x);
-}
-
-test "tile hit tests: Dock rows, Clip columns on both sides, arrows" {
-    try std.testing.expectEqual(@as(?usize, 0), dockTileAt(0, 3));
-    try std.testing.expectEqual(@as(?usize, 2), dockTileAt(191, 3));
-    try std.testing.expectEqual(@as(?usize, null), dockTileAt(192, 3));
-    try std.testing.expectEqual(@as(?usize, null), dockTileAt(-1, 3));
-
-    // Anchored left: tile 0 is leftmost. Anchored right: it is rightmost.
-    try std.testing.expectEqual(@as(?usize, 0), clipTileAt(10, 3, true));
-    try std.testing.expectEqual(@as(?usize, 2), clipTileAt(150, 3, true));
-    try std.testing.expectEqual(@as(?usize, 0), clipTileAt(150, 3, false));
-    try std.testing.expectEqual(@as(?usize, 2), clipTileAt(10, 3, false));
-    try std.testing.expectEqual(@as(?usize, null), clipTileAt(192, 3, true));
-    try std.testing.expectEqual(@as(i32, 128), clipTileX(0, 3, false));
-    try std.testing.expectEqual(@as(i32, 128), clipTileX(2, 3, true));
-
-    try std.testing.expectEqual(Arrow.next, clipArrowAt(60, 3));
-    try std.testing.expectEqual(Arrow.prev, clipArrowAt(3, 60));
-    try std.testing.expectEqual(Arrow.none, clipArrowAt(32, 32));
-    try std.testing.expectEqual(Arrow.none, clipArrowAt(3, 3)); // upper left: neither
-    try std.testing.expectEqual(Arrow.none, clipArrowAt(60, 60));
-    try std.testing.expectEqual(Arrow.none, clipArrowAt(64, 3)); // next tile
-}
-
-test "tilesThatFit never returns 0" {
-    try std.testing.expectEqual(@as(usize, 1), tilesThatFit(10));
-    try std.testing.expectEqual(@as(usize, 1), tilesThatFit(-5));
-    try std.testing.expectEqual(@as(usize, 16), tilesThatFit(1080));
+fn mk(name: []const u8, place: dockapp.Place, x: i32, y: i32) dockapp.DockApp {
+    return .{ .name = name, .command = &.{name}, .place = place, .x = x, .y = y };
 }
 
 fn px(data: []const u8, stride: i32, x: i32, y: i32) u32 {
@@ -1179,10 +1056,238 @@ fn px(data: []const u8, stride: i32, x: i32, y: i32) u32 {
     return std.mem.readInt(u32, data[off..][0..4], .little);
 }
 
-test "drawDock paints tiles; only a NOT running tile gets Window Maker's three dots" {
+fn rowOf(m: *const Model, name: []const u8) ?i32 {
+    for (m.slots.items) |s| {
+        if (s.alive and std.mem.eql(u8, s.app.name, name)) return s.gi.yindex;
+    }
+    return null;
+}
+
+test "Model: Dock tiles keep their grid rows, gaps stay, clashes find a free row" {
     const apps = [_]dockapp.DockApp{
-        .{ .name = "term", .command = &.{"definitely-no-such-icon-xyz"} },
-        .{ .name = "web", .command = &.{"definitely-no-such-icon-abc"} },
+        mk("a", .dock, 0, 1),
+        mk("b", .dock, 0, 4), // a gap of two rows: stays
+        mk("c", .dock, 0, -2), // above the logo
+        mk("d", .dock, 0, 1), // clashes with a
+        mk("e", .dock, 0, 0), // the logo's row
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(?i32, 1), rowOf(&m, "a"));
+    try std.testing.expectEqual(@as(?i32, 4), rowOf(&m, "b"));
+    try std.testing.expectEqual(@as(?i32, -2), rowOf(&m, "c"));
+    // d and e went to the first free rows. The Dock sits at the top of the
+    // screen, so nothing above the logo fits: 2, then 3.
+    try std.testing.expectEqual(@as(?i32, 2), rowOf(&m, "d"));
+    try std.testing.expectEqual(@as(?i32, 3), rowOf(&m, "e"));
+}
+
+test "Model: an empty list is just the logo; names: config.conf wins" {
+    var m = try Model.init(std.testing.allocator, .{ .workspace_names = &.{ "one", "two" } }, &.{"cfg"}, 2);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(usize, 1), m.scr.dock.?.icon_count);
+    try std.testing.expectEqualStrings("cfg", m.workspaceName(0).?);
+    try std.testing.expect(m.workspaceName(1) == null);
+}
+
+test "Model: Clip tiles belong to their workspace, omnipresent ones follow it" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "w0", .command = &.{"w0"}, .place = .clip, .workspace = 0, .x = 1 },
+        .{ .name = "w1", .command = &.{"w1"}, .place = .clip, .workspace = 1, .x = 1 },
+        .{ .name = "all", .command = &.{"all"}, .place = .clip, .workspace = null, .x = 2 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 3);
+    defer m.deinit();
+
+    const c0 = m.scr.clips.items[0];
+    try std.testing.expect(iconAt(c0, .{ 1, 0 }) != null);
+    try std.testing.expectEqual(@as(usize, 1), m.scr.globalIconCount());
+
+    m.setWorkspace(1);
+    const c1 = m.scr.clips.items[1];
+    var found = false;
+    for (c1.icons) |maybe| if (maybe) |i| {
+        if (i.omnipresent) found = true;
+    };
+    try std.testing.expect(found);
+    try std.testing.expectEqual(m.currentClip(), c1);
+}
+
+test "Model: exportList writes positions, workspaces, omnipresent and drawers back" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawers = [_]dockapp.DrawerInfo{.{ .name = "tools", .row = 2 }};
+    const apps = [_]dockapp.DockApp{
+        mk("a", .dock, 0, 1),
+        mk("b", .dock, 0, -1),
+        .{ .name = "c", .command = &.{"c"}, .place = .clip, .workspace = 1, .x = 1 },
+        .{ .name = "g", .command = &.{"g"}, .place = .clip, .workspace = null, .x = 2 },
+        .{ .name = "t1", .command = &.{"t1"}, .place = .drawer, .drawer = 0 },
+        .{ .name = "t2", .command = &.{"t2"}, .place = .drawer, .drawer = 0 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps, .drawers = &drawers }, &.{}, 2);
+    defer m.deinit();
+
+    const list = try m.exportList(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), list.drawers.len);
+    try std.testing.expectEqualStrings("tools", list.drawers[0].name);
+    try std.testing.expectEqual(@as(i32, 2), list.drawers[0].row);
+
+    var seen: usize = 0;
+    for (list.apps) |x| {
+        seen += 1;
+        if (std.mem.eql(u8, x.name, "b")) try std.testing.expectEqual(@as(i32, -1), x.y);
+        if (std.mem.eql(u8, x.name, "c")) try std.testing.expectEqual(@as(?u32, 1), x.workspace);
+        if (std.mem.eql(u8, x.name, "g")) {
+            try std.testing.expectEqual(@as(?u32, null), x.workspace);
+            try std.testing.expect(x.place == .clip);
+        }
+        if (std.mem.eql(u8, x.name, "t2")) {
+            try std.testing.expect(x.place == .drawer);
+            try std.testing.expectEqual(@as(i32, -2), x.x); // right-side Dock: grows left
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 6), seen);
+
+    // ... and what was written reads back the same.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    _ = try dockapp.render(&aw.writer, list, .{});
+    const back = try dockapp.parseWMStateAll(arena.allocator(), aw.written());
+    try std.testing.expectEqual(list.apps.len, back.apps.len);
+    try std.testing.expectEqual(@as(usize, 1), back.drawers.len);
+}
+
+test "Model: layout puts the Dock, the Clip and the Drawers on the output" {
+    const drawers = [_]dockapp.DrawerInfo{.{ .row = 2 }};
+    var m = try Model.init(std.testing.allocator, .{ .drawers = &drawers }, &.{}, 2);
+    defer m.deinit();
+    m.layout(1000, 800, true, 100, .bottom_right);
+    try std.testing.expectEqual(@as(i32, 936), m.scr.dock.?.x_pos);
+    try std.testing.expectEqual(@as(i32, 100), m.scr.dock.?.y_pos);
+    try std.testing.expectEqual(@as(i32, 100 + 2 * tile), m.scr.drawers.items[0].y_pos);
+    try std.testing.expectEqual(@as(i32, 936), m.scr.clips.items[0].x_pos);
+    try std.testing.expectEqual(@as(i32, 736), m.scr.clips.items[1].y_pos);
+
+    // Dock to the left: everything mirrors.
+    m.layout(1000, 800, false, 0, .top_left);
+    try std.testing.expectEqual(@as(i32, 0), m.scr.dock.?.x_pos);
+    try std.testing.expect(!m.scr.drawers.items[0].on_right_side);
+}
+
+test "Model: temporary DockApp tiles are attached, pruned with the program, kept on request" {
+    var m = try Model.init(std.testing.allocator, .{}, &.{}, 1);
+    defer m.deinit();
+    const i = try m.attach("clock");
+    try std.testing.expectEqual(@as(?usize, i), m.dockSlotFor("dockapp:clock"));
+    _ = m.setRunning(&.{"dockapp:clock"});
+    try std.testing.expect(!m.pruneAttached());
+    {
+        const arena_list = try m.exportList(std.testing.allocator);
+        defer std.testing.allocator.free(arena_list.apps);
+        defer std.testing.allocator.free(arena_list.drawers);
+        try std.testing.expectEqual(@as(usize, 0), arena_list.apps.len);
+    }
+    _ = m.setRunning(&.{});
+    try std.testing.expect(m.pruneAttached());
+    try std.testing.expect(m.slot(i) == null);
+
+    const j = try m.attach("clock");
+    try std.testing.expect(m.keepAttached(j));
+    _ = m.setRunning(&.{});
+    try std.testing.expect(!m.pruneAttached());
+    try std.testing.expect(m.slot(j) != null);
+}
+
+test "Model.removeSlot: a locked tile stays, a Drawer closes its gap" {
+    const drawers = [_]dockapp.DrawerInfo{.{ .row = 1 }};
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "x", .command = &.{"x"}, .y = 1, .locked = true },
+        .{ .name = "t1", .command = &.{"t1"}, .place = .drawer },
+        .{ .name = "t2", .command = &.{"t2"}, .place = .drawer },
+        .{ .name = "t3", .command = &.{"t3"}, .place = .drawer },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps, .drawers = &drawers }, &.{}, 1);
+    defer m.deinit();
+    try std.testing.expect(!m.removeSlot(0));
+    try std.testing.expect(m.removeSlot(2)); // t2: the middle one
+    try std.testing.expectEqual(@as(i32, -2), m.slots.items[3].gi.xindex);
+    try std.testing.expect(m.slot(2) == null);
+}
+
+test "Model.dropSlot: between docks, the tile changes place" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "a", .command = &.{"a"}, .y = 1 },
+        .{ .name = "c", .command = &.{"c"}, .place = .clip, .workspace = 0, .x = 1 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    const clip = m.scr.clips.items[0];
+    try std.testing.expect(m.dropSlot(0, clip, .{ 0, 1 }));
+    try std.testing.expect(m.slots.items[0].app.place == .clip);
+    try std.testing.expect(m.slots.items[0].gi.dock.? == clip);
+    try std.testing.expect(m.dropSlot(0, m.scr.dock.?, .{ 0, 3 }));
+    try std.testing.expect(m.slots.items[0].app.place == .dock);
+    try std.testing.expectEqual(@as(i32, 3), m.slots.items[0].gi.yindex);
+}
+
+test "addDrawer picks a free row; removeDrawer takes its tiles along" {
+    var m = try Model.init(std.testing.allocator, .{ .apps = &.{mk("a", .dock, 0, 1)} }, &.{}, 1);
+    defer m.deinit();
+    m.layout(1000, 800, true, 200, .top_left);
+    const d = (try m.addDrawer("Drawer")).?;
+    try std.testing.expectEqual(@as(i32, 200 - tile), d.y_pos); // row 1 is taken: the row above
+    _ = try m.addApp(.{ .name = "z", .command = &.{"z"}, .place = .drawer, .drawer = 0 });
+    try std.testing.expectEqual(@as(usize, 1), d.icon_count - 1);
+    m.removeDrawer(d);
+    try std.testing.expectEqual(@as(usize, 0), m.scr.drawers.items.len);
+    try std.testing.expect(m.slot(1) == null);
+}
+
+test "setRunning reports a change exactly once; launching is set, cleared by a window and times out" {
+    var m = try Model.init(std.testing.allocator, .{ .apps = &.{mk("term", .dock, 0, 1)} }, &.{}, 1);
+    defer m.deinit();
+    try std.testing.expect(m.setRunning(&.{"term"}));
+    try std.testing.expect(!m.setRunning(&.{"term"}));
+    try std.testing.expect(m.setRunning(&.{}));
+    m.markLaunching(0, 100);
+    try std.testing.expect(m.slots.items[0].launching);
+    try std.testing.expect(!m.expireLaunching(105, 10));
+    try std.testing.expect(m.expireLaunching(120, 10));
+    m.markLaunching(0, 200);
+    try std.testing.expect(m.setRunning(&.{"term"}));
+    try std.testing.expect(!m.slots.items[0].launching);
+}
+
+test "cellsOf and cellAt: the surface of a Dock, with and without the margin" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "clock", .command = &.{"wl-clock"}, .y = 1 },
+        .{ .name = "tokyo", .command = &.{"wl-clock"}, .y = 3 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    m.layout(1920, 1080, true, 0, .top_left);
+    const dock = m.scr.dock.?;
+
+    const c = cellsOf(dock, false, false);
+    try std.testing.expectEqual(@as(i32, 0), c.miny);
+    try std.testing.expectEqual(@as(i32, 3), c.maxy);
+    const cm = cellsOf(dock, false, true);
+    try std.testing.expectEqual(@as(i32, -3), cm.miny);
+    try std.testing.expectEqual(@as(i32, 6), cm.maxy);
+    try std.testing.expectEqual([2]i32{ 0, -3 }, cellAt(cm, 5, 5));
+    // The grid icon of a tile knows its pixel position: where a DockApp goes.
+    const gi = m.slots.items[m.dockSlotFor("dockapp:tokyo").?].gi;
+    try std.testing.expectEqual(@as(i32, 1856), gi.x_pos);
+    try std.testing.expectEqual(@as(i32, 3 * tile), gi.y_pos);
+    // A collapsed Clip shows its tile only.
+    const cc = cellsOf(m.currentClip(), true, true);
+    try std.testing.expectEqual(@as(i32, 1), cc.cols());
+}
+test "drawBar paints tiles; only a NOT running tile gets Window Maker's three dots" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "term", .command = &.{"definitely-no-such-icon-xyz"}, .y = 1 },
+        .{ .name = "web", .command = &.{"definitely-no-such-icon-abc"}, .y = 2 },
     };
     var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
     defer m.deinit();
@@ -1196,53 +1301,45 @@ test "drawDock paints tiles; only a NOT running tile gets Window Maker's three d
     var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
     defer cv.deinit();
 
-    drawDock(&cv, &m, 3, 0);
+    drawBar(&cv, &m, .{ .dock = m.scr.dock.?, .cells = cellsOf(m.scr.dock.?, false, false) });
     cv.flush();
 
-    // Tile 0 is the logo (dark), tile 1 the running app, tile 2 the other.
     const logo = px(data, w * 4, 32, 4);
-    const app = px(data, w * 4, 32, tile + 4);
+    const running = px(data, w * 4, 32, tile + 4);
     try std.testing.expectEqual(@as(u32, 0xff), logo >> 24);
-    try std.testing.expectEqual(@as(u32, 0xff), app >> 24);
     try std.testing.expect((logo & 0xff) < 0x80); // dark
-    try std.testing.expect((app & 0xff) > 0x80); // light
-    // Dots at x = 4, 9, 14 and y = tile - 6 of the tile that is NOT running.
+    try std.testing.expect((running & 0xff) > 0x80); // light
     for ([_]i32{ 4, 9, 14 }) |dx| {
         try std.testing.expectEqual(@as(u32, 0xffffffff), px(data, w * 4, dx + 1, 2 * tile + tile - 6));
-        // ... and none on the running one.
         try std.testing.expect(px(data, w * 4, dx + 1, tile + tile - 6) != 0xffffffff);
     }
 }
 
-test "drawClip paints both arrows and the application tiles" {
-    const apps = [_]dockapp.DockApp{.{ .name = "notes", .command = &.{"definitely-no-such-icon-xyz"}, .place = .clip }};
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+test "drawBar: an empty row stays transparent, a lifted tile leaves a hole" {
+    const apps = [_]dockapp.DockApp{.{ .name = "a", .command = &.{"definitely-no-such-icon-q"}, .y = 2 }};
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
     defer m.deinit();
-
-    const w = tile * 2;
-    const h = tile;
+    const dock = m.scr.dock.?;
+    const cells = cellsOf(dock, false, false);
+    const w = tile;
+    const h = tile * cells.rows();
     const data = try std.testing.allocator.alloc(u8, @intCast(w * h * 4));
     defer std.testing.allocator.free(data);
-    @memset(data, 0);
+    @memset(data, 0xff);
     var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
     defer cv.deinit();
 
-    const idx = [_]usize{0};
-    drawClip(&cv, &m, .{ .workspace = 1, .name = "Web", .apps = &idx, .on_left = true });
+    drawBar(&cv, &m, .{ .dock = dock, .cells = cells });
     cv.flush();
+    // Row 1 is empty: fully transparent.
+    try std.testing.expectEqual(@as(u32, 0), px(data, w * 4, 32, tile + 32) >> 24);
+    // Row 2 holds the tile.
+    try std.testing.expectEqual(@as(u32, 0xff), px(data, w * 4, 32, 2 * tile + 4) >> 24);
 
-    // Upper-right arrow of the workspace tile (dark), lower-left arrow (dark).
-    try std.testing.expectEqual(@as(u32, 0xff303030), px(data, w * 4, tile - 4, 5));
-    try std.testing.expectEqual(@as(u32, 0xff303030), px(data, w * 4, 5, tile - 4));
-    // The second tile is an opaque application tile.
-    try std.testing.expectEqual(@as(u32, 0xff), px(data, w * 4, tile + 32, 4) >> 24);
-
-    // Hovering an arrow lights it up.
-    drawClip(&cv, &m, .{ .workspace = 1, .name = null, .apps = &idx, .on_left = true, .hover = 0, .hover_arrow = .next });
+    // Lift it: the cell is empty (no drag target given) and the pointer's copy floats.
+    drawBar(&cv, &m, .{ .dock = dock, .cells = cells, .drag = .{ .icon = m.slots.items[0].gi, .x = 32, .y = 32 } });
     cv.flush();
-    try std.testing.expectEqual(@as(u32, 0xffffffff), px(data, w * 4, tile - 4, 5));
-    // The other arrow stays dark.
-    try std.testing.expectEqual(@as(u32, 0xff303030), px(data, w * 4, 5, tile - 4));
+    try std.testing.expectEqual(@as(u32, 0), px(data, w * 4, 32, 2 * tile + 60) >> 24);
 }
 
 test "clipName cuts on a character boundary and drops NULs" {
@@ -1253,32 +1350,6 @@ test "clipName cuts on a character boundary and drops NULs" {
     const cut = clipName(&buf, long);
     try std.testing.expect(cut.len <= 24);
     try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
-}
-
-test "dockedRect: a fixed-size dockapp lands centred in its tile" {
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "above", .command = &.{"x"}, .y = -1 },
-        .{ .name = "clock", .command = &.{"wl-clock"}, .y = 1 },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    // Tiles: above, LOGO, clock.
-    const dock: Rect = .{ .x = 1856, .y = 100, .w = 64, .h = 192 };
-
-    const full = dockedRect(&m, dock, 3, "dockapp:clock", 64, 64, 64, 64).?;
-    try std.testing.expectEqual(Rect{ .x = 1856, .y = 100 + 128, .w = 64, .h = 64 }, full);
-    const small = dockedRect(&m, dock, 3, "dockapp:clock", 48, 40, 48, 40).?;
-    try std.testing.expectEqual(Rect{ .x = 1856 + 8, .y = 100 + 128 + 12, .w = 48, .h = 40 }, small);
-    // The entry above the logo is tile 0.
-    try std.testing.expectEqual(@as(i32, 100), dockedRect(&m, dock, 3, "dockapp:above", 64, 64, 64, 64).?.y);
-
-    // Not fixed, too big, not a dockapp, no such entry, tile cut off.
-    try std.testing.expect(dockedRect(&m, dock, 3, "dockapp:clock", 0, 0, 64, 64) == null);
-    try std.testing.expect(dockedRect(&m, dock, 3, "dockapp:clock", 0, 0, 0, 0) == null);
-    try std.testing.expect(dockedRect(&m, dock, 3, "dockapp:clock", 65, 64, 65, 64) == null);
-    try std.testing.expect(dockedRect(&m, dock, 3, "wl-clock", 64, 64, 64, 64) == null);
-    try std.testing.expect(dockedRect(&m, dock, 3, "dockapp:none", 64, 64, 64, 64) == null);
-    try std.testing.expect(dockedRect(&m, dock, 2, "dockapp:clock", 64, 64, 64, 64) == null);
 }
 
 test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
@@ -1299,33 +1370,6 @@ test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
     // Nonsense can never produce an empty rectangle.
     o.reserved = .{ .left = 5000 };
     try std.testing.expect(o.workArea().w >= 1);
-}
-
-test "wl-clock: --name picks the Dock tile, several clocks do not mix" {
-    // Entry names are what `dockapp:<name>` is matched against; the command
-    // line (here wl-clock's own --name/--tz/--label) plays no part.
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "clock", .command = try config.parseCommand(a, "wl-clock"), .y = 1 },
-        .{ .name = "tokyo", .command = try config.parseCommand(a, "wl-clock --name tokyo --tz Asia/Tokyo --label tokyo"), .y = 2 },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-
-    try std.testing.expectEqual(@as(?usize, 0), m.dockSlotFor("dockapp:clock"));
-    try std.testing.expectEqual(@as(?usize, 1), m.dockSlotFor("dockapp:tokyo"));
-
-    // Tiles: LOGO, clock, tokyo. The tokyo window lands in tile 2.
-    const dock: Rect = .{ .x = 1856, .y = 0, .w = 64, .h = 192 };
-    const r = dockedRect(&m, dock, 3, "dockapp:tokyo", 64, 64, 64, 64).?;
-    try std.testing.expectEqual(@as(i32, 128), r.y);
-
-    // Both are "running" only when their own window exists.
-    _ = m.setRunning(&.{"dockapp:tokyo"});
-    try std.testing.expect(!m.dock[0].running);
-    try std.testing.expect(m.dock[1].running);
 }
 
 test "an .xpm icon file is loaded for a Dock tile and painted" {
@@ -1362,276 +1406,7 @@ test "an .xpm icon file is loaded for a Dock tile and painted" {
     };
     var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
     defer m.deinit();
-    try std.testing.expect(m.dock[0].icon != null);
-    try std.testing.expectEqual(@as(i32, 2), m.dock[0].icon.?.w);
-    try std.testing.expect(m.dock[1].icon == null);
-}
-
-// ----------------------------------------------------------------------------
-// Tests: dragging, removing, adding, launching
-// ----------------------------------------------------------------------------
-
-fn tileNames(m: *const Model, out: *[8][]const u8) []const []const u8 {
-    var n: usize = 0;
-    for (0..m.dockTiles()) |t| {
-        out[n] = switch (m.dockTile(t).?) {
-            .logo => "LOGO",
-            .app => |i| m.dock[i].app.name,
-        };
-        n += 1;
-    }
-    return out[0..n];
-}
-
-fn expectOrder(m: *const Model, want: []const []const u8) !void {
-    var buf: [8][]const u8 = undefined;
-    const got = tileNames(m, &buf);
-    try std.testing.expectEqual(want.len, got.len);
-    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
-}
-
-test "reorderIndex: moving down and up shifts the tiles in between" {
-    // [0 1 2 3 4], move tile 1 to position 3 -> [0 2 3 1 4]
-    const down = [_]usize{ 0, 2, 3, 1, 4 };
-    for (down, 0..) |want, t| try std.testing.expectEqual(want, reorderIndex(1, 3, t));
-    // move tile 3 to position 1 -> [0 3 1 2 4]
-    const up = [_]usize{ 0, 3, 1, 2, 4 };
-    for (up, 0..) |want, t| try std.testing.expectEqual(want, reorderIndex(3, 1, t));
-    // from == to: nothing changes
-    for (0..5) |t| try std.testing.expectEqual(t, reorderIndex(2, 2, t));
-}
-
-test "reorderIndex is a permutation for every from/to" {
-    const n = 6;
-    for (0..n) |from| for (0..n) |to| {
-        var seen = [_]bool{false} ** n;
-        for (0..n) |t| {
-            const i = reorderIndex(from, to, t);
-            try std.testing.expect(i < n);
-            try std.testing.expect(!seen[i]);
-            seen[i] = true;
-        }
-    };
-}
-
-test "Model.moveDockTile: reorder, and crossing the logo changes what is above it" {
-    const apps = [_]dockapp.DockApp{
-        testApp("a", .dock, 0, 0, null),
-        testApp("b", .dock, 0, 1, null),
-        testApp("c", .dock, 0, 2, null),
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    try expectOrder(&m, &.{ "LOGO", "a", "b", "c" });
-
-    try std.testing.expect(m.moveDockTile(1, 3)); // a to the bottom
-    try expectOrder(&m, &.{ "LOGO", "b", "c", "a" });
-    try std.testing.expectEqual(@as(usize, 0), m.above_logo);
-
-    try std.testing.expect(m.moveDockTile(3, 0)); // a above the logo
-    try expectOrder(&m, &.{ "a", "LOGO", "b", "c" });
-    try std.testing.expectEqual(@as(usize, 1), m.above_logo);
-
-    // y numbering round-trips through Model.init: -1 above, 0, 1 below.
-    try std.testing.expectEqual(@as(i32, -1), m.dock[0].app.y);
-    try std.testing.expectEqual(@as(i32, 0), m.dock[1].app.y);
-    try std.testing.expectEqual(@as(i32, 1), m.dock[2].app.y);
-    var export_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer export_arena.deinit();
-    var again = try Model.init(std.testing.allocator, try m.exportList(export_arena.allocator()), &.{}, 4);
-    defer again.deinit();
-    try expectOrder(&again, &.{ "a", "LOGO", "b", "c" });
-
-    // The logo never moves by itself; bad indices and no-ops are refused.
-    try std.testing.expect(!m.moveDockTile(1, 3));
-    try std.testing.expect(!m.moveDockTile(0, 0));
-    try std.testing.expect(!m.moveDockTile(0, 9));
-}
-
-test "Model.removeDock / removeClip: gone, indices stay valid, locked stays" {
-    const apps = [_]dockapp.DockApp{
-        testApp("a", .dock, 0, -1, null),
-        testApp("b", .dock, 0, 0, null),
-        .{ .name = "c", .command = &.{"c"}, .y = 1, .locked = true },
-        testApp("x", .clip, 0, 0, null),
-        testApp("y", .clip, 1, 0, null),
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    try expectOrder(&m, &.{ "a", "LOGO", "b", "c" });
-
-    try std.testing.expect(m.removeDock(0)); // above the logo
-    try expectOrder(&m, &.{ "LOGO", "b", "c" });
-    try std.testing.expectEqual(@as(usize, 0), m.above_logo);
-    try std.testing.expect(!m.removeDock(1)); // "c" is locked
-    try std.testing.expect(!m.removeDock(7));
-    try expectOrder(&m, &.{ "LOGO", "b", "c" });
-
-    try std.testing.expect(m.removeClip(0));
-    try std.testing.expectEqual(@as(usize, 1), m.clip.len);
-    try std.testing.expectEqualStrings("y", m.clip[0].app.name);
-    try std.testing.expect(!m.removeClip(1));
-}
-
-test "Model.addApp: appended at the end, has a position, is seen by hasApp" {
-    var m = try Model.init(std.testing.allocator, .{}, &.{}, 4);
-    defer m.deinit();
-    const i = try m.addApp(std.testing.allocator, .{ .name = "firefox", .command = &.{"firefox"} });
-    try std.testing.expectEqual(@as(usize, 0), i);
-    const j = try m.addApp(std.testing.allocator, .{ .name = "foot", .command = &.{"foot"}, .place = .clip });
-    try std.testing.expectEqual(@as(usize, 0), j);
-    try expectOrder(&m, &.{ "LOGO", "firefox" });
-    try std.testing.expect(m.hasApp("firefox"));
-    try std.testing.expect(m.hasApp("foot"));
-    try std.testing.expect(!m.hasApp("gimp"));
-    const k = try m.addApp(std.testing.allocator, .{ .name = "gimp", .command = &.{"gimp"} });
-    try std.testing.expectEqual(@as(i32, 1), m.dock[k].app.y);
-}
-
-test "Model: launching is set, cleared by a window, and times out" {
-    const apps = [_]dockapp.DockApp{.{ .name = "term", .command = &.{"foot"} }};
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-
-    m.markLaunching(false, 0, 10);
-    try std.testing.expect(m.dock[0].launching);
-    try std.testing.expect(!m.expireLaunching(12, 5));
-    try std.testing.expect(m.dock[0].launching);
-    try std.testing.expect(m.expireLaunching(20, 5)); // too old
-    try std.testing.expect(!m.dock[0].launching);
-
-    m.markLaunching(false, 0, 30);
-    try std.testing.expect(m.setRunning(&.{"foot"})); // window appeared
-    try std.testing.expect(!m.dock[0].launching);
-    // Already running: a click only focuses, nothing to wait for.
-    m.markLaunching(false, 0, 31);
-    try std.testing.expect(!m.dock[0].launching);
-    // Out of range is ignored, not a crash.
-    m.markLaunching(true, 5, 1);
-}
-
-test "detached / dropTile / dockPlacementFor" {
-    try std.testing.expect(!detached(30, 100, tile, 256));
-    try std.testing.expect(!detached(-detach_distance, 10, tile, 256));
-    try std.testing.expect(detached(-detach_distance - 1, 10, tile, 256));
-    try std.testing.expect(detached(tile + detach_distance + 1, 10, tile, 256));
-    try std.testing.expect(detached(10, 256 + detach_distance + 1, tile, 256));
-
-    try std.testing.expectEqual(@as(usize, 0), dropTile(-30, 4));
-    try std.testing.expectEqual(@as(usize, 2), dropTile(2 * tile + 3, 4));
-    try std.testing.expectEqual(@as(usize, 3), dropTile(9999, 4));
-    try std.testing.expectEqual(@as(usize, 0), dropTile(5, 0));
-
-    const out: Rect = .{ .x = 0, .y = 0, .w = 1920, .h = 1080 };
-    const left = dockPlacementFor(out, 100, 300);
-    try std.testing.expectEqual(config.DockEdge.left, left.edge);
-    try std.testing.expectEqual(@as(i32, 300), left.offset);
-    const right = dockPlacementFor(out, 1700, -50);
-    try std.testing.expectEqual(config.DockEdge.right, right.edge);
-    try std.testing.expectEqual(@as(i32, 0), right.offset);
-    // Applying a placement gives a rectangle on that edge.
-    const r = dockRectAt(out, 3, left.edge, left.offset);
-    try std.testing.expectEqual(@as(i32, 0), r.x);
-    try std.testing.expectEqual(@as(i32, 300), r.y);
-}
-
-test "drawDockDrag: the gap follows the drop position, detaching fades in place" {
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "a", .command = &.{"definitely-no-such-icon-a"} },
-        .{ .name = "b", .command = &.{"definitely-no-such-icon-b"} },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-
-    const w = tile;
-    const h = tile * 3;
-    const data = try std.testing.allocator.alloc(u8, @intCast(w * h * 4));
-    defer std.testing.allocator.free(data);
-    var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
-    defer cv.deinit();
-
-    // Drag tile 1 ("a") to position 2: the slot at 2 is the recessed gap.
-    @memset(data, 0);
-    drawDockDrag(&cv, &m, 3, null, .{ .from = 1, .to = 2, .x = 30, .y = 2 * tile + 10 });
-    cv.flush();
-    const gap = px(data, w * 4, 32, 2 * tile + 32);
-    const normal = px(data, w * 4, 32, tile + 4);
-    try std.testing.expect(gap != normal);
-    try std.testing.expectEqual(@as(u32, 0xff), normal >> 24);
-
-    // Detached: nothing is moved, the tile is veiled (alpha < 0xff blend
-    // over the gradient still opaque), and the gap is not drawn.
-    @memset(data, 0);
-    drawDockDrag(&cv, &m, 3, null, .{ .from = 1, .to = 2, .x = -200, .y = 10, .detached = true });
-    cv.flush();
-    try std.testing.expect(px(data, w * 4, 32, 2 * tile + 4) != gap);
-    try std.testing.expect(px(data, w * 4, 32, tile + 32) != px(data, w * 4, 32, 2 * tile + 32));
-}
-
-test "drawClip marks an omnipresent entry and a launching tile" {
-    const apps = [_]dockapp.DockApp{
-        .{ .name = "all", .command = &.{"definitely-no-such-icon-1"}, .place = .clip },
-        .{ .name = "one", .command = &.{"definitely-no-such-icon-2"}, .place = .clip, .workspace = 0 },
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    m.markLaunching(true, 1, 0);
-
-    const w = tile * 3;
-    const h = tile;
-    const data = try std.testing.allocator.alloc(u8, @intCast(w * h * 4));
-    defer std.testing.allocator.free(data);
-    @memset(data, 0);
-    var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
-    defer cv.deinit();
-    const idx = [_]usize{ 0, 1 };
-    drawClip(&cv, &m, .{ .workspace = 0, .name = null, .apps = &idx, .on_left = true });
-    cv.flush();
-
-    // Folded corner (dark) at the upper right of tile 1 ("all") only.
-    try std.testing.expectEqual(@as(u32, 0xff555555), px(data, w * 4, 2 * tile - 3, 8));
-    try std.testing.expect(px(data, w * 4, 3 * tile - 3, 8) != 0xff555555);
-    // The raster darkens every other pixel of the launching tile (tile 2).
-    const a = px(data, w * 4, 2 * tile + 20, 20);
-    const b = px(data, w * 4, 2 * tile + 21, 20);
-    try std.testing.expect(a != b);
-}
-
-test "clipDropTile / clipCornerFor / Model.moveClipEntry" {
-    // 4 tiles: workspace + 3 apps, anchored left: x picks the tile, 0 is never returned.
-    try std.testing.expectEqual(@as(usize, 1), clipDropTile(-20, 4, true));
-    try std.testing.expectEqual(@as(usize, 1), clipDropTile(10, 4, true)); // over the workspace tile
-    try std.testing.expectEqual(@as(usize, 1), clipDropTile(tile + 5, 4, true));
-    try std.testing.expectEqual(@as(usize, 2), clipDropTile(2 * tile + 5, 4, true));
-    try std.testing.expectEqual(@as(usize, 3), clipDropTile(9999, 4, true));
-    // Anchored right the workspace tile is the rightmost one.
-    try std.testing.expectEqual(@as(usize, 3), clipDropTile(-5, 4, false));
-    try std.testing.expectEqual(@as(usize, 1), clipDropTile(9999, 4, false));
-    try std.testing.expectEqual(@as(usize, 1), clipDropTile(5, 1, true));
-
-    const out: Rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
-    try std.testing.expectEqual(config.ClipCorner.top_left, clipCornerFor(out, 10, 10));
-    try std.testing.expectEqual(config.ClipCorner.top_right, clipCornerFor(out, 900, 10));
-    try std.testing.expectEqual(config.ClipCorner.bottom_left, clipCornerFor(out, 10, 700));
-    try std.testing.expectEqual(config.ClipCorner.bottom_right, clipCornerFor(out, 900, 700));
-
-    const apps = [_]dockapp.DockApp{
-        testApp("a", .clip, 0, 0, null),
-        testApp("b", .clip, 1, 0, 0),
-        testApp("c", .clip, 2, 0, null),
-        testApp("d", .clip, 3, 0, 1),
-    };
-    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
-    defer m.deinit();
-    try std.testing.expect(m.moveClipEntry(0, 2)); // a after c
-    try std.testing.expectEqualStrings("b", m.clip[0].app.name);
-    try std.testing.expectEqualStrings("c", m.clip[1].app.name);
-    try std.testing.expectEqualStrings("a", m.clip[2].app.name);
-    try std.testing.expectEqualStrings("d", m.clip[3].app.name);
-    try std.testing.expect(m.moveClipEntry(3, 0)); // d first
-    try std.testing.expectEqualStrings("d", m.clip[0].app.name);
-    try std.testing.expectEqualStrings("b", m.clip[1].app.name);
-    for (m.clip, 0..) |sl, i| try std.testing.expectEqual(@as(i32, @intCast(i)), sl.app.x);
-    try std.testing.expect(!m.moveClipEntry(1, 1));
-    try std.testing.expect(!m.moveClipEntry(1, 9));
+    try std.testing.expect(m.slots.items[0].icon != null);
+    try std.testing.expectEqual(@as(i32, 2), m.slots.items[0].icon.?.w);
+    try std.testing.expect(m.slots.items[1].icon == null);
 }

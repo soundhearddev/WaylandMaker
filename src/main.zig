@@ -36,6 +36,7 @@ const seat_mod = root.seat_mod;
 const action = root.action;
 const wm_files = root.wm_files;
 const dockapp = root.dockapp;
+const dockhost = root.dockhost;
 const proc = root.proc;
 const ui_mod = root.ui;
 const gfx = root.gfx;
@@ -55,6 +56,8 @@ test {
     _ = @import("wm_menu.zig");
     _ = @import("wm_attr.zig");
     _ = @import("dockapp.zig");
+    _ = @import("dockhost.zig");
+    _ = @import("wm_dock.zig");
     _ = @import("dock.zig");
     _ = @import("xpm.zig");
     _ = @import("fsmenu.zig");
@@ -83,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
         .obj_version = 0,
         .outputs = undefined,
         .windows = undefined,
+        .dock_windows = undefined,
         .seats = undefined,
     };
     // `cfg` was copied into `wm`; from here on only wm.cfg owns the arena.
@@ -90,6 +94,7 @@ pub fn main(init: std.process.Init) !void {
     defer wm.cfg.deinit();
     wm.outputs.init();
     wm.windows.init();
+    wm.dock_windows.init();
     wm.seats.init();
     defer wm.pending.deinit(gpa);
     action.global = wm;
@@ -544,9 +549,6 @@ fn onManage(wm: *WindowManager) void {
         }
     }
 
-    // 6b. DockApp windows that fit a Dock tile go into it (sets float_rect).
-    if (wm.ui) |u| u.placeDocked();
-
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
 
@@ -562,6 +564,8 @@ fn onManage(wm: *WindowManager) void {
         window_mod.applyManage(wm, w);
         window_mod.applyRender(wm, w, w == focus_target);
     }
+    // The DockApps are not windows: their own host sends their state.
+    dockhost.apply(wm, if (wm.ui) |u| u.dockHost() else .{});
 
     // 9. Keyboard focus (an open menu keeps it).
     const menu_open = if (wm.ui) |u| u.menuOpen() else false;
@@ -601,6 +605,7 @@ fn runUiAction(wm: *WindowManager, req: types.UiAction) void {
             while (it) |w| : (it = types.nextWindow(w, wm)) {
                 if (!w.closed) w.obj.close();
             }
+            dockhost.closeAll(wm);
             wm.quit = true;
         },
         .show_all => action.run(wm, .show_all),
@@ -673,8 +678,11 @@ fn onRender(wm: *WindowManager) void {
         window_mod.applyRender(wm, w, w == focus);
     }
     // After the windows: applyRender raises the focused window, and the
-    // Dock, the Clip and an open menu all have to end up above it.
-    if (wm.ui) |u| u.onRender();
+    // Dock, the Clip, the DockApps and an open menu all have to end up above
+    // it, in this order (a menu above everything).
+    if (wm.ui) |u| u.onRenderBars();
+    dockhost.apply(wm, if (wm.ui) |u| u.dockHost() else .{});
+    if (wm.ui) |u| u.onRenderMenus();
 }
 
 // ----------------------------------------------------------------------------

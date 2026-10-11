@@ -8,13 +8,16 @@
 //    │                                ├─ strip    ─ Column ─ Window   (tiled)
 //    │                                ├─ floating ─ Window ...        (z-ordered, top = last)
 //    │                                └─ fullscreen: ?*Window
-//    ├─ windows  (every window exactly once, regardless of state)
+//    ├─ windows       (every normal window exactly once, regardless of state)
+//    ├─ dock_windows  (every DockApp exactly once; see dockhost.zig)
 //    └─ seats
 //
 // Invariants (enforced by the functions in workspace.zig, relied on
 // everywhere else):
 //
-//   I1. Every live Window is in `wm.windows`.
+//   I1. Every live Window is in exactly one of `wm.windows` (role .normal)
+//       and `wm.dock_windows` (role .dockapp). A DockApp is in no workspace,
+//       no strip and no focus: nothing that loops over `wm.windows` can see it.
 //   I2. A Window is a member of exactly one container:
 //         .tiled      -> exactly one Column.windows of `win.workspace`
 //         .floating   -> `win.workspace.floating`
@@ -75,11 +78,17 @@ pub const Mode = enum { tiled, floating, fullscreen };
 /// Where a fullscreen window returns to when it leaves fullscreen.
 pub const Restore = enum { tiled, floating };
 
+/// What a window is to the compositor. A DockApp (app_id `dockapp:<name>`) is
+/// an icon, not a window: see dockhost.zig. Decided once by `dockhost.adopt`.
+pub const Role = enum { normal, dockapp };
+
 pub const Window = struct {
     obj: *river.WindowV1,
     node: *river.NodeV1,
 
-    /// Link in `wm.windows`.
+    role: Role = .normal,
+
+    /// Link in `wm.windows` (role .normal) or `wm.dock_windows` (.dockapp).
     link: wl.list.Link = .{ .prev = null, .next = null },
 
     // ---- identity ---------------------------------------------------------
@@ -138,11 +147,6 @@ pub const Window = struct {
     min_floating: bool = false,
     /// Counts up: the highest is the one `restore` brings back first.
     min_order: u64 = 0,
-
-    /// A fixed-size DockApp window sitting in its Dock tile (ui.zig's
-    /// placeDocked sets this every manage pass and also owns `float_rect`
-    /// while it is true). Docked windows are raised above the Dock itself.
-    docked: bool = false,
 
     /// Content rect (borders excluded) currently *wanted* on screen in
     /// global coordinates. Computed by layout every pass.
@@ -433,6 +437,8 @@ pub const WindowManager = struct {
 
     outputs: wl.list.Head(Output, .link),
     windows: wl.list.Head(Window, .link),
+    /// The DockApps (role .dockapp), owned by dockhost.zig.
+    dock_windows: wl.list.Head(Window, .link),
     seats: wl.list.Head(Seat, .link),
 
     /// Parsed key binding commands; XkbBinding.command indexes this.
@@ -442,7 +448,7 @@ pub const WindowManager = struct {
     attrs: wm_attr.Table = .{},
     /// The root menu (Window Maker WMRootMenu / wlmaker RootMenu.plist).
     root_menu: ?*const wm_menu.Menu = null,
-    /// Dock and Clip contents (dockapps.conf / WMState), owned by cfg's
+    /// Dock and Clip contents (WMState), owned by cfg's
     /// arena exactly like `root_menu`. ui.zig deep-copies what it needs,
     /// and rebuilds when `dock_gen` changes (every (re)load bumps it).
     dockapps: dockapp.List = .{},
@@ -612,6 +618,12 @@ pub fn prevFloating(w: *Window) ?*Window {
 pub fn nextWindow(w: *Window, wm: *WindowManager) ?*Window {
     const n = w.link.next orelse return null;
     if (n == &wm.windows.link) return null;
+    return @fieldParentPtr("link", n);
+}
+
+pub fn nextDockWindow(w: *Window, wm: *WindowManager) ?*Window {
+    const n = w.link.next orelse return null;
+    if (n == &wm.dock_windows.link) return null;
     return @fieldParentPtr("link", n);
 }
 

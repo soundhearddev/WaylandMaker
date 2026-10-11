@@ -18,6 +18,8 @@ const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const config = @import("config.zig");
 const action_mod = @import("action.zig");
+const dockhost = @import("dockhost.zig");
+const dock_mod = @import("dock.zig");
 
 const Window = types.Window;
 const Workspace = types.Workspace;
@@ -44,12 +46,14 @@ const Fixture = struct {
                 .obj_version = 6,
                 .outputs = undefined,
                 .windows = undefined,
+                .dock_windows = undefined,
                 .seats = undefined,
             },
             .out = undefined,
         };
         f.wm.outputs.init();
         f.wm.windows.init();
+        f.wm.dock_windows.init();
         f.wm.seats.init();
 
         const out = try a.create(Output);
@@ -136,6 +140,20 @@ fn check(f: *Fixture) !void {
             try std.testing.expect(!types.isLinked(&w.column_link));
             try std.testing.expect(w.mode == .floating or (w.mode == .fullscreen and w.restore == .floating));
         }
+    }
+
+    // I1: every window is in exactly the list its role says. A DockApp is
+    // in no workspace and no strip: nothing that loops over the windows can
+    // reach it.
+    var nit = f.wm.windows.first();
+    while (nit) |w| : (nit = types.nextWindow(w, &f.wm)) {
+        try std.testing.expect(w.role == .normal);
+    }
+    var dit = f.wm.dock_windows.first();
+    while (dit) |w| : (dit = types.nextDockWindow(w, &f.wm)) {
+        try std.testing.expect(w.role == .dockapp);
+        try std.testing.expect(w.workspace == null and w.column == null);
+        try std.testing.expect(!types.isLinked(&w.column_link) and !types.isLinked(&w.floating_link));
     }
 }
 
@@ -755,29 +773,39 @@ test "windows without rules behave exactly as before" {
 // shows up only after it was already tiled must not be stuck that way.
 // ----------------------------------------------------------------------------
 
-test "recheckFloating: a DockApp app_id arriving after tiling floats it" {
+test "adopt: a DockApp tag arriving after tiling takes the window out of the strip and the window list" {
     const f = try Fixture.init();
     defer f.deinit();
+    const other = try f.newWindow();
     const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), other);
     try workspace.placeTiled(&f.wm, f.cur(), w);
-    // Mirror the real pipeline: placeNew() (which we bypass here to place
-    // the window directly as tiled) is what clears `new` once a window
-    // has had its first placement. recheckFloating only acts on windows
-    // that are no longer `new` -- see its doc comment -- so without this
-    // the guard clause returns immediately and the window never floats.
     w.new = false;
     try check(f);
     try std.testing.expect(w.mode == .tiled);
 
-    // Mirrors window.zig's own .app_id handler: attrs are refreshed first,
-    // recheckFloating is called after.
-    w.attrs = dockapp_mod.defaultAttrs();
-    @import("window.zig").recheckFloating(&f.wm, w);
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(w.role == .dockapp);
+    try std.testing.expect(w.workspace == null and w.column == null);
     try check(f);
 
-    try std.testing.expect(w.mode == .floating);
-}
+    // Out of the window list, in the DockApp list: nothing that loops over
+    // the windows can reach it any more.
+    var seen_normal = false;
+    var it = f.wm.windows.first();
+    while (it) |x| : (it = types.nextWindow(x, &f.wm)) {
+        if (x == w) seen_normal = true;
+    }
+    try std.testing.expect(!seen_normal);
+    try std.testing.expect(f.wm.dock_windows.first().? == w);
+    try std.testing.expect(types.nextDockWindow(w, &f.wm) == null);
 
+    // Adopting twice changes nothing.
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(f.wm.dock_windows.first().? == w);
+    // The other window is untouched.
+    try std.testing.expect(other.mode == .tiled and other.workspace != null);
+}
 test "recheckFloating: a fixed-size hint arriving after tiling floats it too" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -832,7 +860,7 @@ test "recheckFloating: a no-longer-new but already-floating window is untouched"
     w.new = false;
 
     // Should stay floating and not, say, get pulled into a column.
-    w.attrs = dockapp_mod.defaultAttrs();
+    w.attrs = .{ .floating = true, .omnipresent = true };
     @import("window.zig").recheckFloating(&f.wm, w);
     try check(f);
     try std.testing.expect(w.mode == .floating);
@@ -844,26 +872,11 @@ test "recheckFloating: a window still in its initial placement (new) is left for
     const w = try f.newWindow();
     w.new = true; // never placed yet -- placeNew(), not recheckFloating, owns this one
 
-    w.attrs = dockapp_mod.defaultAttrs();
+    w.attrs = .{ .floating = true, .omnipresent = true };
     @import("window.zig").recheckFloating(&f.wm, w);
 
     try std.testing.expect(w.workspace == null);
     try std.testing.expect(w.mode == .tiled); // untouched Window{} default, not yet placed
-}
-
-test "hovering or clicking an unfocusable DockApp changes neither focus nor follow" {
-    // seat.zig calls requestFocus on pointer enter (focus_follows_mouse) and
-    // on every click. For the clock in the Dock that must be a no-op: a
-    // follow_request would scroll the strip back to the focused window.
-    // (A focusable window would call manageDirty on the dummy object, which
-    // is why only the no-op path is exercised here.)
-    const f = try Fixture.init();
-    defer f.deinit();
-    const w = try f.newWindow();
-    w.attrs = dockapp_mod.defaultAttrs();
-    @import("action.zig").requestFocus(&f.wm, w);
-    try std.testing.expect(f.wm.focus_request == null);
-    try std.testing.expect(!f.wm.follow_request);
 }
 
 // ----------------------------------------------------------------------------
@@ -880,6 +893,64 @@ fn parseWithCompositor(gpa: std.mem.Allocator, text: []const u8) !config.Config 
     var binds: std.ArrayList(config.Bind) = .empty;
     try config.parse(cfg.arena.allocator(), text, &cfg, &binds, "<wlprefs>");
     return cfg;
+}
+
+test "adopt drops the focus request and a pending menu focus for the window" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+    w.new = false;
+    f.wm.focus_request = w;
+    f.wm.pending_ui = .{ .focus = w };
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(f.wm.focus_request == null);
+    try std.testing.expect(f.wm.pending_ui == null);
+    try check(f);
+}
+
+test "syncModel: a DockApp gets a temporary tile while it runs and loses it with the program" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = std.testing.allocator;
+    const kept = [_]dockapp_mod.DockApp{.{ .name = "clock", .command = &.{"wl-clock"}, .y = 1 }};
+    var m = try dock_mod.Model.init(a, .{ .apps = &kept }, &.{}, 1);
+    defer m.deinit();
+
+    const clock = try f.newWindow();
+    const tokyo = try f.newWindow();
+    const term = try f.newWindow();
+    clock.app_id = try a.dupe(u8, "dockapp:clock");
+    tokyo.app_id = try a.dupe(u8, "dockapp:tokyo");
+    term.app_id = try a.dupe(u8, "foot");
+    defer for ([_]*Window{ clock, tokyo, term }) |w| a.free(w.app_id.?);
+    dockhost.adopt(&f.wm, clock);
+    dockhost.adopt(&f.wm, tokyo);
+    try workspace.placeTiled(&f.wm, f.cur(), term);
+    term.new = false;
+    try check(f);
+
+    // The kept tile of "clock" is its home and is marked running; "tokyo"
+    // has no entry and gets a temporary tile; "foot" is a normal window and
+    // gets none.
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.slots.items[0].running);
+    const ti = m.dockSlotFor("dockapp:tokyo").?;
+    try std.testing.expect(m.slots.items[ti].app.attached and m.slots.items[ti].running);
+    try std.testing.expect(!m.hasApp("foot"));
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == clock);
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[ti].app) == tokyo);
+    // Nothing changed: nothing reported.
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+
+    // The program ends: its temporary tile goes, the kept tile stays and is
+    // not running any more.
+    tokyo.closed = true;
+    clock.closed = true;
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.dockSlotFor("dockapp:tokyo") == null);
+    try std.testing.expect(m.slot(0) != null and !m.slots.items[0].running);
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == null);
 }
 
 test "wlprefs defaults are the compositor's defaults" {
@@ -1183,9 +1254,8 @@ test "hide_others minimizes other applications only; hide_app the focused one's"
     web.app_id = try std.testing.allocator.dupe(u8, "firefox");
     clock.app_id = try std.testing.allocator.dupe(u8, "dockapp:clock");
     defer for ([_]*Window{ t1, t2, web, clock }) |w| std.testing.allocator.free(w.app_id.?);
-    clock.attrs = dockapp_mod.defaultAttrs();
+    dockhost.adopt(&f.wm, clock); // a DockApp is in no workspace and not in the window list
     for ([_]*Window{ t1, t2, web }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
-    workspace.placeFloating(f.cur(), clock);
     workspace.activate(t1);
 
     // Nothing is focused through a seat in the fixture: `focusedWindow` falls
