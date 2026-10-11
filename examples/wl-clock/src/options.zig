@@ -3,19 +3,11 @@
 // Command line of wl-clock. Pure, so it can be tested without a compositor.
 //
 // The one option that matters for the dock is --name: the window's app_id is
-// "dockapp:<name>", and that is what wmaker-wl matches against the entry of
-// the same name in dockapps.conf to put the window into that entry's tile.
-// Two clocks therefore need two names:
-//
-//     [berlin]                          [tokyo]
-//     command = wl-clock                command = wl-clock --name tokyo --tz Asia/Tokyo --label tokyo
-//
-// The other one is --click. By default the clock does NOT take the mouse: its
-// window has an empty input region, so every click, drag and right click on
-// the tile reaches the Dock underneath -- the Dock menu (Lock, Remove Icon,
-// Kill ...), dragging the tile to another slot or off the Dock to remove it,
-// and dragging the Dock itself. --click gives the mouse back to the clock
-// (a click toggles 12/24 hours) and with it takes it away from the Dock.
+// "dockapp:<name>". The default is the program's own name, `wl-clock`, so
+// "Keep Icon" in wmaker-wl (which saves the command `<name>`) starts it
+// again. Two clocks at once need two names (`--name tokyo`); a Dock entry
+// for the second one then has to be written into WMState by hand, because
+// its command is not `<name>`.
 
 const std = @import("std");
 
@@ -23,17 +15,14 @@ pub const usage =
     \\usage: wl-clock [options]
     \\
     \\A 64x64 clock for the dock of wmaker-wl (a DockApp). It sets its app_id to
-    \\"dockapp:<name>", so wmaker-wl puts it into the dock tile of that name.
+    \\"dockapp:<name>"; wmaker-wl docks it by itself, no entry or config needed.
     \\
     \\options:
-    \\  -n, --name NAME     app_id suffix, the entry name in dockapps.conf (default: clock)
+    \\  -n, --name NAME     app_id suffix, app_id suffix; keep it equal to the program name (default: wl-clock)
     \\  -z, --tz ZONE       time zone, e.g. Europe/Berlin or Asia/Tokyo (default: local)
     \\  -l, --label TEXT    shown instead of the month name (up to 8 characters)
     \\      --12h           start in 12-hour mode with AM/PM
-    \\      --24h           start in 24-hour mode (default)
-    \\      --click         the clock takes the mouse: a left click toggles 12/24 hours.
-    \\                      Without it clicks go to the dock tile below (its menu, dragging)
-    \\                      and `pkill -USR1 wl-clock` toggles the mode
+    \\      --24h           start in 24-hour mode (default); a click toggles the mode
     \\      --no-seconds    no seconds bar and no blinking colon: one redraw a minute
     \\      --snapshot FILE draw one frame into FILE (PPM image) and exit; no
     \\                      Wayland connection needed
@@ -42,14 +31,11 @@ pub const usage =
 ;
 
 pub const Options = struct {
-    name: []const u8 = "clock",
+    name: []const u8 = "wl-clock",
     tz: ?[:0]const u8 = null,
     label: ?[]const u8 = null,
     hour12: bool = false,
     seconds: bool = true,
-    /// Keep the pointer: a click toggles 12/24 hours (and the Dock tile
-    /// below gets no clicks). Default: pass every click through.
-    click: bool = false,
     snapshot: ?[:0]const u8 = null,
 };
 
@@ -80,8 +66,6 @@ pub fn parse(it: anytype) Error!Options {
             o.hour12 = false;
         } else if (eql(arg, "--no-seconds")) {
             o.seconds = false;
-        } else if (eql(arg, "--click")) {
-            o.click = true;
         } else if (try value(arg, "-n", "--name", it)) |v| {
             if (!validName(v)) return error.InvalidName;
             o.name = v;
@@ -118,13 +102,16 @@ fn value(arg: [:0]const u8, short: []const u8, long: []const u8, it: anytype) Er
 }
 
 /// A name becomes part of an app_id and is compared with an entry name, so
-/// keep it to what a config file can spell without quoting.
+/// keep it to what a config file can spell without quoting. It must also be
+/// a name wmaker-wl accepts for a tile (dockapp.validAppId: letters, digits,
+/// `.-_+`, not starting with `.` or `-`); otherwise the compositor gives the
+/// window no tile and never shows it.
 pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > max_name) return false;
     for (name) |ch| {
         if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-') return false;
     }
-    return true;
+    return name[0] != '-';
 }
 
 // ----------------------------------------------------------------------------
@@ -149,12 +136,10 @@ fn run(args: []const [:0]const u8) Error!Options {
 
 test "no arguments: the defaults" {
     const o = try run(&.{});
-    try std.testing.expectEqualStrings("clock", o.name);
+    try std.testing.expectEqualStrings("wl-clock", o.name);
     try std.testing.expect(o.tz == null and o.label == null and o.snapshot == null);
     try std.testing.expect(!o.hour12);
     try std.testing.expect(o.seconds);
-    // The Dock owns the mouse unless asked otherwise.
-    try std.testing.expect(!o.click);
 }
 
 test "every option, in all its spellings" {
@@ -165,8 +150,6 @@ test "every option, in all its spellings" {
     try std.testing.expect(o.hour12);
     try std.testing.expect(!o.seconds);
     try std.testing.expectEqualStrings("/tmp/x.ppm", o.snapshot.?);
-
-    try std.testing.expect((try run(&.{"--click"})).click);
 
     const p = try run(&.{ "--name=a-b_c", "-z", "UTC", "-l", "x" });
     try std.testing.expectEqualStrings("a-b_c", p.name);
@@ -194,6 +177,8 @@ test "errors" {
 
 test "validName" {
     try std.testing.expect(validName("clock"));
+    try std.testing.expect(validName("wl-clock"));
+    try std.testing.expect(!validName("-clock")); // the compositor would not give it a tile
     try std.testing.expect(validName("Berlin_2-a"));
     try std.testing.expect(!validName(""));
     try std.testing.expect(!validName("a b"));

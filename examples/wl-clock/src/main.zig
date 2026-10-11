@@ -2,13 +2,22 @@
 //
 // wl-clock: a DockApp for wmaker-wl, and a template for writing your own.
 //
-// What makes a program a DockApp is only this (see ../../docs/DOCKAPPS.md):
+// What makes a program a DockApp is one tag and one size (see
+// ../../docs/DOCKAPPS.md and wmaker-wl's dockhost.zig):
 //
-//   1. The xdg_toplevel's app_id is "dockapp:<name>". wmaker-wl matches <name>
-//      against the entry of that name in dockapps.conf.
-//   2. The window asks for one fixed size, equal min and max, at most 64x64.
-//      wmaker-wl then floats it and puts it INTO that entry's tile of the
-//      Dock, centred, above the Dock, on every workspace.
+//   1. The xdg_toplevel's app_id is "dockapp:<name>", <name> being the
+//      program's own name (wl-clock): "Keep Icon" saves `<name>` as command.
+//   2. The size it wants: min == max == one 64x64 tile.
+//
+// From the tag on wmaker-wl treats the window as an icon, not a window, and
+// decides everything about it itself: it is out of the window list, the
+// layout and the focus, sits in the Dock tile of its name (a temporary one,
+// or the WMState entry), centred, above the Dock, on every workspace, with
+// no frame, and neither the close key nor a move/resize/fullscreen request
+// reaches it. So this program does NOT draw a title bar or ask for one
+// (no xdg-decoration), never asks to be moved or resized, does not need the
+// keyboard, and has exactly one way to end: the compositor's close (the
+// tile menu's "Kill"), or a signal.
 //
 // Like every Window Maker dockapp this one draws its whole 64x64 tile itself,
 // frame included (face.zig), in the look of wmaker-wl's own Dock tiles, so a
@@ -20,19 +29,9 @@
 // minute, with --no-seconds) or until the compositor has something to say,
 // and only redraws when what is on screen would change.
 //
-// The tile belongs to the Dock. The window's input region is empty, so the
-// pointer goes straight through it to the Dock tile underneath: right click
-// opens the tile's menu (Lock, Remove Icon, Kill, ...), dragging moves the
-// tile or the whole Dock, a double click on a tile that is not running starts
-// it. The clock therefore does not need a pointer at all. 12/24 hours is
-// switched with `--12h`/`--24h`, or while running with SIGUSR1 (bind a key to
-// `pkill -USR1 wl-clock`). `--click` gives the mouse back to the clock: a
-// click toggles 12/24 hours, and the Dock gets no clicks on that tile.
-//
-// Starting it is not its business either: put `wl-clock &` in
-// ~/.config/wmaker-wl/autostart, or `autolaunch = yes` on the entry in
-// dockapps.conf. When the tile is removed from the Dock, wmaker-wl closes the
-// clock (xdg_toplevel.close); this program just exits cleanly then.
+// A click toggles 12/24 hours. Starting it is not its business: put
+// `wl-clock &` in ~/.config/wmaker-wl/autostart (or `AutoLaunch = Yes` on its
+// WMState entry). Without an entry the tile lives as long as the clock does.
 
 const std = @import("std");
 const posix = std.posix;
@@ -72,9 +71,6 @@ const State = struct {
     wm_base: ?*xdg.WmBase = null,
     seat: ?*wl.Seat = null,
     cursor_manager: ?*wp.CursorShapeManagerV1 = null,
-    /// --click: bind a pointer and toggle on click. Otherwise no pointer at
-    /// all (see the header).
-    click: bool = false,
 
     pointer: ?*wl.Pointer = null,
     cursor_device: ?*wp.CursorShapeDeviceV1 = null,
@@ -117,14 +113,11 @@ pub fn main(init: std.process.Init) !void {
         c.tzset();
     }
 
-    var state: State = .{
-        .view = .{
-            .hour12 = opts.hour12,
-            .seconds = opts.seconds,
-            .label = opts.label,
-        },
-        .click = opts.click,
-    };
+    var state: State = .{ .view = .{
+        .hour12 = opts.hour12,
+        .seconds = opts.seconds,
+        .label = opts.label,
+    } };
 
     // No compositor needed: draw one frame to a file. Handy for a preview
     // and for the screenshot in the README.
@@ -149,8 +142,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Without this SIGINT/SIGTERM would kill us at the default disposition and
     // skip every `defer` below. The handlers only set a flag; poll() is what
-    // notices (it returns EINTR), see run loop. SIGUSR1 (toggle 12/24 hours)
-    // works the same way.
+    // notices (it returns EINTR), see run loop.
     installExitSignalHandlers();
 
     const registry = try display.getRegistry();
@@ -174,16 +166,6 @@ pub fn main(init: std.process.Init) !void {
     defer surface.destroy();
     state.surface = surface;
 
-    // The Dock owns the mouse: an empty input region lets every pointer event
-    // fall through to the tile below (menu, drag, double click). Pending
-    // state, applied with the first commit. With --click the whole surface
-    // keeps its default input region.
-    if (!opts.click) {
-        const none = try compositor.createRegion();
-        surface.setInputRegion(none);
-        none.destroy();
-    }
-
     const xdg_surface = try wm_base.getXdgSurface(surface);
     defer xdg_surface.destroy();
     state.xdg_surface = xdg_surface;
@@ -194,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     state.toplevel = toplevel;
     toplevel.setListener(*State, toplevelListener, &state);
 
-    // ---- the two things that make this a DockApp ----------------------------
+    // ---- the tag and the size that make this a DockApp -----------------------
 
     const app_id = try std.fmt.allocPrintSentinel(gpa, "dockapp:{s}", .{opts.name}, 0);
     defer gpa.free(app_id);
@@ -222,12 +204,6 @@ pub fn main(init: std.process.Init) !void {
 
 fn runLoop(display: *wl.Display, state: *State) !void {
     while (state.running and !should_exit.load(.monotonic)) {
-        // SIGUSR1 arrived (poll() was interrupted, or it came between two
-        // polls and is picked up at the latest one tick later).
-        if (toggle_hours.swap(false, .monotonic)) {
-            state.view.hour12 = !state.view.hour12;
-            state.dirty = true;
-        }
         redrawIfNeeded(state);
 
         // The documented libwayland pattern for a poll()-based loop: nothing
@@ -380,15 +356,9 @@ fn writePpm(path: [:0]const u8, px: *const face.Pixels) !void {
 // ----------------------------------------------------------------------------
 
 var should_exit = std.atomic.Value(bool).init(false);
-/// Set by SIGUSR1: switch between 12 and 24 hours.
-var toggle_hours = std.atomic.Value(bool).init(false);
 
 fn onExitSignal(_: std.os.linux.SIG) callconv(.c) void {
     should_exit.store(true, .monotonic);
-}
-
-fn onToggleSignal(_: std.os.linux.SIG) callconv(.c) void {
-    toggle_hours.store(true, .monotonic);
 }
 
 fn installExitSignalHandlers() void {
@@ -399,13 +369,6 @@ fn installExitSignalHandlers() void {
     };
     posix.sigaction(.INT, &act, null);
     posix.sigaction(.TERM, &act, null);
-
-    const toggle: posix.Sigaction = .{
-        .handler = .{ .handler = onToggleSignal },
-        .mask = posix.sigemptyset(),
-        .flags = 0,
-    };
-    posix.sigaction(.USR1, &toggle, null);
 }
 
 // ----------------------------------------------------------------------------
@@ -434,16 +397,14 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, state: *St
                     return;
                 };
             } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
-                // Only with --click, and then only the first seat: a clock
-                // has one pointer to care about. Without --click there is no
-                // pointer here at all; the Dock below gets the events.
-                if (state.click and state.seat == null) {
+                // Only the first seat: a clock has one pointer to care about.
+                if (state.seat == null) {
                     state.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
                         std.log.err("bind wl_seat: {t}", .{err});
                         return;
                     };
                 }
-            } else if (state.click and eql(u8, name, std.mem.span(wp.CursorShapeManagerV1.interface.name))) {
+            } else if (eql(u8, name, std.mem.span(wp.CursorShapeManagerV1.interface.name))) {
                 // Optional. Without it the compositor keeps whatever cursor
                 // it had, which is acceptable for a clock.
                 state.cursor_manager = registry.bind(g.name, wp.CursorShapeManagerV1, 1) catch null;
@@ -470,7 +431,9 @@ fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, state
 
 fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, state: *State) void {
     switch (event) {
-        .configure => {}, // we only ever want 64x64, whatever is proposed
+        // The compositor proposes the tile we asked for. We only ever draw
+        // 64x64, whatever is proposed; it centres what we really have.
+        .configure => {},
         .close => state.running = false,
     }
 }
