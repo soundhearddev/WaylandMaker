@@ -77,6 +77,7 @@ pub fn adopt(wm: *WindowManager, win: *Window) void {
     wm.dock_windows.append(win);
 
     win.role = .dockapp;
+    std.log.info("dockhost: `{s}` is a DockApp: an icon in the Dock, not a window", .{win.app_id orelse "?"});
     win.new = false;
     win.minimized = false;
     win.sticky = false;
@@ -149,6 +150,7 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
         const name = dockapp.declaredName(id) orelse continue;
         if (!dockapp.validAppId(name) or m.dockSlotFor(id) != null) continue;
         if (m.attach(name)) |_| {
+            std.log.info("dockhost: temporary Dock tile for `{s}`", .{name});
             changed = true;
         } else |err| std.log.warn("dockapp `{s}` gets no tile: {t}", .{ name, err });
     }
@@ -202,8 +204,11 @@ pub fn closeAll(wm: *WindowManager) void {
     }
 }
 
-fn hide(win: *Window) void {
+/// Hidden (not placed) because `why`: logged once per change, so a DockApp
+/// that does not show up says why.
+fn hide(win: *Window, why: []const u8) void {
     if (win.visible != false) {
+        std.log.warn("dockhost: DockApp `{s}` is not shown: {s}", .{ win.app_id orelse "?", why });
         win.obj.hide();
         win.visible = false;
     }
@@ -221,10 +226,10 @@ pub fn apply(wm: *WindowManager, host: Host) void {
 }
 
 fn applyOne(win: *Window, host: Host) void {
-    const out = host.out orelse return hide(win);
-    const m = host.model orelse return hide(win);
-    const id = win.app_id orelse return hide(win);
-    const idx = m.dockSlotFor(id) orelse return hide(win);
+    const out = host.out orelse return hide(win, "there is no Dock on an output (dock_enabled = false?)");
+    const m = host.model orelse return hide(win, "the Dock has no model");
+    const id = win.app_id orelse return hide(win, "no app_id");
+    const idx = m.dockSlotFor(id) orelse return hide(win, "no Dock tile for it (invalid name, or the Dock is full)");
     const gi = m.slots.items[idx].gi;
 
     // The client draws everything itself and has one size.

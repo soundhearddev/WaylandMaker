@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     }
     defer if (wm.ui) |u| u.deinit();
 
-    std.log.info("wmaker-wl running (config: {s})", .{wm.cfg.config_file});
+    std.log.info("wmaker-wl running (config: {s}; DockApps are icons: dockhost)", .{wm.cfg.config_file});
     // Window Maker's autostart: one script, run once, detached. Run through
     // /bin/sh so it works whether or not the file is marked executable; a
     // shebang line is just a `#` comment to sh and is harmless either way.

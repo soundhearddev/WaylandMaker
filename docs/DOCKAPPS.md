@@ -70,7 +70,7 @@ Clip `x`.
 (`DockApp.matches`: expliziter `WMakerWLAppId`, `dockapp:<Name>`, Teile von `instance.Class`,
 Programmname).
 
-## Das Raster-Modell (`wdock.zig`, Port von `dock.c`)
+## Das Raster-Modell (`wm_dock.zig`, Port von `dock.c`)
 
 Dock, Clip und Drawers teilen sich Window Makers Modell: jedes Icon hat eine Rasterposition
 (`xindex`, `yindex`) relativ zur ersten Kachel seines Docks.
