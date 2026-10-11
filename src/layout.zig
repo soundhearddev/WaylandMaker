@@ -62,6 +62,33 @@ pub fn assignColumnX(strip: *Strip, cfg: *const config.Config) i32 {
     return x - cfg.gap + cfg.outer_gap;
 }
 
+/// Column widths are absolute pixels, fitted to the work area they were made
+/// for. When the work area changes width (the Dock was reserved after the
+/// window opened, a layer-shell bar came or went, the Dock moved to the
+/// other edge) every column keeps its share of it, or a column made for the
+/// full width would still stretch under the Dock.
+pub fn rescaleColumns(strip: *Strip, work_w: i32, cfg: *const config.Config) void {
+    const old_w = strip.work_w;
+    strip.work_w = work_w;
+    if (old_w <= 0 or old_w == work_w) return;
+
+    const gap: f64 = @floatFromInt(cfg.gap);
+    const old_avail: f64 = @floatFromInt(@max(1, old_w - 2 * cfg.outer_gap));
+    const new_avail: f64 = @floatFromInt(@max(1, work_w - 2 * cfg.outer_gap));
+    var it = strip.columns.first();
+    while (it) |col| : (it = types.nextCol(col)) {
+        const frac = (@as(f64, @floatFromInt(col.width)) + gap) / (old_avail + gap);
+        const w: i32 = @intFromFloat(@round(frac * (new_avail + gap) - gap));
+        col.width = @max(minOuterWidth(cfg), w);
+        // The remembered pre-maximize width is scaled the same way.
+        if (col.unmaximized_width > 0) {
+            const uf = (@as(f64, @floatFromInt(col.unmaximized_width)) + gap) / (old_avail + gap);
+            const uw: i32 = @intFromFloat(@round(uf * (new_avail + gap) - gap));
+            col.unmaximized_width = @max(minOuterWidth(cfg), uw);
+        }
+    }
+}
+
 /// Clamp the viewport so it never shows dead space beyond the strip. If
 /// everything fits, it is pinned to the left.
 pub fn clampScroll(strip: *Strip, content_w: i32, view_w: i32) void {
@@ -150,6 +177,7 @@ pub fn compute(ws: *Workspace, cfg: *const config.Config, follow: bool) void {
     const work = out.workArea();
     const strip = &ws.strip;
 
+    rescaleColumns(strip, work.w, cfg);
     const content_w = assignColumnX(strip, cfg);
     if (follow) {
         followActive(strip, work.w, cfg);
@@ -201,12 +229,14 @@ fn computeFloating(ws: *Workspace, cfg: *const config.Config) void {
         // Output-local work area: the part of the window you grab must not
         // end up under the Dock either.
         const work = out.workArea();
-        keepReachable(&win.float_rect, .{
+        const local: Rect = .{
             .x = work.x - out.rect.x,
             .y = work.y - out.rect.y,
             .w = work.w,
             .h = work.h,
-        });
+        };
+        keepReachable(&win.float_rect, local);
+        keepOutOfReserved(&win.float_rect, local, out.reserved);
         win.target = .{
             .x = out.rect.x + win.float_rect.x,
             .y = out.rect.y + win.float_rect.y,
@@ -244,6 +274,21 @@ pub fn initFloatRect(win: *Window, out: *const Output, cfg: *const config.Config
 
 /// Keep at least a grabbable strip of the window on screen so a floating
 /// window can never be lost off the edge. Output-local coordinates.
+/// On a side where the Dock reserved space, a floating window stays entirely
+/// inside the work area (it is moved, not resized; one too big for the area
+/// sticks to the near edge). Sides nothing was reserved on keep their
+/// freedom.
+pub fn keepOutOfReserved(r: *Rect, local: Rect, res: Output.Insets) void {
+    if (res.left > 0 or res.right > 0) {
+        const max_x = local.x + local.w - r.w;
+        r.x = if (max_x < local.x) local.x else std.math.clamp(r.x, local.x, max_x);
+    }
+    if (res.top > 0 or res.bottom > 0) {
+        const max_y = local.y + local.h - r.h;
+        r.y = if (max_y < local.y) local.y else std.math.clamp(r.y, local.y, max_y);
+    }
+}
+
 pub fn keepReachable(r: *Rect, bounds: Rect) void {
     const grab: i32 = 48;
     const min_x = bounds.x + grab - r.w;
@@ -274,6 +319,23 @@ test "stackHeights single window uses everything" {
     const a = stackHeights(1, 500, 8);
     try std.testing.expectEqual(@as(i32, 500), a.base);
     try std.testing.expectEqual(@as(usize, 0), a.extra);
+}
+
+test "keepOutOfReserved: a floating window never covers the Dock's strip" {
+    const local: Rect = .{ .x = 0, .y = 0, .w = 1856, .h = 1080 };
+    var a: Rect = .{ .x = 1700, .y = 50, .w = 400, .h = 300 };
+    keepOutOfReserved(&a, local, .{ .right = 64 });
+    try std.testing.expectEqual(@as(i32, 1856 - 400), a.x);
+    try std.testing.expectEqual(@as(i32, 50), a.y);
+    var b: Rect = .{ .x = 10, .y = 50, .w = 400, .h = 300 };
+    keepOutOfReserved(&b, .{ .x = 64, .y = 0, .w = 1856, .h = 1080 }, .{ .left = 64 });
+    try std.testing.expectEqual(@as(i32, 64), b.x);
+    var c: Rect = .{ .x = -300, .y = 50, .w = 400, .h = 300 };
+    keepOutOfReserved(&c, local, .{});
+    try std.testing.expectEqual(@as(i32, -300), c.x);
+    var d: Rect = .{ .x = 500, .y = 0, .w = 3000, .h = 300 };
+    keepOutOfReserved(&d, local, .{ .right = 64 });
+    try std.testing.expectEqual(@as(i32, 0), d.x);
 }
 
 test "keepReachable keeps the grab zone out of a reserved strip" {

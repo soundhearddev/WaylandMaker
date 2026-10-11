@@ -244,6 +244,10 @@ pub const Strip = struct {
     active: ?*Column = null,
     /// Strip coordinate of the viewport's left edge.
     scroll_x: i32 = 0,
+    /// Work area width the column widths were last fitted to (0 = never);
+    /// layout rescales the columns when it changes (Dock appears, a bar
+    /// reserves space, ...).
+    work_w: i32 = 0,
 
     pub fn columnCount(s: *Strip) usize {
         var n: usize = 0;

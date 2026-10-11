@@ -500,6 +500,8 @@ pub const Ui = struct {
     /// Deep copy of wm.dockapps; rebuilt when wm.dock_gen changes.
     model: ?dock_mod.Model = null,
     model_gen: u32 = std.math.maxInt(u32),
+    /// What the Dock reserved at the last sync (only to log changes).
+    last_reserved: types.Output.Insets = .{},
     dock: Bar = .{ .kind = .dock },
     clip: Bar = .{ .kind = .clip },
     /// One bar per Drawer, parallel to model.scr.drawers.
@@ -2094,6 +2096,15 @@ pub const Ui = struct {
                 .right => primary.reserved.right = dock_mod.tile,
             };
         } else ui.dropBar(&ui.dock);
+
+        if (!std.meta.eql(primary.reserved, ui.last_reserved)) {
+            ui.last_reserved = primary.reserved;
+            std.log.info("dock: reserved space left={d} right={d} (dock_enabled={}, dock_reserve_space={}, edge={t}, level={t})", .{
+                primary.reserved.left, primary.reserved.right,
+                cfg.dock_enabled,      cfg.dock_reserve_space,
+                cfg.dock_edge,         ui.dock_level,
+            });
+        }
 
         if (cfg.clip_enabled) {
             ui.prepareBar(&ui.clip, primary, m.currentClip(), ui.clip_collapsed);
