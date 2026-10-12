@@ -23,7 +23,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const icon_size: i32 = 64;
+pub var icon_size: i32 = 64;
 /// DOCK_DETTACH_THRESHOLD, CLIP_ATTACH_VICINITY, DOCK_MAX_ICONS (wconfig.h).
 pub const dock_detach_threshold: i32 = 3;
 pub const clip_attach_vicinity: i32 = 1;

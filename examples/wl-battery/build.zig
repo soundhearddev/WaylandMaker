@@ -8,8 +8,13 @@ pub fn build(b: *std.Build) void {
     // ---- protocol bindings ------------------------------------------------
     const scanner = Scanner.create(b, .{});
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
+
+    // Optional at run time: lets the clock ask for the normal arrow cursor
+    // when the pointer is over it, like wmaker-wl's own menus do.
     scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
-    // cursor-shape mentions zwp_tablet_tool_v2; the scanner needs its definition.
+    // wp_cursor_shape_manager_v1.get_tablet_tool_v2 mentions
+    // zwp_tablet_tool_v2; the scanner needs its definition even though only
+    // get_pointer is used.
     scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
 
     scanner.generate("wl_compositor", 4);
@@ -29,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true, // fopen, opendir, poll, netlink
+        .link_libc = true, // localtime_r, poll, setenv
         .single_threaded = true,
         .strip = optimize != .Debug,
     });
@@ -37,16 +42,16 @@ pub fn build(b: *std.Build) void {
     exe_module.linkSystemLibrary("wayland-client", .{});
 
     const exe = b.addExecutable(.{
-        .name = "wl-battery",
+        .name = "wl-clock",
         .root_module = exe_module,
-        .use_llvm = true,
+        .use_llvm = true, // avoids the self-hosted backend's SEGV / GCC 16 linker errors
     });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run wl-battery (inside a Wayland session; extra arguments go to wl-battery)");
+    const run_step = b.step("run", "Run the clock (inside a Wayland session; extra arguments go to wl-clock)");
     run_step.dependOn(&run_cmd.step);
 
     // ---- tests ----------------------------------------------------------

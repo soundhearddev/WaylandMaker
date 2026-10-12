@@ -1,18 +1,37 @@
 // SPDX-License-Identifier: 0BSD
 //
-// wl-battery: a battery DockApp for wmaker-wl, based on wl-clock.
+// wl-clock: a DockApp for wmaker-wl, and a template for writing your own.
 //
-// Same DockApp recipe as wl-clock:
-//   1. app_id "dockapp:<name>", <name> being the program's own name.
-//   2. min == max == one 64x64 tile.
-// wmaker-wl does the rest (Dock tile, no frame, every workspace).
+// What makes a program a DockApp is one tag and one size (see
+// ../../docs/DOCKAPPS.md and wmaker-wl's dockhost.zig):
 //
-// Draws into two wl_shm buffers, sleeps in poll(2) until the next battery
-// read (every --interval seconds, default 5) or until the compositor has
-// something to say, and only redraws when what is shown would change.
-// A click reads the battery again right away.
+//   1. The xdg_toplevel's app_id is "dockapp:<name>", <name> being the
+//      program's own name (wl-clock): "Keep Icon" saves `<name>` as command.
+//   2. The size it wants: min == max == one 64x64 tile.
 //
-// Put `wl-battery &` in ~/.config/wmaker-wl/autostart.
+// From the tag on wmaker-wl treats the window as an icon, not a window, and
+// decides everything about it itself: it is out of the window list, the
+// layout and the focus, sits in the Dock tile of its name (a temporary one,
+// or the WMState entry), centred, above the Dock, on every workspace, with
+// no frame, and neither the close key nor a move/resize/fullscreen request
+// reaches it. So this program does NOT draw a title bar or ask for one
+// (no xdg-decoration), never asks to be moved or resized, does not need the
+// keyboard, and has exactly one way to end: the compositor's close (the
+// tile menu's "Kill"), or a signal.
+//
+// Like every Window Maker dockapp this one draws its whole 64x64 tile itself,
+// frame included (face.zig), in the look of wmaker-wl's own Dock tiles, so a
+// docked clock and the launcher tiles next to it are indistinguishable.
+//
+// Everything else is a plain xdg_shell client: no wmaker-wl code, no layer
+// shell, no toolkit. It draws into wl_shm buffers (two, in one pool, reused
+// for the life of the process), sleeps in poll(2) until the next second (or
+// minute, with --no-seconds) or until the compositor has something to say,
+// and only redraws when what is on screen would change.
+//
+// A click toggles 12/24 hours. Starting it is not its business: put
+// `wl-clock &` in ~/.config/wmaker-wl/autostart (or `AutoLaunch = Yes` on its
+// WMState entry). Without an entry the tile lives as long as the clock does.
 
 const std = @import("std");
 const posix = std.posix;
@@ -22,23 +41,19 @@ const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 const wp = wayland.client.wp;
 
-const battery = @import("battery.zig");
 const face = @import("face.zig");
 const options = @import("options.zig");
-const sysfs = @import("sysfs.zig");
-const uevent = @import("uevent.zig");
 
 const c = @cImport({
+    @cInclude("time.h");
+    @cInclude("stdlib.h");
     @cInclude("stdio.h");
     @cInclude("poll.h");
 });
 
 test {
-    _ = battery;
     _ = face;
     _ = options;
-    _ = sysfs;
-    _ = uevent;
 }
 
 /// linux/input-event-codes.h BTN_LEFT.
@@ -68,25 +83,20 @@ const State = struct {
     /// Both buffers' pixels, one after the other.
     pixels: []u32 = &.{},
 
-    /// Cached sysfs file descriptors: a read is a few pread() calls.
-    reader: sysfs.Reader = .{},
-    /// Kernel uevent socket, -1: none (then only the timer).
-    uevent_fd: c_int = -1,
-    verbose: bool = false,
-    interval_ms: i64 = 5000,
-    /// Monotonic ms of the next sysfs read; 0 = read at once.
-    next_read: i64 = 0,
-    /// Read again now (click).
-    force: bool = false,
-    bat: battery.Info = .{},
+    view: face.View = .{},
+
+    /// renderBase's picture (everything but colon and seconds bar), kept
+    /// until the minute, the mode or the label changes.
+    base: face.Pixels = undefined,
+    base_key: ?face.Clock = null,
 
     running: bool = true,
     /// The first xdg_surface.configure has arrived: only now may we attach.
     configured: bool = false,
-    /// Something other than the battery changed what must be shown.
+    /// Something other than the time changed what must be shown.
     dirty: bool = true,
     /// What the last committed frame showed.
-    shown: ?battery.Info = null,
+    shown: ?face.Clock = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -98,25 +108,29 @@ pub fn main(init: std.process.Init) !void {
             return;
         },
         else => {
-            std.debug.print("wl-battery: {t}\n\n{s}", .{ err, options.usage });
+            std.debug.print("wl-clock: {t}\n\n{s}", .{ err, options.usage });
             std.process.exit(2);
         },
     };
 
-    var state: State = .{
-        .reader = .{ .wanted = opts.battery },
-        .verbose = opts.verbose,
-        .interval_ms = @as(i64, opts.interval) * 1000,
-    };
+    if (opts.tz) |tz| {
+        _ = c.setenv("TZ", tz.ptr, 1);
+        c.tzset();
+    }
+
+    var state: State = .{ .view = .{
+        .hour12 = opts.hour12,
+        .seconds = opts.seconds,
+        .label = opts.label,
+    } };
 
     // No compositor needed: draw one frame to a file. Handy for a preview
     // and for the screenshot in the README.
     if (opts.snapshot) |path| {
         var px: face.Pixels = undefined;
-        var reader: sysfs.Reader = .{ .wanted = opts.battery };
-        face.render(&px, reader.read());
+        face.render(&px, localNow(), state.view);
         writePpm(path, &px) catch |err| {
-            std.debug.print("wl-battery: cannot write {s}: {t}\n", .{ path, err });
+            std.debug.print("wl-clock: cannot write {s}: {t}\n", .{ path, err });
             std.process.exit(1);
         };
         return;
@@ -135,7 +149,6 @@ pub fn main(init: std.process.Init) !void {
     // skip every `defer` below. The handlers only set a flag; poll() is what
     // notices (it returns EINTR), see run loop.
     installExitSignalHandlers();
-    state.uevent_fd = uevent.open();
 
     const registry = try display.getRegistry();
     registry.setListener(*State, registryListener, &state);
@@ -173,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
     const app_id = try std.fmt.allocPrintSentinel(gpa, "dockapp:{s}", .{opts.name}, 0);
     defer gpa.free(app_id);
     toplevel.setAppId(app_id.ptr);
-    toplevel.setTitle("Battery");
+    toplevel.setTitle("Clock");
     toplevel.setMinSize(face.tile, face.tile);
     toplevel.setMaxSize(face.tile, face.tile);
 
@@ -209,66 +222,42 @@ fn runLoop(display: *wl.Display, state: *State) !void {
             return error.FlushFailed;
         }
 
-        var pfds = [2]c.struct_pollfd{
-            .{
-                .fd = display.getFd(),
-                .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
-                .revents = 0,
-            },
-            .{ .fd = state.uevent_fd, .events = @intCast(c.POLLIN), .revents = 0 },
+        var pfd: c.struct_pollfd = .{
+            .fd = display.getFd(),
+            .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
+            .revents = 0,
         };
-        const nfds: c.nfds_t = if (state.uevent_fd >= 0) 2 else 1;
-        const rc = c.poll(&pfds, nfds, msUntilNextRead(state));
+        const rc = c.poll(&pfd, 1, msUntilNextFrame(state.view.seconds));
 
-        if (rc > 0 and pfds[0].revents & c.POLLIN != 0) {
+        if (rc > 0 and pfd.revents & c.POLLIN != 0) {
             if (display.readEvents() != .SUCCESS) return error.DispatchFailed;
         } else {
             display.cancelRead();
             // The compositor went away.
-            if (rc > 0 and pfds[0].revents & (c.POLLERR | c.POLLHUP) != 0) return;
-        }
-
-        // The kernel says a power supply changed: read now, not at the next tick.
-        if (rc > 0 and nfds == 2 and pfds[1].revents & c.POLLIN != 0) {
-            switch (uevent.drain(state.uevent_fd)) {
-                .none => {},
-                .change => state.force = true,
-                .topology => {
-                    state.reader.rediscover();
-                    state.force = true;
-                },
-            }
+            if (rc > 0 and pfd.revents & (c.POLLERR | c.POLLHUP) != 0) return;
         }
         if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
     }
 }
 
-fn nowMs() i64 {
+/// Milliseconds until the face next changes (a little past the boundary, so
+/// the clock has really ticked over when we wake).
+fn msUntilNextFrame(seconds: bool) c_int {
     var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts);
-    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
-}
-
-/// Without a battery nothing changes by itself (a new one announces itself
-/// by uevent), so the timer can be slow.
-const idle_ms: i64 = 60_000;
-
-/// Milliseconds until the battery is read next.
-fn msUntilNextRead(state: *const State) c_int {
-    const wait = state.next_read - nowMs();
-    return @intCast(std.math.clamp(wait, 1, @max(state.interval_ms, idle_ms)));
+    _ = linux.clock_gettime(linux.CLOCK.REALTIME, &ts);
+    const into_second_ms: i64 = @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+    const period_s: i64 = if (seconds) 1 else 60;
+    const into_period_ms = @mod(@as(i64, @intCast(ts.sec)), period_s) * 1000 + into_second_ms;
+    const wait = period_s * 1000 - into_period_ms + 5;
+    return @intCast(std.math.clamp(wait, 5, 61_000));
 }
 
 fn redrawIfNeeded(state: *State) void {
-    const t = nowMs();
-    if (state.force or t >= state.next_read) {
-        state.bat = state.reader.read();
-        state.next_read = t + (if (state.bat.present) state.interval_ms else idle_ms);
-        state.force = false;
-    }
+    const now = localNow();
+    const key = face.frameKey(now, state.view);
     if (!state.dirty) {
         if (state.shown) |s| {
-            if (std.meta.eql(s, state.bat)) return;
+            if (std.meta.eql(s, key)) return;
         }
     }
 
@@ -276,19 +265,46 @@ fn redrawIfNeeded(state: *State) void {
     // up for it) instead of drawing into memory it is still reading.
     const idx: usize = if (!state.bufs[0].busy) 0 else if (!state.bufs[1].busy) 1 else return;
 
+    // The antialiased digits are drawn once a minute; every other frame is
+    // a copy of that picture plus colon and bar.
+    const bkey = face.baseKey(now);
+    if (state.base_key == null or !std.meta.eql(state.base_key.?, bkey)) {
+        face.renderBase(&state.base, now, state.view);
+        state.base_key = bkey;
+    }
     const px = state.pixels[idx * face.pixel_count ..][0..face.pixel_count];
-    face.render(px, state.bat);
+    @memcpy(px, &state.base);
+    face.renderSeconds(px, now, state.view);
 
     state.surface.attach(state.bufs[idx].buffer, 0, 0);
     state.surface.damageBuffer(0, 0, face.tile, face.tile);
     state.surface.commit();
     state.bufs[idx].busy = true;
-    state.shown = state.bat;
+    state.shown = key;
     state.dirty = false;
-    if (state.verbose) {
-        const b = state.bat;
-        std.debug.print("wl-battery: draw present={} {d}% {t} ac={} power={any}mW time={any}min\n", .{ b.present, b.percent, b.status, b.ac, b.power_mw, b.minutes });
-    }
+}
+
+// ----------------------------------------------------------------------------
+// Time
+// ----------------------------------------------------------------------------
+
+fn field(v: c_int, max: u8) u8 {
+    return @intCast(std.math.clamp(v, 0, max));
+}
+
+/// The current local time (in $TZ / --tz).
+fn localNow() face.Clock {
+    var t: c.time_t = c.time(null);
+    var tm: c.struct_tm = undefined;
+    if (c.localtime_r(&t, &tm) == null) return .{};
+    return .{
+        .hour = field(tm.tm_hour, 23),
+        .min = field(tm.tm_min, 59),
+        .sec = field(tm.tm_sec, 59), // 60 = leap second: show 59
+        .mday = field(tm.tm_mday, 31),
+        .mon = field(tm.tm_mon, 11),
+        .wday = field(tm.tm_wday, 6),
+    };
 }
 
 // ----------------------------------------------------------------------------
@@ -300,7 +316,7 @@ fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u
     const one: usize = face.pixel_count * 4;
     const size: usize = one * 2;
 
-    const rc = linux.memfd_create("wl-battery", linux.MFD.CLOEXEC);
+    const rc = linux.memfd_create("wl-clock", linux.MFD.CLOEXEC);
     if (linux.errno(rc) != .SUCCESS) return error.MemfdCreate;
     const fd: posix.fd_t = @intCast(rc);
     defer _ = linux.close(fd);
@@ -394,7 +410,7 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, state: *St
                     return;
                 };
             } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
-                // Only the first seat: one pointer is enough.
+                // Only the first seat: a clock has one pointer to care about.
                 if (state.seat == null) {
                     state.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
                         std.log.err("bind wl_seat: {t}", .{err});
@@ -403,7 +419,7 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, state: *St
                 }
             } else if (eql(u8, name, std.mem.span(wp.CursorShapeManagerV1.interface.name))) {
                 // Optional. Without it the compositor keeps whatever cursor
-                // it had, which is acceptable here.
+                // it had, which is acceptable for a clock.
                 state.cursor_manager = registry.bind(g.name, wp.CursorShapeManagerV1, 1) catch null;
             }
         },
@@ -466,7 +482,9 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, state: *State) void 
         .enter => |e| if (state.cursor_device) |dev| dev.setShape(e.serial, .default),
         .button => |b| {
             if (b.state == .pressed and b.button == btn_left) {
-                state.force = true;
+                state.view.hour12 = !state.view.hour12;
+                state.base_key = null; // the base picture shows the mode
+                state.dirty = true;
             }
         },
         else => {},

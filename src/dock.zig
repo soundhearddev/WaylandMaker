@@ -55,6 +55,9 @@ pub var icon_size: i32 = 48;
 pub fn setSize(size: i32) void {
     tile = size;
     icon_size = @divTrunc(size * 3, 4);
+    // The Dock grid in wm_dock.zig must use the same cell size as the drawing.
+    wdock.icon_size = size;
+    std.log.info("dock: tile size {d} px (icon {d} px)", .{ tile, icon_size });
 }
 /// Edge length of the workspace arrow buttons in the Clip's corners.
 pub const arrow: i32 = 16;
