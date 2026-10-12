@@ -1,0 +1,19 @@
+.{
+    .name = .wl_battery,
+    .version = "1.0.0",
+    .fingerprint = 0x8c0c4e9d5b1d3a77,
+    .minimum_zig_version = "0.16.0",
+
+    .dependencies = .{
+        .wayland = .{
+            .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.6.0.tar.gz",
+            .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
