@@ -8,7 +8,7 @@
 // File: $XDG_CONFIG_HOME/wmaker-wl/config.lua
 //       (falls back to ~/.config/wmaker-wl/config.lua)
 //
-// Format: a plain Lua script (Lua 5.3 / 5.4, see lua.zig). Options are
+// Format: a plain Lua script (Lua 5.4, built in through ziglua, see lua.zig). Options are
 // global variables, key bindings and other files are function calls:
 //
 //     gap = 10
@@ -461,13 +461,13 @@ pub fn parseWith(
 }
 
 /// Chunk name for messages: "@file" shows as "file:LINE:", "=<name>" as is.
-fn chunkName(ctx: *Ctx, origin: []const u8) ?[*:0]const u8 {
+fn chunkName(ctx: *Ctx, origin: []const u8) ?[:0]const u8 {
     const prefix: u8 = if (origin.len > 0 and origin[0] == '<') '=' else '@';
     const name = std.fmt.allocPrintSentinel(ctx.a, "{c}{s}", .{ prefix, origin }, 0) catch {
         ctx.oom = true;
         return null;
     };
-    return name.ptr;
+    return name;
 }
 
 /// The error message on top of the Lua stack becomes a warning.
@@ -542,7 +542,7 @@ fn copyThemeEntry(ctx: *Ctx, origin: []const u8) void {
 // problem is a warning with the script's file and line, and the call is a
 // no-op.
 
-fn cBind(L: *lua.State) callconv(.c) c_int {
+fn cBind(L: *lua.State) i32 {
     const ctx = active orelse return 0;
     const combo = lua.toSlice(L, 1);
     const command = lua.toSlice(L, 2);
@@ -557,7 +557,7 @@ fn cBind(L: *lua.State) callconv(.c) c_int {
     return 0;
 }
 
-fn cUnbind(L: *lua.State) callconv(.c) c_int {
+fn cUnbind(L: *lua.State) i32 {
     const ctx = active orelse return 0;
     const combo = lua.toSlice(L, 1) orelse {
         ctx.warnAt("unbind() takes one string: unbind(\"Super+q\")", .{});
@@ -567,7 +567,7 @@ fn cUnbind(L: *lua.State) callconv(.c) c_int {
     return 0;
 }
 
-fn cInclude(L: *lua.State) callconv(.c) c_int {
+fn cInclude(L: *lua.State) i32 {
     const ctx = active orelse return 0;
     const value = lua.toSlice(L, 1) orelse {
         ctx.warnAt("include() takes a file name: include(\"local.lua\")", .{});
@@ -577,7 +577,7 @@ fn cInclude(L: *lua.State) callconv(.c) c_int {
     return 0;
 }
 
-fn cTheme(L: *lua.State) callconv(.c) c_int {
+fn cTheme(L: *lua.State) i32 {
     const ctx = active orelse return 0;
     const value = lua.toSlice(L, 1) orelse {
         ctx.warnAt("theme() takes a theme name: theme(\"nord\")", .{});

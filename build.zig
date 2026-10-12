@@ -1,6 +1,34 @@
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
 
+/// The system libraries every wmaker-wl / wlprefs module draws with, and the
+/// include directories their headers (and wm_text.h) are found in.
+fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
+    const libs = [_][]const u8{
+        "wayland-client",
+        "xkbcommon",
+        "cairo",
+        "pango-1.0",
+        "pangocairo-1.0",
+        "gobject-2.0",
+        "glib-2.0",
+    };
+    for (libs) |name| module.linkSystemLibrary(name, .{});
+
+    module.addIncludePath(src_dir);
+
+    // Fallback include paths for systems where pkg-config does not already
+    // provide them (harmless where it does, e.g. on Guix).
+    const includes = [_][]const u8{
+        "/usr/include/glib-2.0",
+        "/usr/lib/glib-2.0/include",
+        "/usr/include/cairo",
+        "/usr/include/pango-1.0",
+        "/usr/include/harfbuzz",
+    };
+    for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
+}
+
 /// Build wlprefs as part of another Build.
 ///
 /// `prefix` is empty when this build.zig is used standalone,
@@ -72,43 +100,6 @@ pub fn buildWlprefs(
     const xkbcommon_module =
         b.dependency("xkbcommon", .{}).module("xkbcommon");
 
-    // ---- helper: link graphics libs -------------------------------------
-
-    const fn_link_graphics = struct {
-        fn call(
-            bld: *std.Build,
-            module: *std.Build.Module,
-        ) void {
-            module.linkSystemLibrary("wayland-client", .{});
-            module.linkSystemLibrary("xkbcommon", .{});
-            module.linkSystemLibrary("cairo", .{});
-            module.linkSystemLibrary("pango-1.0", .{});
-            module.linkSystemLibrary("pangocairo-1.0", .{});
-            module.linkSystemLibrary("gobject-2.0", .{});
-            module.linkSystemLibrary("glib-2.0", .{});
-
-            module.addIncludePath(
-                projectPath(bld, "src"),
-            );
-
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/glib-2.0",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/lib/glib-2.0/include",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/cairo",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/pango-1.0",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/harfbuzz",
-            });
-        }
-    }.call;
-
     // ---- library module -------------------------------------------------
 
     const mod = b.addModule("wlprefs", .{
@@ -118,15 +109,8 @@ pub fn buildWlprefs(
         .link_libc = true,
     });
 
-    mod.addImport(
-        "wayland",
-        wayland_module,
-    );
-
-    mod.addImport(
-        "xkbcommon",
-        xkbcommon_module,
-    );
+    mod.addImport("wayland", wayland_module);
+    mod.addImport("xkbcommon", xkbcommon_module);
 
     // wmaker-wl's own default config. wlprefs takes its defaults from it,
     // so "differs from the default" means the same in both programs.
@@ -134,7 +118,7 @@ pub fn buildWlprefs(
         .root_source_file = b.path("src/share/default_config.lua"),
     });
 
-    fn_link_graphics(b, mod);
+    linkGraphics(mod, projectPath(b, "src"));
 
     mod.addCSourceFile(.{
         .file = projectPath(b, "src/wm_text.c"),
@@ -149,22 +133,13 @@ pub fn buildWlprefs(
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{
-                .name = "wlprefs",
-                .module = mod,
-            },
-            .{
-                .name = "wayland",
-                .module = wayland_module,
-            },
-            .{
-                .name = "xkbcommon",
-                .module = xkbcommon_module,
-            },
+            .{ .name = "wlprefs", .module = mod },
+            .{ .name = "wayland", .module = wayland_module },
+            .{ .name = "xkbcommon", .module = xkbcommon_module },
         },
     });
 
-    fn_link_graphics(b, exe_module);
+    linkGraphics(exe_module, projectPath(b, "src"));
 
     const exe = b.addExecutable(.{
         .name = "wlprefs",
@@ -188,7 +163,12 @@ pub fn buildWlprefs(
         .optimize = optimize,
     });
 
-    return .{ .exe = exe, .mod = mod, .settings = settings_mod, .actions = actions_mod };
+    return .{
+        .exe = exe,
+        .mod = mod,
+        .settings = settings_mod,
+        .actions = actions_mod,
+    };
 }
 
 // -------------------------------------------------------------------------
@@ -209,26 +189,16 @@ pub fn build(b: *std.Build) void {
 
     const scanner = Scanner.create(b, .{});
 
-    scanner.addCustomProtocol(
-        b.path("protocol/river-window-management-v1.xml"),
-    );
-    scanner.addCustomProtocol(
-        b.path("protocol/river-xkb-bindings-v1.xml"),
-    );
-    scanner.addCustomProtocol(
-        b.path("protocol/river-layer-shell-v1.xml"),
-    );
+    scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
+    scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
+    scanner.addCustomProtocol(b.path("protocol/river-layer-shell-v1.xml"));
 
-    scanner.addSystemProtocol(
-        "staging/cursor-shape/cursor-shape-v1.xml",
-    );
+    scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
 
     // wp_cursor_shape_manager_v1.get_tablet_tool_v2 references
     // zwp_tablet_tool_v2; the scanner needs its definition even though
     // we only use get_pointer.
-    scanner.addSystemProtocol(
-        "stable/tablet/tablet-v2.xml",
-    );
+    scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
@@ -252,40 +222,18 @@ pub fn build(b: *std.Build) void {
     const xkbcommon_module =
         b.dependency("xkbcommon", .{}).module("xkbcommon");
 
-    // ---- helper: link graphics libs -------------------------------------
+    // ---- Lua (ziglua 0.7.0, Zig 0.16) -----------------------------------
+    //
+    // Lua 5.4 is compiled from source and linked in statically: no system
+    // Lua needed. The config (src/config.zig) is a Lua script, src/lua.zig
+    // is the thin layer on top of the `zlua` module.
 
-    const fn_link_graphics = struct {
-        fn call(
-            bld: *std.Build,
-            module: *std.Build.Module,
-        ) void {
-            module.linkSystemLibrary("wayland-client", .{});
-            module.linkSystemLibrary("xkbcommon", .{});
-            module.linkSystemLibrary("cairo", .{});
-            module.linkSystemLibrary("pango-1.0", .{});
-            module.linkSystemLibrary("pangocairo-1.0", .{});
-            module.linkSystemLibrary("gobject-2.0", .{});
-            module.linkSystemLibrary("glib-2.0", .{});
-
-            module.addIncludePath(bld.path("src"));
-
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/glib-2.0",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/lib/glib-2.0/include",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/cairo",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/pango-1.0",
-            });
-            module.addIncludePath(.{
-                .cwd_relative = "/usr/include/harfbuzz",
-            });
-        }
-    }.call;
+    const zlua_dep = b.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+        .lang = .lua54,
+    });
+    const zlua_module = zlua_dep.module("zlua");
 
     // ---- wmaker-wl root module ------------------------------------------
 
@@ -298,29 +246,31 @@ pub fn build(b: *std.Build) void {
 
     root_module.addImport("wayland", wayland_module);
     root_module.addImport("xkbcommon", xkbcommon_module);
+    root_module.addImport("zlua", zlua_module);
 
-    fn_link_graphics(b, root_module);
+    linkGraphics(root_module, b.path("src"));
 
     root_module.addCSourceFile(.{
         .file = b.path("src/wm_text.c"),
         .flags = &.{},
     });
 
-    // ---- imports available to wmaker-wl executable ----------------------
+    // ---- imports available to the wmaker-wl executable and its tests ----
+    //
+    // zlua must be listed here too: main.zig (and anything it imports by
+    // file path, such as src/lua.zig) is compiled as its own module and
+    // only sees the imports declared for it.
+    //
+    // NOTE: a source file may belong to only ONE module. If src/lua.zig is
+    // imported both from main.zig and from root.zig, Zig reports "file
+    // exists in multiple modules". In that case import it only via
+    // root.zig and use it from main.zig through @import("wmaker").
 
     const imports: []const std.Build.Module.Import = &.{
-        .{
-            .name = "wmaker",
-            .module = root_module,
-        },
-        .{
-            .name = "wayland",
-            .module = wayland_module,
-        },
-        .{
-            .name = "xkbcommon",
-            .module = xkbcommon_module,
-        },
+        .{ .name = "wmaker", .module = root_module },
+        .{ .name = "wayland", .module = wayland_module },
+        .{ .name = "xkbcommon", .module = xkbcommon_module },
+        .{ .name = "zlua", .module = zlua_module },
     };
 
     // ---- wmaker-wl executable -------------------------------------------
@@ -333,7 +283,7 @@ pub fn build(b: *std.Build) void {
         .imports = imports,
     });
 
-    fn_link_graphics(b, exe_module);
+    linkGraphics(exe_module, b.path("src"));
 
     const exe = b.addExecutable(.{
         .name = "wmaker-wl",
@@ -405,7 +355,7 @@ pub fn build(b: *std.Build) void {
         .imports = imports,
     });
 
-    fn_link_graphics(b, test_module);
+    linkGraphics(test_module, b.path("src"));
     test_module.addImport("wlprefs_settings", wlprefs.settings);
     test_module.addImport("wlprefs_actions", wlprefs.actions);
 

@@ -5,17 +5,20 @@
     .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
+        // Wayland protocol bindings (scanner + client library wrappers).
         .wayland = .{
             .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.6.0.tar.gz",
             .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
         },
+        // xkbcommon bindings: key names and keysyms for the key bindings.
         .xkbcommon = .{
             .url = "https://codeberg.org/ifreund/zig-xkbcommon/archive/v0.4.0.tar.gz",
             .hash = "xkbcommon-0.4.0-VDqIe0i2AgDRsok2GpMFYJ8SVhQS10_PI2M_CnHXsJJZ",
         },
+        // Lua for the config
         .zlua = .{
-            .url = "git+https://github.com/natecraddock/ziglua#8b2c14e0f9f89a9407dd7dd91752c7d8fd03cb62",
-            .hash = "zlua-0.1.0-hGRpC8yYBQAtI5hy60lb1vK9Tc7s-Ouu0aMFe2Kdc3_s",
+            .url = "git+https://github.com/natecraddock/ziglua?ref=0.7.0#9ae39fa50b1ab8427d35f963216116d7bff1e584",
+            .hash = "zlua-0.1.0-hGRpC1mUBQCNQf4CnmRTM4I7gxE3YpCvZ-p2EarlcyER",
         },
     },
 
@@ -24,5 +27,7 @@
         "build.zig.zon",
         "src",
         "protocol",
+        "wlprefs",
+        "examples",
     },
 }
