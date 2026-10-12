@@ -367,9 +367,34 @@ pub fn isPm(hour: u8) bool {
 /// Longest label that is shown (it must not run into the AM/PM text).
 pub const max_label = 8;
 
-pub fn render(px: *Pixels, raw: Clock, view: View) void {
-    // Whatever the caller computed, never index a table out of range.
-    const clk: Clock = .{
+/// Tile and empty LCD: the same for every frame, so it is painted once
+/// (4096 float blends) and then only copied (one memcpy).
+var bg: Pixels = undefined;
+var bg_ready = false;
+
+fn background() *const Pixels {
+    if (!bg_ready) {
+        const px = &bg;
+        // Diagonal gradient and the two-step bevel of dock.zig's tiles.
+        for (0..side) |yy| {
+            for (0..side) |xx| {
+                const t = @as(f32, @floatFromInt(xx + yy)) / (2.0 * (side - 1));
+                px[yy * side + xx] = mix(col_tile_from, col_tile_to, t);
+            }
+        }
+        bevel(px, 0, 0, tile, tile, col_light, col_dark);
+        bevel(px, 1, 1, tile - 2, tile - 2, col_light, col_dark);
+        // The recessed LCD: inverted bevel around it, dark glass inside.
+        bevel(px, lcd_x - 1, lcd_y - 1, lcd_w + 2, lcd_h + 2, col_dark, col_light);
+        fillRect(px, lcd_x, lcd_y, lcd_w, lcd_h, col_lcd);
+        bg_ready = true;
+    }
+    return &bg;
+}
+
+/// Whatever the caller computed, never index a table out of range.
+fn sanitize(raw: Clock) Clock {
+    return .{
         .hour = @min(raw.hour, 23),
         .min = @min(raw.min, 59),
         .sec = @min(raw.sec, 59),
@@ -377,35 +402,30 @@ pub fn render(px: *Pixels, raw: Clock, view: View) void {
         .mon = raw.mon % 12,
         .wday = raw.wday % 7,
     };
+}
 
-    // Tile: diagonal gradient and the two-step bevel of dock.zig's tiles.
-    for (0..side) |yy| {
-        for (0..side) |xx| {
-            const t = @as(f32, @floatFromInt(xx + yy)) / (2.0 * (side - 1));
-            px[yy * side + xx] = mix(col_tile_from, col_tile_to, t);
-        }
-    }
-    bevel(px, 0, 0, tile, tile, col_light, col_dark);
-    bevel(px, 1, 1, tile - 2, tile - 2, col_light, col_dark);
+const digits_x: i32 = lcd_x + 2;
 
-    // The recessed LCD: inverted bevel around it, dark glass inside.
-    bevel(px, lcd_x - 1, lcd_y - 1, lcd_w + 2, lcd_h + 2, col_dark, col_light);
-    fillRect(px, lcd_x, lcd_y, lcd_w, lcd_h, col_lcd);
+/// Everything that changes at most once a minute: tile, date, HH MM digits,
+/// month / label, AM/PM. The expensive part (antialiased segments), so the
+/// caller keeps the result and only redoes it when `baseKey` changes.
+pub fn renderBase(px: *Pixels, raw: Clock, view: View) void {
+    const clk = sanitize(raw);
+    px.* = background().*;
 
     // Weekday and day of the month, large.
     var date_buf: [8]u8 = undefined;
     const date = std.fmt.bufPrint(&date_buf, "{s} {d:0>2}", .{ weekdays[clk.wday], clk.mday }) catch "";
     drawText(px, lcd_x + @divTrunc(lcd_w - textWidth(date, 2), 2), date_y, 2, date, col_text);
 
-    // HH:MM. Layout: d d : d d, 9 px digits, 2 px gaps, a 4 px colon.
+    // HH MM. Layout: d d : d d, 9 px digits, 2 px gaps, a 4 px colon
+    // (the colon is renderSeconds' business).
     const shown = displayHour(clk.hour, view.hour12);
-    const x0: i32 = lcd_x + 2;
     const tens: ?u8 = if (view.hour12 and shown < 10) null else shown / 10;
-    drawDigit(px, x0, digits_y, tens);
-    drawDigit(px, x0 + 11, digits_y, shown % 10);
-    drawColon(px, x0 + 22, digits_y, !view.seconds or clk.sec % 2 == 0);
-    drawDigit(px, x0 + 28, digits_y, clk.min / 10);
-    drawDigit(px, x0 + 39, digits_y, clk.min % 10);
+    drawDigit(px, digits_x, digits_y, tens);
+    drawDigit(px, digits_x + 11, digits_y, shown % 10);
+    drawDigit(px, digits_x + 28, digits_y, clk.min / 10);
+    drawDigit(px, digits_x + 39, digits_y, clk.min % 10);
 
     // Month (or label) on the left, AM/PM on the right.
     var label_buf: [max_label]u8 = undefined;
@@ -420,6 +440,13 @@ pub fn render(px: *Pixels, raw: Clock, view: View) void {
         const ampm: []const u8 = if (isPm(clk.hour)) "PM" else "AM";
         drawText(px, bar_x + bar_w - textWidth(ampm, 1), info_y, 1, ampm, col_text);
     }
+}
+
+/// What changes every second: the colon and the seconds bar. Draws on top of
+/// a copy of renderBase's result, a few rectangles, no antialiasing.
+pub fn renderSeconds(px: *Pixels, raw: Clock, view: View) void {
+    const clk = sanitize(raw);
+    drawColon(px, digits_x + 22, digits_y, !view.seconds or clk.sec % 2 == 0);
 
     // Seconds: a bar that fills over the minute.
     if (view.seconds) {
@@ -427,6 +454,20 @@ pub fn render(px: *Pixels, raw: Clock, view: View) void {
         const filled: i32 = @divTrunc(bar_w * (@as(i32, clk.sec) + 1) + 59, 60); // rounded up: never empty
         fillRect(px, bar_x, bar_y, filled, bar_h, col_lit);
     }
+}
+
+/// A whole frame in one go (--snapshot, tests).
+pub fn render(px: *Pixels, raw: Clock, view: View) void {
+    renderBase(px, raw, view);
+    renderSeconds(px, raw, view);
+}
+
+/// What renderBase depends on besides the view: the time without seconds.
+/// While it stays the same, the base picture can be reused.
+pub fn baseKey(raw: Clock) Clock {
+    var k = sanitize(raw);
+    k.sec = 0;
+    return k;
 }
 
 /// The part of the clock that changes what is drawn: with the seconds off,
@@ -596,4 +637,33 @@ test "glyphs: letters and digits all have some pixels, unknown is blank" {
     for (glyph(0xff)) |row| try std.testing.expectEqual(@as(u3, 0), row);
     // Lower case maps onto upper case.
     try std.testing.expectEqual(glyph('A'), glyph('a'));
+}
+
+test "renderBase once + renderSeconds per second equals a full render" {
+    var base: Pixels = undefined;
+    var px: Pixels = undefined;
+    var full: Pixels = undefined;
+    const t0: Clock = .{ .hour = 7, .min = 41, .sec = 3, .mday = 9, .mon = 2, .wday = 4 };
+    const views = [_]View{ .{}, .{ .hour12 = true, .label = "x" }, .{ .seconds = false } };
+    for (views) |v| {
+        renderBase(&base, t0, v);
+        var s: u8 = 0;
+        while (s < 60) : (s += 7) {
+            var t = t0;
+            t.sec = s;
+            px = base;
+            renderSeconds(&px, t, v);
+            render(&full, t, v);
+            try std.testing.expect(std.mem.eql(u32, &px, &full));
+        }
+    }
+}
+
+test "baseKey ignores the second and sanitizes" {
+    const a: Clock = .{ .hour = 1, .min = 2, .sec = 5 };
+    const b: Clock = .{ .hour = 1, .min = 2, .sec = 6 };
+    const c: Clock = .{ .hour = 1, .min = 3, .sec = 5 };
+    try std.testing.expect(std.meta.eql(baseKey(a), baseKey(b)));
+    try std.testing.expect(!std.meta.eql(baseKey(a), baseKey(c)));
+    try std.testing.expectEqual(@as(u8, 23), baseKey(.{ .hour = 255 }).hour);
 }

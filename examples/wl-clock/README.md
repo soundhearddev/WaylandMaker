@@ -18,6 +18,14 @@ Kein Code aus wmaker-wl, kein Toolkit, kein Layer-Shell: ein gewöhnlicher `xdg_
 `wl_shm`-Buffer zeichnet. Er schläft in `poll(2)` bis zur nächsten Sekunde (bzw. Minute) und zeichnet
 nur, wenn sich etwas ändert; es gibt genau einen Buffer-Pool mit zwei Buffern für die ganze Laufzeit.
 
+## Performance
+
+- Schläft in `poll(2)` bis zur nächsten Sekunde (mit `--no-seconds` bis zur nächsten Minute); null Wakeups dazwischen.
+- Die aufwendigen antialiasierten Segmente werden nur einmal pro Minute gezeichnet. Jeder Sekunden-Frame ist
+  eine Kopie dieses Bildes (16 KB `memcpy`) plus Doppelpunkt und Balken: ein paar Rechtecke.
+- Kachel und LCD werden einmal beim ersten Frame gebaut und danach nur kopiert.
+- Single-threaded, im Release gestrippt. Am kleinsten/schnellsten: `zig build -Doptimize=ReleaseSmall`.
+
 ## Bauen
 
 Braucht Zig **0.16.0**, `libwayland-dev` und `wayland-protocols`.
@@ -117,7 +125,7 @@ wl-clock/
 ├── build.zig              # Bauen, Testen, Protokoll-Bindings
 ├── build.zig.zon          # Paket-Metadaten, zig-wayland
 ├── src/main.zig           # Wayland-Client, Ereignisschleife
-├── src/face.zig           # Kachel zeichnen (rein, getestet)
+├── src/face.zig           # Kachel zeichnen: renderBase (pro Minute) + renderSeconds (pro Sekunde)
 ├── src/options.zig        # Kommandozeile (rein, getestet)
 └── README.md
 ```

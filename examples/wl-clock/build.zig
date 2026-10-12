@@ -35,6 +35,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true, // localtime_r, poll, setenv
+        .single_threaded = true,
+        .strip = optimize != .Debug,
     });
     exe_module.addImport("wayland", wayland_module);
     exe_module.linkSystemLibrary("wayland-client", .{});

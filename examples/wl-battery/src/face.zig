@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: 0BSD
 //
-// The clock's face: one 64x64 ARGB tile, drawn by hand into a pixel array.
+// The battery face: one 64x64 ARGB tile, drawn by hand into a pixel array.
 // No Wayland and no libc in here, so all of it is unit-testable.
 //
-// The look is the one of wmaker-wl's own Dock tiles (src/dock.zig): a light
-// bevelled tile with a diagonal gradient. Window Maker dockapps draw their
-// whole 64x64 tile themselves, frame included, so that is what this does --
-// then, docked, the clock simply replaces the tile that was drawn under it
-// and nobody can tell the two apart. In the middle sits a recessed LCD with
-// the weekday and day, HH:MM in seven segments, the month (or --label), AM/PM
-// in 12-hour mode, and a bar that fills up second by second.
+// Same look as wl-clock / wmaker-wl's Dock tiles: bevelled tile, recessed LCD.
 //
 //     +------------------+
 //     |  .------------.  |
-//     |  |  FRI 02    |  |
-//     |  |  18:42     |  |
-//     |  |  OCT       |  |
-//     |  |  ######    |  |
+//     |  | ⚡ 🔌   12W |  |   status icon, plug (AC), power
+//     |  |   8 7 8 %  |  |   percent, seven segments
+//     |  | ◷ 1:23     |  |   clock icon, time to empty / full
+//     |  | ######---- |  |   10-segment bar
 //     |  '------------'  |
 //     +------------------+
+//
+// Status is a symbol, not a word: bolt = charging, arrow down = discharging,
+// check = full, pause = not charging, ? = unknown, cross = no battery.
 
 const std = @import("std");
+const battery = @import("battery.zig");
 
 /// Window Maker's classic dock tile.
 pub const side = 64;
@@ -29,24 +27,7 @@ pub const pixel_count = side * side;
 
 pub const Pixels = [pixel_count]u32;
 
-/// Broken-down local time, the part the face needs.
-pub const Clock = struct {
-    hour: u8 = 0, // 0..23
-    min: u8 = 0, // 0..59
-    sec: u8 = 0, // 0..59
-    mday: u8 = 1, // 1..31
-    mon: u8 = 0, // 0..11
-    wday: u8 = 0, // 0 = Sunday .. 6
-};
-
-pub const View = struct {
-    hour12: bool = false,
-    /// Seconds bar and blinking colon. Off: the face only changes once a
-    /// minute, so the clock costs nothing between minutes.
-    seconds: bool = true,
-    /// Shown instead of the month name.
-    label: ?[]const u8 = null,
-};
+pub const Info = battery.Info;
 
 // ----------------------------------------------------------------------------
 // Palette. The tile colours are dock.zig's (col_tile_from/to, bevel); the LCD
@@ -61,6 +42,8 @@ const col_lcd: u32 = 0xff0d1a12;
 const col_lit: u32 = 0xff62f08a;
 const col_ghost: u32 = 0xff15301f;
 const col_text: u32 = 0xff49c46d;
+const col_amber: u32 = 0xfff0c05a;
+const col_red: u32 = 0xfff0605a;
 
 // Where things are (all in tile pixels).
 const lcd_x = 6;
@@ -68,15 +51,21 @@ const lcd_y = 6;
 const lcd_w = 52;
 const lcd_h = 52;
 
-const date_y = 9;
-const digits_y = 22;
+const text_x = 8;
+const text_right = 56;
+const row_a_y = 8; // status icon, plug, power (icons up to 10 px, text scale 2)
+const plug_x = 19;
+const digits_y = 20;
 const digit_w = 9;
 const digit_h = 20;
-const info_y = 46;
-const bar_x = 9;
+const digits_x = 12; // hundreds, tens, ones: 9 px wide, 2 px gaps; then the % sign
+const row_c_y = 42; // clock icon, time (scale 2)
+const bar_x = 7;
 const bar_y = 53;
-const bar_w = 46;
-const bar_h = 3;
+const seg_n = 10;
+const seg_w = 4;
+const seg_gap = 1;
+const bar_h = 4;
 
 // ----------------------------------------------------------------------------
 // Pixel helpers
@@ -236,7 +225,7 @@ fn vSeg(px: *Pixels, xc: f32, y0: f32, y1: f32, color: u32) void {
 
 /// One digit cell at (x, y), digit_w x digit_h. Unlit segments are drawn
 /// faintly ("ghost" segments), like on a real LCD. `value` null: all ghost.
-fn drawDigit(px: *Pixels, x: i32, y: i32, value: ?u8) void {
+fn drawDigit(px: *Pixels, x: i32, y: i32, value: ?u8, lit: u32) void {
     const lit_mask: u8 = if (value) |v| digit_segments[v] else 0;
     const fx: f32 = @floatFromInt(x);
     const fy: f32 = @floatFromInt(y);
@@ -248,7 +237,7 @@ fn drawDigit(px: *Pixels, x: i32, y: i32, value: ?u8) void {
 
     const all = [_]u8{ seg_a, seg_b, seg_c, seg_d, seg_e, seg_f, seg_g };
     for (all) |seg| {
-        const color = if (lit_mask & seg != 0) col_lit else col_ghost;
+        const color = if (lit_mask & seg != 0) lit else col_ghost;
         switch (seg) {
             seg_a => hSeg(px, xl + gap, xr - gap, yt, color),
             seg_g => hSeg(px, xl + gap, xr - gap, ym, color),
@@ -260,12 +249,6 @@ fn drawDigit(px: *Pixels, x: i32, y: i32, value: ?u8) void {
             else => unreachable,
         }
     }
-}
-
-fn drawColon(px: *Pixels, x: i32, y: i32, lit: bool) void {
-    const color = if (lit) col_lit else col_ghost;
-    fillRect(px, x + 1, y + 5, 2, 2, color);
-    fillRect(px, x + 1, y + 13, 2, 2, color);
 }
 
 // ----------------------------------------------------------------------------
@@ -319,6 +302,7 @@ fn glyph(ch: u8) [5]u3 {
         ':' => g(0b000, 0b010, 0b000, 0b010, 0b000),
         '/' => g(0b001, 0b001, 0b010, 0b100, 0b100),
         '_' => g(0b000, 0b000, 0b000, 0b000, 0b111),
+        '%' => g(0b101, 0b001, 0b010, 0b100, 0b101),
         else => g(0, 0, 0, 0, 0), // space and anything else: blank
     };
 }
@@ -350,22 +334,45 @@ fn drawText(px: *Pixels, x: i32, y: i32, scale: i32, s: []const u8, color: u32) 
 // The face
 // ----------------------------------------------------------------------------
 
-const weekdays = [7][]const u8{ "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
-const months = [12][]const u8{ "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+// ----------------------------------------------------------------------------
+// Icons: '#' is a lit pixel. All rows of an icon have the same width.
+// ----------------------------------------------------------------------------
 
-/// Hour as shown: 0..23, or 1..12 in 12-hour mode.
-pub fn displayHour(hour: u8, hour12: bool) u8 {
-    if (!hour12) return hour;
-    const h = hour % 12;
-    return if (h == 0) 12 else h;
+const Icon = []const []const u8;
+
+const icon_bolt: Icon = &.{ "....###", "...###.", "..###..", ".######", "######.", "..###..", ".###...", "##....." };
+const icon_arrow: Icon = &.{ "..###..", "..###..", "..###..", "..###..", "#######", ".#####.", "..###..", "...#..." };
+const icon_check: Icon = &.{ "........#", ".......##", "#.....##.", "##...##..", ".##.##...", "..###....", "...#....." };
+const icon_pause: Icon = &.{ "###.###", "###.###", "###.###", "###.###", "###.###", "###.###", "###.###", "###.###" };
+const icon_unknown: Icon = &.{ ".###.", "#...#", "....#", "...#.", "..#..", "..#..", ".....", "..#.." };
+const icon_cross: Icon = &.{ "#.....#", ".#...#.", "..#.#..", "...#...", "..#.#..", ".#...#.", "#.....#" };
+const icon_plug: Icon = &.{ ".#...#.", ".#...#.", "#######", "#######", "#######", ".#####.", "..###..", "...#...", "...#...", "...#..." };
+const icon_clock: Icon = &.{ "..#####..", ".#.....#.", "#...#...#", "#...#...#", "#...###.#", "#.......#", ".#.....#.", "..#####.." };
+
+fn drawIcon(px: *Pixels, x: i32, y: i32, icon: Icon, color: u32) void {
+    for (icon, 0..) |row, ry| {
+        for (row, 0..) |ch, rx| {
+            if (ch == '#') put(px, x + @as(i32, @intCast(rx)), y + @as(i32, @intCast(ry)), color);
+        }
+    }
 }
 
-pub fn isPm(hour: u8) bool {
-    return hour >= 12;
+/// Digits and bar: green normally, amber <= 20 %, red <= 10 % (not while
+/// charging or full).
+fn levelColor(info: Info) u32 {
+    if (!info.present) return col_lit;
+    if (info.status == .charging or info.status == .full) return col_lit;
+    if (info.percent <= 10) return col_red;
+    if (info.percent <= 20) return col_amber;
+    return col_lit;
 }
 
-/// Longest label that is shown (it must not run into the AM/PM text).
-pub const max_label = 8;
+/// "9.5W" below 10 W, "12W" from there on.
+fn fmtPower(buf: []u8, mw: u32) []const u8 {
+    const tenths = (mw + 50) / 100;
+    if (tenths < 100) return std.fmt.bufPrint(buf, "{d}.{d}W", .{ tenths / 10, tenths % 10 }) catch "";
+    return std.fmt.bufPrint(buf, "{d}W", .{(mw + 500) / 1000}) catch "";
+}
 
 /// Tile and empty LCD: the same for every frame, so it is painted once
 /// (4096 float blends) and then only copied (one memcpy).
@@ -384,7 +391,7 @@ fn background() *const Pixels {
         }
         bevel(px, 0, 0, tile, tile, col_light, col_dark);
         bevel(px, 1, 1, tile - 2, tile - 2, col_light, col_dark);
-        // The recessed LCD: inverted bevel around it, dark glass inside.
+        // The recessed LCD.
         bevel(px, lcd_x - 1, lcd_y - 1, lcd_w + 2, lcd_h + 2, col_dark, col_light);
         fillRect(px, lcd_x, lcd_y, lcd_w, lcd_h, col_lcd);
         bg_ready = true;
@@ -392,118 +399,68 @@ fn background() *const Pixels {
     return &bg;
 }
 
-/// Whatever the caller computed, never index a table out of range.
-fn sanitize(raw: Clock) Clock {
-    return .{
-        .hour = @min(raw.hour, 23),
-        .min = @min(raw.min, 59),
-        .sec = @min(raw.sec, 59),
-        .mday = std.math.clamp(raw.mday, 1, 31),
-        .mon = raw.mon % 12,
-        .wday = raw.wday % 7,
-    };
-}
+pub fn render(px: *Pixels, info: Info) void {
+    const pct: u8 = if (info.present) @min(info.percent, 100) else 0;
+    const lit = levelColor(info);
 
-const digits_x: i32 = lcd_x + 2;
+    px.* = background().*; // tile + LCD, built once
 
-/// Everything that changes at most once a minute: tile, date, HH MM digits,
-/// month / label, AM/PM. The expensive part (antialiased segments), so the
-/// caller keeps the result and only redoes it when `baseKey` changes.
-pub fn renderBase(px: *Pixels, raw: Clock, view: View) void {
-    const clk = sanitize(raw);
-    px.* = background().*;
-
-    // Weekday and day of the month, large.
-    var date_buf: [8]u8 = undefined;
-    const date = std.fmt.bufPrint(&date_buf, "{s} {d:0>2}", .{ weekdays[clk.wday], clk.mday }) catch "";
-    drawText(px, lcd_x + @divTrunc(lcd_w - textWidth(date, 2), 2), date_y, 2, date, col_text);
-
-    // HH MM. Layout: d d : d d, 9 px digits, 2 px gaps, a 4 px colon
-    // (the colon is renderSeconds' business).
-    const shown = displayHour(clk.hour, view.hour12);
-    const tens: ?u8 = if (view.hour12 and shown < 10) null else shown / 10;
-    drawDigit(px, digits_x, digits_y, tens);
-    drawDigit(px, digits_x + 11, digits_y, shown % 10);
-    drawDigit(px, digits_x + 28, digits_y, clk.min / 10);
-    drawDigit(px, digits_x + 39, digits_y, clk.min % 10);
-
-    // Month (or label) on the left, AM/PM on the right.
-    var label_buf: [max_label]u8 = undefined;
-    var info: []const u8 = months[clk.mon];
-    if (view.label) |l| {
-        const n = @min(l.len, max_label);
-        for (l[0..n], 0..) |ch, i| label_buf[i] = std.ascii.toUpper(ch);
-        info = label_buf[0..n];
+    // Row A: status symbol, plug when on AC, power.
+    if (!info.present) {
+        drawIcon(px, text_x, row_a_y, icon_cross, col_red);
+    } else switch (info.status) {
+        .charging => drawIcon(px, text_x, row_a_y, icon_bolt, col_lit),
+        .discharging => drawIcon(px, text_x, row_a_y, icon_arrow, lit),
+        .full => drawIcon(px, text_x, row_a_y, icon_check, col_lit),
+        .idle => drawIcon(px, text_x, row_a_y, icon_pause, col_text),
+        .unknown => drawIcon(px, text_x, row_a_y, icon_unknown, col_text),
     }
-    drawText(px, bar_x, info_y, 1, info, col_text);
-    if (view.hour12) {
-        const ampm: []const u8 = if (isPm(clk.hour)) "PM" else "AM";
-        drawText(px, bar_x + bar_w - textWidth(ampm, 1), info_y, 1, ampm, col_text);
+    if (info.present and info.ac) drawIcon(px, plug_x, row_a_y, icon_plug, col_lit);
+    if (info.power_mw) |mw| {
+        var pb: [12]u8 = undefined;
+        const s = fmtPower(&pb, mw);
+        drawText(px, text_right - textWidth(s, 2), row_a_y, 2, s, col_text);
     }
-}
 
-/// What changes every second: the colon and the seconds bar. Draws on top of
-/// a copy of renderBase's result, a few rectangles, no antialiasing.
-pub fn renderSeconds(px: *Pixels, raw: Clock, view: View) void {
-    const clk = sanitize(raw);
-    drawColon(px, digits_x + 22, digits_y, !view.seconds or clk.sec % 2 == 0);
+    // Percent: three seven-segment digits (leading ones ghosted) and a %.
+    const hundreds: ?u8 = if (info.present and pct == 100) 1 else null;
+    const tens: ?u8 = if (info.present and pct >= 10) (pct / 10) % 10 else null;
+    const ones: ?u8 = if (info.present) pct % 10 else null;
+    drawDigit(px, digits_x, digits_y, hundreds, lit);
+    drawDigit(px, digits_x + 11, digits_y, tens, lit);
+    drawDigit(px, digits_x + 22, digits_y, ones, lit);
+    drawText(px, digits_x + 22 + digit_w + 3, digits_y + digit_h - 10, 2, "%", col_text);
 
-    // Seconds: a bar that fills over the minute.
-    if (view.seconds) {
-        fillRect(px, bar_x, bar_y, bar_w, bar_h, col_ghost);
-        const filled: i32 = @divTrunc(bar_w * (@as(i32, clk.sec) + 1) + 59, 60); // rounded up: never empty
-        fillRect(px, bar_x, bar_y, filled, bar_h, col_lit);
+    // Row C: clock symbol and the time to empty / full.
+    if (info.minutes) |m| {
+        var tb: [12]u8 = undefined;
+        const s = std.fmt.bufPrint(&tb, "{d}:{d:0>2}", .{ m / 60, m % 60 }) catch "";
+        drawIcon(px, text_x, row_c_y + 1, icon_clock, col_text);
+        drawText(px, text_x + 11, row_c_y, 2, s, col_text);
     }
-}
 
-/// A whole frame in one go (--snapshot, tests).
-pub fn render(px: *Pixels, raw: Clock, view: View) void {
-    renderBase(px, raw, view);
-    renderSeconds(px, raw, view);
-}
-
-/// What renderBase depends on besides the view: the time without seconds.
-/// While it stays the same, the base picture can be reused.
-pub fn baseKey(raw: Clock) Clock {
-    var k = sanitize(raw);
-    k.sec = 0;
-    return k;
-}
-
-/// The part of the clock that changes what is drawn: with the seconds off,
-/// a new second does not need a new frame.
-pub fn frameKey(clk: Clock, view: View) Clock {
-    var k = clk;
-    if (!view.seconds) k.sec = 0;
-    return k;
+    // Bar: 10 segments, a started segment counts (1 % shows one).
+    const segs: i32 = if (info.present) @divTrunc(@as(i32, pct) + 9, 10) else 0;
+    var i: i32 = 0;
+    while (i < seg_n) : (i += 1) {
+        fillRect(px, bar_x + i * (seg_w + seg_gap), bar_y, seg_w, bar_h, if (i < segs) lit else col_ghost);
+    }
 }
 
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 
-test "displayHour: 24h is untouched, 12h maps 0 and 12 to 12" {
-    try std.testing.expectEqual(@as(u8, 0), displayHour(0, false));
-    try std.testing.expectEqual(@as(u8, 23), displayHour(23, false));
-    try std.testing.expectEqual(@as(u8, 12), displayHour(0, true));
-    try std.testing.expectEqual(@as(u8, 12), displayHour(12, true));
-    try std.testing.expectEqual(@as(u8, 1), displayHour(13, true));
-    try std.testing.expectEqual(@as(u8, 11), displayHour(23, true));
-    try std.testing.expect(!isPm(11));
-    try std.testing.expect(isPm(12));
-}
-
 test "textWidth" {
     try std.testing.expectEqual(@as(i32, 0), textWidth("", 2));
     try std.testing.expectEqual(@as(i32, 3), textWidth("A", 1));
-    try std.testing.expectEqual(@as(i32, 46), textWidth("FRI 02", 2));
+    try std.testing.expectEqual(@as(i32, 30), textWidth("1:23", 2));
 }
 
 test "mix interpolates and never leaves 0..255" {
     try std.testing.expectEqual(@as(u32, 0xff000000), mix(0xff000000, 0xffffffff, 0));
     try std.testing.expectEqual(@as(u32, 0xffffffff), mix(0xff000000, 0xffffffff, 1));
     try std.testing.expectEqual(@as(u32, 0xff808080), mix(0xff000000, 0xffffffff, 0.5));
-    // Out-of-range factors are clamped, not wrapped.
     try std.testing.expectEqual(@as(u32, 0xffffffff), mix(0xff000000, 0xffffffff, 3));
     try std.testing.expectEqual(@as(u32, 0xff000000), mix(0xff000000, 0xffffffff, -3));
 }
@@ -512,121 +469,99 @@ fn at(px: *const Pixels, x: i32, y: i32) u32 {
     return px[@intCast(y * tile + x)];
 }
 
-test "render: the tile has the Dock's frame, an opaque face, and the LCD" {
-    var px: Pixels = undefined;
-    render(&px, .{ .hour = 8, .min = 8, .sec = 30, .mday = 2, .mon = 9, .wday = 5 }, .{});
+test "formatting" {
+    var b: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("12W", fmtPower(&b, 12_480));
+    try std.testing.expectEqualStrings("0.0W", fmtPower(&b, 0));
+    try std.testing.expectEqualStrings("9.5W", fmtPower(&b, 9_540));
+    try std.testing.expectEqualStrings("130W", fmtPower(&b, 130_000));
+}
 
-    // Every pixel is opaque.
+test "render: Dock frame, opaque, recessed LCD" {
+    var px: Pixels = undefined;
+    render(&px, .{});
     for (px) |p| try std.testing.expectEqual(@as(u32, 0xff), p >> 24);
-    // Bevel like dock.zig: light top/left, dark bottom/right, twice.
     try std.testing.expectEqual(col_light, at(&px, 10, 0));
     try std.testing.expectEqual(col_light, at(&px, 0, 10));
     try std.testing.expectEqual(col_dark, at(&px, 10, 63));
     try std.testing.expectEqual(col_dark, at(&px, 63, 10));
-    try std.testing.expectEqual(col_light, at(&px, 10, 1));
-    try std.testing.expectEqual(col_dark, at(&px, 10, 62));
-    // The gradient runs from light (top-left) to dark (bottom-right).
-    try std.testing.expect((at(&px, 3, 3) & 0xff) > (at(&px, 60, 60) & 0xff));
-    // The LCD is recessed: dark edge top/left, light bottom/right.
     try std.testing.expectEqual(col_dark, at(&px, 5, 20));
     try std.testing.expectEqual(col_light, at(&px, 58, 20));
     try std.testing.expectEqual(col_lcd, at(&px, 7, 7));
 }
 
-test "render: 08:08 lights the right segments" {
+test "render: 88 % lights tens and ones, ghosts the hundreds" {
     var px: Pixels = undefined;
-    render(&px, .{ .hour = 8, .min = 8, .sec = 30 }, .{});
-    // Digit 1 is a 0 (no middle bar), digit 2 an 8 (all segments).
-    // Middle bar: y = digits_y + 10 = 32, x = digit cell + 4.
-    try std.testing.expectEqual(col_ghost, at(&px, 8 + 4, 31));
-    try std.testing.expectEqual(col_lit, at(&px, 8 + 11 + 4, 31));
-    // The top bar of the 0 is lit.
-    try std.testing.expectEqual(col_lit, at(&px, 8 + 4, digits_y + 1));
+    render(&px, .{ .present = true, .status = .charging, .percent = 88 });
+    try std.testing.expectEqual(col_ghost, at(&px, digits_x + 4, digits_y + 1));
+    try std.testing.expectEqual(col_lit, at(&px, digits_x + 11 + 4, digits_y + 1));
+    try std.testing.expectEqual(col_lit, at(&px, digits_x + 22 + 4, digits_y + 1));
 }
 
-test "render: 12-hour mode blanks the leading zero and shows AM/PM" {
-    var am: Pixels = undefined;
-    var h24: Pixels = undefined;
-    render(&am, .{ .hour = 9, .min = 5, .sec = 0 }, .{ .hour12 = true });
-    render(&h24, .{ .hour = 9, .min = 5, .sec = 0 }, .{});
-    // 09 in 24h shows a 0 (top bar lit); in 12h that cell is all ghost.
-    try std.testing.expectEqual(col_lit, at(&h24, 8 + 4, digits_y + 1));
-    try std.testing.expectEqual(col_ghost, at(&am, 8 + 4, digits_y + 1));
-    // 24h has no AM/PM text; 12h does, so the two renders differ there.
-    var differs = false;
-    var y: i32 = info_y;
-    while (y < info_y + 5) : (y += 1) {
-        var x: i32 = bar_x + bar_w - 8;
-        while (x < bar_x + bar_w) : (x += 1) {
-            if (at(&am, x, y) != at(&h24, x, y)) differs = true;
+test "render: low battery turns red, charging stays green" {
+    var low: Pixels = undefined;
+    var chg: Pixels = undefined;
+    render(&low, .{ .present = true, .status = .discharging, .percent = 5 });
+    render(&chg, .{ .present = true, .status = .charging, .percent = 5 });
+    try std.testing.expectEqual(col_red, at(&low, digits_x + 22 + 4, digits_y + 1));
+    try std.testing.expectEqual(col_lit, at(&chg, digits_x + 22 + 4, digits_y + 1));
+}
+
+test "render: the bar has one segment per started 10 %" {
+    var px: Pixels = undefined;
+    render(&px, .{ .present = true, .status = .charging, .percent = 50 });
+    try std.testing.expectEqual(col_lit, at(&px, bar_x + 4 * (seg_w + seg_gap) + 1, bar_y + 1));
+    try std.testing.expectEqual(col_ghost, at(&px, bar_x + 5 * (seg_w + seg_gap) + 1, bar_y + 1));
+}
+
+fn areaDiffers(a: *const Pixels, b: *const Pixels, x0: i32, y0: i32, w: i32, h: i32) bool {
+    var y = y0;
+    while (y < y0 + h) : (y += 1) {
+        var x = x0;
+        while (x < x0 + w) : (x += 1) {
+            if (at(a, x, y) != at(b, x, y)) return true;
         }
     }
-    try std.testing.expect(differs);
+    return false;
 }
 
-test "render: the colon blinks with the seconds, and stays on without them" {
-    var even: Pixels = undefined;
-    var odd: Pixels = undefined;
-    var steady: Pixels = undefined;
-    render(&even, .{ .hour = 1, .min = 2, .sec = 10 }, .{});
-    render(&odd, .{ .hour = 1, .min = 2, .sec = 11 }, .{});
-    render(&steady, .{ .hour = 1, .min = 2, .sec = 11 }, .{ .seconds = false });
-    const cx = 8 + 22 + 1;
-    const cy = digits_y + 5;
-    try std.testing.expectEqual(col_lit, at(&even, cx, cy));
-    try std.testing.expectEqual(col_ghost, at(&odd, cx, cy));
-    try std.testing.expectEqual(col_lit, at(&steady, cx, cy));
+test "render: each status has its own symbol, AC adds the plug" {
+    var chg: Pixels = undefined;
+    var dis: Pixels = undefined;
+    var full: Pixels = undefined;
+    var ac: Pixels = undefined;
+    var bat: Pixels = undefined;
+    render(&chg, .{ .present = true, .status = .charging, .percent = 50 });
+    render(&dis, .{ .present = true, .status = .discharging, .percent = 50 });
+    render(&full, .{ .present = true, .status = .full, .percent = 50 });
+    render(&ac, .{ .present = true, .status = .discharging, .percent = 50, .ac = true });
+    render(&bat, .{ .present = true, .status = .discharging, .percent = 50 });
+    try std.testing.expect(areaDiffers(&chg, &dis, text_x, row_a_y, 9, 10));
+    try std.testing.expect(areaDiffers(&dis, &full, text_x, row_a_y, 9, 10));
+    try std.testing.expect(areaDiffers(&ac, &bat, plug_x, row_a_y, 7, 10));
+    // Without AC the plug's place is plain LCD glass.
+    try std.testing.expectEqual(col_lcd, at(&bat, plug_x + 3, row_a_y + 3));
 }
 
-test "render: the seconds bar fills over the minute and is absent when off" {
-    var a: Pixels = undefined;
-    var b: Pixels = undefined;
-    var off: Pixels = undefined;
-    render(&a, .{ .sec = 0 }, .{});
-    render(&b, .{ .sec = 59 }, .{});
-    render(&off, .{ .sec = 59 }, .{ .seconds = false });
-    const y = bar_y + 1;
-    // 0 s: about a sixtieth filled; 59 s: all of it.
-    try std.testing.expectEqual(col_lit, at(&a, bar_x, y));
-    try std.testing.expectEqual(col_ghost, at(&a, bar_x + bar_w - 1, y));
-    try std.testing.expectEqual(col_lit, at(&b, bar_x + bar_w - 1, y));
-    // Off: the bar's place is just LCD glass.
-    try std.testing.expectEqual(col_lcd, at(&off, bar_x + 5, y));
+test "render: power and time only when known" {
+    var none: Pixels = undefined;
+    var some: Pixels = undefined;
+    render(&none, .{ .present = true, .status = .discharging, .percent = 50 });
+    render(&some, .{ .present = true, .status = .discharging, .percent = 50, .power_mw = 12_000, .minutes = 83 });
+    try std.testing.expect(areaDiffers(&none, &some, 26, row_a_y, 30, 10)); // power
+    try std.testing.expect(areaDiffers(&none, &some, text_x, row_c_y, 48, 10)); // clock + time
 }
 
-test "render: a label replaces the month, and a long one is cut" {
-    var month: Pixels = undefined;
-    var label: Pixels = undefined;
-    var long: Pixels = undefined;
-    var cut: Pixels = undefined;
-    const clk: Clock = .{ .mon = 9 };
-    render(&month, clk, .{});
-    render(&label, clk, .{ .label = "tokyo" });
-    render(&long, clk, .{ .label = "abcdefghijklmnop" });
-    render(&cut, clk, .{ .label = "abcdefgh" });
-    try std.testing.expect(!std.mem.eql(u32, &month, &label));
-    // Everything past max_label is ignored.
-    try std.testing.expect(std.mem.eql(u32, &long, &cut));
-}
-
-test "render survives nonsense clock values" {
+test "render: no battery, and nonsense values, do not crash" {
     var px: Pixels = undefined;
-    render(&px, .{ .hour = 255, .min = 255, .sec = 255, .mday = 255, .mon = 255, .wday = 255 }, .{ .hour12 = true, .label = "\x00\xff" });
-    // Nothing to assert beyond "did not crash or overflow"; still opaque.
-    try std.testing.expectEqual(@as(u32, 0xff), px[0] >> 24);
-    render(&px, .{ .hour = 255, .min = 255, .sec = 255, .mday = 0, .mon = 255, .wday = 255 }, .{});
+    render(&px, .{});
+    try std.testing.expectEqual(col_ghost, at(&px, bar_x + 1, bar_y + 1));
+    render(&px, .{ .present = true, .percent = 255, .power_mw = 4_000_000_000, .minutes = 4_000_000_000, .voltage_mv = 4_000_000_000, .health = 255 });
     try std.testing.expectEqual(@as(u32, 0xff), px[0] >> 24);
 }
 
-test "frameKey ignores the second only when it is not shown" {
-    const a: Clock = .{ .sec = 5 };
-    const b: Clock = .{ .sec = 6 };
-    try std.testing.expect(!std.meta.eql(frameKey(a, .{}), frameKey(b, .{})));
-    try std.testing.expect(std.meta.eql(frameKey(a, .{ .seconds = false }), frameKey(b, .{ .seconds = false })));
-}
-
-test "glyphs: letters and digits all have some pixels, unknown is blank" {
-    for ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:/_") |ch| {
+test "glyphs: letters, digits and % all have some pixels, unknown is blank" {
+    for ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:/_%") |ch| {
         var any = false;
         for (glyph(ch)) |row| {
             if (row != 0) any = true;
@@ -634,36 +569,5 @@ test "glyphs: letters and digits all have some pixels, unknown is blank" {
         try std.testing.expect(any);
     }
     for (glyph(' ')) |row| try std.testing.expectEqual(@as(u3, 0), row);
-    for (glyph(0xff)) |row| try std.testing.expectEqual(@as(u3, 0), row);
-    // Lower case maps onto upper case.
     try std.testing.expectEqual(glyph('A'), glyph('a'));
-}
-
-test "renderBase once + renderSeconds per second equals a full render" {
-    var base: Pixels = undefined;
-    var px: Pixels = undefined;
-    var full: Pixels = undefined;
-    const t0: Clock = .{ .hour = 7, .min = 41, .sec = 3, .mday = 9, .mon = 2, .wday = 4 };
-    const views = [_]View{ .{}, .{ .hour12 = true, .label = "x" }, .{ .seconds = false } };
-    for (views) |v| {
-        renderBase(&base, t0, v);
-        var s: u8 = 0;
-        while (s < 60) : (s += 7) {
-            var t = t0;
-            t.sec = s;
-            px = base;
-            renderSeconds(&px, t, v);
-            render(&full, t, v);
-            try std.testing.expect(std.mem.eql(u32, &px, &full));
-        }
-    }
-}
-
-test "baseKey ignores the second and sanitizes" {
-    const a: Clock = .{ .hour = 1, .min = 2, .sec = 5 };
-    const b: Clock = .{ .hour = 1, .min = 2, .sec = 6 };
-    const c: Clock = .{ .hour = 1, .min = 3, .sec = 5 };
-    try std.testing.expect(std.meta.eql(baseKey(a), baseKey(b)));
-    try std.testing.expect(!std.meta.eql(baseKey(a), baseKey(c)));
-    try std.testing.expectEqual(@as(u8, 23), baseKey(.{ .hour = 255 }).hour);
 }

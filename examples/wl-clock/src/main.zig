@@ -85,6 +85,11 @@ const State = struct {
 
     view: face.View = .{},
 
+    /// renderBase's picture (everything but colon and seconds bar), kept
+    /// until the minute, the mode or the label changes.
+    base: face.Pixels = undefined,
+    base_key: ?face.Clock = null,
+
     running: bool = true,
     /// The first xdg_surface.configure has arrived: only now may we attach.
     configured: bool = false,
@@ -260,8 +265,16 @@ fn redrawIfNeeded(state: *State) void {
     // up for it) instead of drawing into memory it is still reading.
     const idx: usize = if (!state.bufs[0].busy) 0 else if (!state.bufs[1].busy) 1 else return;
 
+    // The antialiased digits are drawn once a minute; every other frame is
+    // a copy of that picture plus colon and bar.
+    const bkey = face.baseKey(now);
+    if (state.base_key == null or !std.meta.eql(state.base_key.?, bkey)) {
+        face.renderBase(&state.base, now, state.view);
+        state.base_key = bkey;
+    }
     const px = state.pixels[idx * face.pixel_count ..][0..face.pixel_count];
-    face.render(px, now, state.view);
+    @memcpy(px, &state.base);
+    face.renderSeconds(px, now, state.view);
 
     state.surface.attach(state.bufs[idx].buffer, 0, 0);
     state.surface.damageBuffer(0, 0, face.tile, face.tile);
@@ -470,6 +483,7 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, state: *State) void 
         .button => |b| {
             if (b.state == .pressed and b.button == btn_left) {
                 state.view.hour12 = !state.view.hour12;
+                state.base_key = null; // the base picture shows the mode
                 state.dirty = true;
             }
         },
