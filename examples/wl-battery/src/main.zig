@@ -1,193 +1,442 @@
 // SPDX-License-Identifier: 0BSD
 //
-// Pure battery maths: raw sysfs numbers in, display values out.
-// No libc, no Wayland, no file access -> fully unit-testable.
+// wl-battery: a battery DockApp for wmaker-wl, based on wl-clock.
+//
+// Same DockApp recipe as wl-clock:
+//   1. app_id "dockapp:<name>", <name> being the program's own name.
+//   2. min == max == one 64x64 tile.
+// wmaker-wl does the rest (Dock tile, no frame, every workspace).
+//
+// Draws into two wl_shm buffers, sleeps in poll(2) until the next battery
+// read (every --interval seconds, default 5) or until the compositor has
+// something to say, and only redraws when what is shown would change.
+// A click reads the battery again right away.
+//
+// Put `wl-battery &` in ~/.config/wmaker-wl/autostart.
 
 const std = @import("std");
+const posix = std.posix;
+const linux = std.os.linux;
+const wayland = @import("wayland");
+const wl = wayland.client.wl;
+const xdg = wayland.client.xdg;
+const wp = wayland.client.wp;
 
-pub const Status = enum { unknown, charging, discharging, full, idle };
+const battery = @import("battery.zig");
+const face = @import("face.zig");
+const options = @import("options.zig");
+const sysfs = @import("sysfs.zig");
 
-pub fn parseStatus(s: []const u8) Status {
-    if (std.ascii.eqlIgnoreCase(s, "Charging")) return .charging;
-    if (std.ascii.eqlIgnoreCase(s, "Discharging")) return .discharging;
-    if (std.ascii.eqlIgnoreCase(s, "Full")) return .full;
-    if (std.ascii.eqlIgnoreCase(s, "Not charging")) return .idle;
-    return .unknown;
+const c = @cImport({
+    @cInclude("stdio.h");
+    @cInclude("poll.h");
+});
+
+test {
+    _ = battery;
+    _ = face;
+    _ = options;
+    _ = sysfs;
 }
 
-/// What /sys/class/power_supply/<BAT>/ says (micro-units, as the kernel
-/// reports them). `now`/`full`/`design` are µWh, or µAh if `charge_based`.
-pub const Raw = struct {
-    present: bool = false,
-    ac: bool = false,
-    status: Status = .unknown,
-    capacity: ?i64 = null, // percent
-    now: ?i64 = null,
-    full: ?i64 = null,
-    design: ?i64 = null,
-    charge_based: bool = false,
-    power_uw: ?i64 = null,
-    current_ua: ?i64 = null,
-    voltage_uv: ?i64 = null,
+/// linux/input-event-codes.h BTN_LEFT.
+const btn_left = 0x110;
+
+const Buf = struct {
+    buffer: *wl.Buffer,
+    /// The compositor still has it (attached, not yet released).
+    busy: bool = false,
 };
 
-/// What the face shows.
-pub const Info = struct {
-    present: bool = false,
-    ac: bool = false,
-    status: Status = .unknown,
-    percent: u8 = 0,
-    power_mw: ?u32 = null,
-    /// Time to empty (discharging) or to full (charging).
-    minutes: ?u32 = null,
-    voltage_mv: ?u32 = null,
-    /// full / design capacity in percent.
-    health: ?u8 = null,
+const State = struct {
+    shm: ?*wl.Shm = null,
+    compositor: ?*wl.Compositor = null,
+    wm_base: ?*xdg.WmBase = null,
+    seat: ?*wl.Seat = null,
+    cursor_manager: ?*wp.CursorShapeManagerV1 = null,
+
+    pointer: ?*wl.Pointer = null,
+    cursor_device: ?*wp.CursorShapeDeviceV1 = null,
+
+    surface: *wl.Surface = undefined,
+    xdg_surface: *xdg.Surface = undefined,
+    toplevel: *xdg.Toplevel = undefined,
+
+    bufs: [2]Buf = undefined,
+    /// Both buffers' pixels, one after the other.
+    pixels: []u32 = &.{},
+
+    /// --battery NAME (null: the first battery).
+    want: ?[]const u8 = null,
+    interval_ms: i64 = 5000,
+    /// Monotonic ms of the next sysfs read; 0 = read at once.
+    next_read: i64 = 0,
+    /// Read again now (click).
+    force: bool = false,
+    bat: battery.Info = .{},
+
+    running: bool = true,
+    /// The first xdg_surface.configure has arrived: only now may we attach.
+    configured: bool = false,
+    /// Something other than the battery changed what must be shown.
+    dirty: bool = true,
+    /// What the last committed frame showed.
+    shown: ?battery.Info = null,
 };
 
-fn absI(v: i64) i64 {
-    return if (v < 0) -v else v;
-}
+pub fn main(init: std.process.Init) !void {
+    var args = init.minimal.args.iterate();
+    _ = args.skip(); // program name
+    const opts = options.parse(&args) catch |err| switch (err) {
+        error.HelpRequested => {
+            std.debug.print("{s}", .{options.usage});
+            return;
+        },
+        else => {
+            std.debug.print("wl-battery: {t}\n\n{s}", .{ err, options.usage });
+            std.process.exit(2);
+        },
+    };
 
-fn clampInt(comptime T: type, v: i64, max: i64) T {
-    return @intCast(std.math.clamp(v, 0, max));
-}
+    var state: State = .{
+        .want = opts.battery,
+        .interval_ms = @as(i64, opts.interval) * 1000,
+    };
 
-/// Hours >= 100 are not shown (the face has room for "99:59").
-fn minutesFor(amount: i64, rate: i64) ?u32 {
-    if (amount < 0 or rate <= 0) return null;
-    const m = @divTrunc(amount * 60, rate);
-    if (m >= 100 * 60) return null;
-    return @intCast(m);
-}
-
-pub fn summarize(r: Raw) Info {
-    var out: Info = .{ .present = r.present, .ac = r.ac, .status = r.status };
-    if (!r.present) return out;
-
-    const have_full = r.now != null and r.full != null and r.full.? > 0;
-    const pct: i64 = if (r.capacity) |cap|
-        cap
-    else if (have_full)
-        @divTrunc(r.now.? * 100 + @divTrunc(r.full.?, 2), r.full.?)
-    else
-        0;
-    out.percent = clampInt(u8, pct, 100);
-
-    // Korrigierter Maximalwert für mV (100.000 mV = 100 V)
-    if (r.voltage_uv) |v| {
-        out.voltage_mv = clampInt(u32, @divTrunc(absI(v), 1000), 100_000);
+    // No compositor needed: draw one frame to a file. Handy for a preview
+    // and for the screenshot in the README.
+    if (opts.snapshot) |path| {
+        var px: face.Pixels = undefined;
+        face.render(&px, sysfs.read(opts.battery));
+        writePpm(path, &px) catch |err| {
+            std.debug.print("wl-battery: cannot write {s}: {t}\n", .{ path, err });
+            std.process.exit(1);
+        };
+        return;
     }
 
-    // Power: power_now, or current * voltage.
-    var power_uw: ?i64 = null;
-    if (r.power_uw) |p| {
-        power_uw = absI(p);
-    } else if (r.current_ua != null and r.voltage_uv != null) {
-        power_uw = @divTrunc(absI(r.current_ua.?) * absI(r.voltage_uv.?), 1_000_000);
-    }
-    // Maximalwert für Leistung auf 10.000.000 mW (10 kW) begrenzt
-    if (power_uw) |p| {
-        out.power_mw = clampInt(u32, @divTrunc(p, 1000), 10_000_000);
+    const gpa = init.gpa;
+
+    const display = wl.Display.connect(null) catch |err| {
+        std.log.err("cannot connect to a Wayland compositor: {t}", .{err});
+        std.log.err("(is $WAYLAND_DISPLAY set? are you running inside river/wmaker-wl?)", .{});
+        return err;
+    };
+    defer display.disconnect();
+
+    // Without this SIGINT/SIGTERM would kill us at the default disposition and
+    // skip every `defer` below. The handlers only set a flag; poll() is what
+    // notices (it returns EINTR), see run loop.
+    installExitSignalHandlers();
+
+    const registry = try display.getRegistry();
+    registry.setListener(*State, registryListener, &state);
+    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
+    const shm = state.shm orelse return error.NoWlShm;
+    const compositor = state.compositor orelse return error.NoWlCompositor;
+    const wm_base = state.wm_base orelse return error.NoXdgWmBase;
+    wm_base.setListener(*State, wmBaseListener, &state);
+    if (state.seat) |seat| seat.setListener(*State, seatListener, &state);
+
+    // Buffers first, so the very first frame after `configure` is ready.
+    const map = try createBuffers(&state, shm);
+    defer posix.munmap(map);
+    defer for (&state.bufs) |b| b.buffer.destroy();
+
+    // ---- the window ---------------------------------------------------------
+
+    const surface = try compositor.createSurface();
+    defer surface.destroy();
+    state.surface = surface;
+
+    const xdg_surface = try wm_base.getXdgSurface(surface);
+    defer xdg_surface.destroy();
+    state.xdg_surface = xdg_surface;
+    xdg_surface.setListener(*State, xdgSurfaceListener, &state);
+
+    const toplevel = try xdg_surface.getToplevel();
+    defer toplevel.destroy();
+    state.toplevel = toplevel;
+    toplevel.setListener(*State, toplevelListener, &state);
+
+    // ---- the tag and the size that make this a DockApp -----------------------
+
+    const app_id = try std.fmt.allocPrintSentinel(gpa, "dockapp:{s}", .{opts.name}, 0);
+    defer gpa.free(app_id);
+    toplevel.setAppId(app_id.ptr);
+    toplevel.setTitle("Battery");
+    toplevel.setMinSize(face.tile, face.tile);
+    toplevel.setMaxSize(face.tile, face.tile);
+
+    surface.commit();
+
+    // An xdg_surface must not get a buffer before its first configure.
+    while (!state.configured and state.running) {
+        if (should_exit.load(.monotonic)) return;
+        const err = display.dispatch();
+        if (err == .INTR) continue;
+        if (err != .SUCCESS) return error.DispatchFailed;
     }
 
-    // Remaining time
-    const rate: i64 = if (r.charge_based)
-        (if (r.current_ua) |ci| absI(ci) else 0)
-    else
-        (power_uw orelse 0);
+    try runLoop(display, &state);
+}
 
-    if (rate > 0) {
-        switch (r.status) {
-            .discharging => {
-                if (r.now) |n| out.minutes = minutesFor(n, rate);
-            },
-            .charging => {
-                if (r.now != null and r.full != null) {
-                    out.minutes = minutesFor(r.full.? - r.now.?, rate);
-                }
-            },
-            else => {},
+// ----------------------------------------------------------------------------
+// The loop: draw if something changed, then sleep until something can change.
+// ----------------------------------------------------------------------------
+
+fn runLoop(display: *wl.Display, state: *State) !void {
+    while (state.running and !should_exit.load(.monotonic)) {
+        redrawIfNeeded(state);
+
+        // The documented libwayland pattern for a poll()-based loop: nothing
+        // may be left in the default queue when we go to sleep.
+        while (!display.prepareRead()) {
+            if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
+        }
+        const flushed = display.flush();
+        if (flushed != .SUCCESS and flushed != .AGAIN) {
+            display.cancelRead();
+            return error.FlushFailed;
+        }
+
+        var pfd: c.struct_pollfd = .{
+            .fd = display.getFd(),
+            .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
+            .revents = 0,
+        };
+        const rc = c.poll(&pfd, 1, msUntilNextRead(state));
+
+        if (rc > 0 and pfd.revents & c.POLLIN != 0) {
+            if (display.readEvents() != .SUCCESS) return error.DispatchFailed;
+        } else {
+            display.cancelRead();
+            // The compositor went away.
+            if (rc > 0 and pfd.revents & (c.POLLERR | c.POLLHUP) != 0) return;
+        }
+        if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
+    }
+}
+
+fn nowMs() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+}
+
+/// Milliseconds until the battery is read next.
+fn msUntilNextRead(state: *const State) c_int {
+    const wait = state.next_read - nowMs();
+    return @intCast(std.math.clamp(wait, 1, state.interval_ms));
+}
+
+fn redrawIfNeeded(state: *State) void {
+    const t = nowMs();
+    if (state.force or t >= state.next_read) {
+        state.bat = sysfs.read(state.want);
+        state.next_read = t + state.interval_ms;
+        state.force = false;
+    }
+    if (!state.dirty) {
+        if (state.shown) |s| {
+            if (std.meta.eql(s, state.bat)) return;
         }
     }
 
-    if (r.design != null and r.full != null and r.design.? > 0) {
-        const health_pct = @divTrunc(r.full.? * 100 + @divTrunc(r.design.?, 2), r.design.?);
-        out.health = clampInt(u8, health_pct, 100);
+    // Both buffers with the compositor: wait for a `release` (the loop wakes
+    // up for it) instead of drawing into memory it is still reading.
+    const idx: usize = if (!state.bufs[0].busy) 0 else if (!state.bufs[1].busy) 1 else return;
+
+    const px = state.pixels[idx * face.pixel_count ..][0..face.pixel_count];
+    face.render(px, state.bat);
+
+    state.surface.attach(state.bufs[idx].buffer, 0, 0);
+    state.surface.damageBuffer(0, 0, face.tile, face.tile);
+    state.surface.commit();
+    state.bufs[idx].busy = true;
+    state.shown = state.bat;
+    state.dirty = false;
+}
+
+// ----------------------------------------------------------------------------
+// Buffers: one memfd, one pool, two wl_buffers, mapped for the whole run.
+// ----------------------------------------------------------------------------
+
+fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u8 {
+    const stride: i32 = face.tile * 4;
+    const one: usize = face.pixel_count * 4;
+    const size: usize = one * 2;
+
+    const rc = linux.memfd_create("wl-battery", linux.MFD.CLOEXEC);
+    if (linux.errno(rc) != .SUCCESS) return error.MemfdCreate;
+    const fd: posix.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    if (linux.errno(linux.ftruncate(fd, @intCast(size))) != .SUCCESS) return error.Truncate;
+
+    const map = try posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+    errdefer posix.munmap(map);
+    state.pixels = std.mem.bytesAsSlice(u32, map);
+
+    // The pool can go as soon as the buffers exist; they keep the memory.
+    const pool = try shm.createPool(fd, @intCast(size));
+    defer pool.destroy();
+
+    var made: usize = 0;
+    errdefer for (state.bufs[0..made]) |b| b.buffer.destroy();
+    for (&state.bufs, 0..) |*b, i| {
+        b.* = .{
+            .buffer = try pool.createBuffer(@intCast(i * one), face.tile, face.tile, stride, .argb8888),
+        };
+        made += 1;
+        b.buffer.setListener(*Buf, bufferListener, b);
     }
-    return out;
-}
-
-pub fn main() !void {
-    // Einstiegspunkt für den Compiler, damit build-exe nicht fehlschlägt
+    return map;
 }
 
 // ----------------------------------------------------------------------------
-// Tests
+// --snapshot
 // ----------------------------------------------------------------------------
 
-test "parseStatus" {
-    try std.testing.expectEqual(Status.charging, parseStatus("Charging"));
-    try std.testing.expectEqual(Status.discharging, parseStatus("discharging"));
-    try std.testing.expectEqual(Status.full, parseStatus("Full"));
-    try std.testing.expectEqual(Status.idle, parseStatus("Not charging"));
-    try std.testing.expectEqual(Status.unknown, parseStatus("whatever"));
+/// Binary PPM (P6), no alpha: the face is opaque. libc stdio on purpose, so
+/// this stays free of the std.Io plumbing.
+fn writePpm(path: [:0]const u8, px: *const face.Pixels) !void {
+    const f = c.fopen(path.ptr, "wb") orelse return error.OpenFailed;
+    defer _ = c.fclose(f);
+    if (c.fprintf(f, "P6\n%d %d\n255\n", @as(c_int, face.tile), @as(c_int, face.tile)) < 0) return error.WriteFailed;
+    for (px) |p| {
+        const rgb = [3]u8{
+            @truncate(p >> 16),
+            @truncate(p >> 8),
+            @truncate(p),
+        };
+        if (c.fwrite(&rgb, 1, 3, f) != 3) return error.WriteFailed;
+    }
 }
 
-test "energy based, discharging" {
-    const i = summarize(.{
-        .present = true,
-        .status = .discharging,
-        .capacity = 60,
-        .now = 30_000_000,
-        .full = 50_000_000,
-        .design = 60_000_000,
-        .power_uw = 10_000_000,
-        .voltage_uv = 12_000_000,
-    });
-    try std.testing.expectEqual(@as(u8, 60), i.percent);
-    try std.testing.expectEqual(@as(?u32, 10_000), i.power_mw);
-    try std.testing.expectEqual(@as(?u32, 180), i.minutes);
-    try std.testing.expectEqual(@as(?u8, 83), i.health);
-    try std.testing.expectEqual(@as(?u32, 12_000), i.voltage_mv);
+// ----------------------------------------------------------------------------
+// SIGINT/SIGTERM: leave the loop cleanly. poll() returns EINTR, the loop
+// re-checks the flag. Same "only set a flag in the handler" rule as
+// wmaker-wl's own SIGHUP handler.
+// ----------------------------------------------------------------------------
+
+var should_exit = std.atomic.Value(bool).init(false);
+
+fn onExitSignal(_: std.os.linux.SIG) callconv(.c) void {
+    should_exit.store(true, .monotonic);
 }
 
-test "energy based, charging: time to full" {
-    const i = summarize(.{
-        .present = true,
-        .status = .charging,
-        .now = 30_000_000,
-        .full = 50_000_000,
-        .power_uw = 10_000_000,
-    });
-    try std.testing.expectEqual(@as(u8, 60), i.percent);
-    try std.testing.expectEqual(@as(?u32, 120), i.minutes);
+fn installExitSignalHandlers() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = onExitSignal },
+        .mask = posix.sigemptyset(),
+        .flags = 0, // no SA_RESTART: poll() must see EINTR
+    };
+    posix.sigaction(.INT, &act, null);
+    posix.sigaction(.TERM, &act, null);
 }
 
-test "charge based: current and voltage give the power" {
-    const i = summarize(.{
-        .present = true,
-        .status = .discharging,
-        .charge_based = true,
-        .now = 2_000_000,
-        .full = 4_000_000,
-        .current_ua = -1_000_000,
-        .voltage_uv = 10_000_000,
-    });
-    try std.testing.expectEqual(@as(u8, 50), i.percent);
-    try std.testing.expectEqual(@as(?u32, 10_000), i.power_mw);
-    try std.testing.expectEqual(@as(?u32, 120), i.minutes);
+// ----------------------------------------------------------------------------
+// Wayland listeners
+// ----------------------------------------------------------------------------
+
+fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, state: *State) void {
+    switch (event) {
+        .global => |g| {
+            const name = std.mem.span(g.interface);
+            const eql = std.mem.eql;
+
+            if (eql(u8, name, std.mem.span(wl.Compositor.interface.name))) {
+                state.compositor = registry.bind(g.name, wl.Compositor, @min(g.version, 4)) catch |err| {
+                    std.log.err("bind wl_compositor: {t}", .{err});
+                    return;
+                };
+            } else if (eql(u8, name, std.mem.span(wl.Shm.interface.name))) {
+                state.shm = registry.bind(g.name, wl.Shm, 1) catch |err| {
+                    std.log.err("bind wl_shm: {t}", .{err});
+                    return;
+                };
+            } else if (eql(u8, name, std.mem.span(xdg.WmBase.interface.name))) {
+                state.wm_base = registry.bind(g.name, xdg.WmBase, @min(g.version, 3)) catch |err| {
+                    std.log.err("bind xdg_wm_base: {t}", .{err});
+                    return;
+                };
+            } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
+                // Only the first seat: one pointer is enough.
+                if (state.seat == null) {
+                    state.seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
+                        std.log.err("bind wl_seat: {t}", .{err});
+                        return;
+                    };
+                }
+            } else if (eql(u8, name, std.mem.span(wp.CursorShapeManagerV1.interface.name))) {
+                // Optional. Without it the compositor keeps whatever cursor
+                // it had, which is acceptable here.
+                state.cursor_manager = registry.bind(g.name, wp.CursorShapeManagerV1, 1) catch null;
+            }
+        },
+        else => {},
+    }
 }
 
-test "no battery, full battery, absurdly long times" {
-    const none = summarize(.{ .ac = true });
-    try std.testing.expect(!none.present);
-    try std.testing.expect(none.ac);
-    try std.testing.expectEqual(@as(?u32, null), none.minutes);
+fn wmBaseListener(wm_base: *xdg.WmBase, event: xdg.WmBase.Event, _: *State) void {
+    switch (event) {
+        .ping => |p| wm_base.pong(p.serial),
+    }
+}
 
-    const full = summarize(.{ .present = true, .status = .full, .capacity = 100, .now = 5, .full = 5, .power_uw = 1 });
-    try std.testing.expectEqual(@as(?u32, null), full.minutes);
+fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, state: *State) void {
+    switch (event) {
+        .configure => |cfg| {
+            xdg_surface.ackConfigure(cfg.serial);
+            state.configured = true;
+        },
+    }
+}
 
-    const slow = summarize(.{ .present = true, .status = .discharging, .now = 50_000_000, .power_uw = 1000 });
-    try std.testing.expectEqual(@as(?u32, null), slow.minutes);
+fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, state: *State) void {
+    switch (event) {
+        // The compositor proposes the tile we asked for. We only ever draw
+        // 64x64, whatever is proposed; it centres what we really have.
+        .configure => {},
+        .close => state.running = false,
+    }
+}
+
+fn bufferListener(_: *wl.Buffer, event: wl.Buffer.Event, buf: *Buf) void {
+    switch (event) {
+        .release => buf.busy = false,
+    }
+}
+
+fn seatListener(seat: *wl.Seat, event: wl.Seat.Event, state: *State) void {
+    switch (event) {
+        .capabilities => |caps| {
+            if (caps.capabilities.pointer and state.pointer == null) {
+                const pointer = seat.getPointer() catch |err| {
+                    std.log.err("wl_seat.get_pointer: {t}", .{err});
+                    return;
+                };
+                state.pointer = pointer;
+                pointer.setListener(*State, pointerListener, state);
+                if (state.cursor_manager) |mgr| {
+                    state.cursor_device = mgr.getPointer(pointer) catch null;
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, state: *State) void {
+    switch (event) {
+        // The compositor hands the cursor to us on enter; say "arrow".
+        .enter => |e| if (state.cursor_device) |dev| dev.setShape(e.serial, .default),
+        .button => |b| {
+            if (b.state == .pressed and b.button == btn_left) {
+                state.force = true;
+            }
+        },
+        else => {},
+    }
 }
