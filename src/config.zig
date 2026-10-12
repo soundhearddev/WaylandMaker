@@ -717,22 +717,11 @@ fn applyEntry(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!voi
     const L = ctx.L;
     const key = lua.toSlice(L, -2) orelse return;
     if (key.len == 0 or key[0] == '_' or baseline.contains(key)) return;
-    if (applyOption(ctx, key)) |_| {
-        markExplicit(ctx, key);
-    } else |err| switch (err) {
+    applyOption(ctx, key) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.UnknownKey => ctx.warn("{s}: unknown option `{s}`", .{ ctx.origin, key }),
         error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, key, lua.typeName(L, -1) }),
-    }
-}
-
-/// Remember that the user's script (not the built-in defaults) set `key`,
-/// if it is one of the options the saved Dock state must not override.
-fn markExplicit(ctx: *Ctx, key: []const u8) void {
-    if (ctx.origin.len > 0 and ctx.origin[0] == '<') return; // "<built-in>", "<test>"
-    inline for (@typeInfo(Explicit).@"struct".fields) |f| {
-        if (std.mem.eql(u8, key, f.name)) @field(ctx.cfg.explicit, f.name) = true;
-    }
+    };
 }
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };

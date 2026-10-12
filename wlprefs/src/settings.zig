@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: 0BSD
 //
-// wlprefs settings layer: read, edit and write wmaker-wl's config.conf.
+// wlprefs settings layer: read, edit and write wmaker-wl's config.lua.
 //
 // Deliberately free of Wayland and cairo, so it can be tested in isolation.
-// It mirrors src/config.zig of the compositor rule for rule (comment
-// stripping, `key = value`, value trimming, what counts as a valid value,
-// the renamed options), because "what wlprefs shows" has to be exactly
-// "what the compositor will use".
+// It mirrors src/config.zig of the compositor rule for rule (what counts as
+// a valid value, the ranges), because "what wlprefs shows" has to be exactly
+// "what the compositor will use". It does not run the Lua script: it reads
+// the lines of the shape `key = literal` and `theme("name")` (lualine.zig),
+// and a value that is computed (`gap = base * 2`) is left alone.
 //
 // SAVING NEVER REGENERATES THE FILE. `render()` takes the text that is on
 // disk and changes only the lines of keys the user actually changed:
 //
-//   * every other byte stays: comments, blank lines, `bind`/`unbind`, keys
-//     this program does not know, the user's own formatting, CRLF endings;
+//   * every other byte stays: comments, blank lines, `bind`/`unbind`, loops
+//     and helpers, keys this program does not know, the user's own
+//     formatting, CRLF endings;
 //   * a changed key keeps its position, indentation and trailing comment;
 //   * a key that is not in the file yet is appended at the end, but only if
 //     it differs from the default (a minimal config stays minimal);
-//   * a value wlprefs cannot represent (e.g. `mouse_mod = Super+Mod5`) is
-//     never touched unless the user changes it.
+//   * a value wlprefs cannot represent (e.g. `mouse_mod = "Super+Mod5"`, or
+//     a computed one) is never touched unless the user changes it.
 //
 // "Changed" is decided against `base`, the settings as they were when the
 // file was read. Because the caller re-reads the file right before saving
@@ -112,17 +114,12 @@ pub const Text = struct {
     }
 
     /// Typing at the caret. Refuses what a config line cannot hold: control
-    /// characters, and a `#` that would start a comment (at the start or
-    /// after whitespace -- the compositor cuts the line there).
+    /// characters. Quotes and backslashes are fine: they are escaped when the
+    /// value is written as a Lua string.
     pub fn append(t: *Text, ch: u8) void {
         if (t.len >= t.buf.len) return;
         if (ch < 0x20 or ch == 0x7f) return;
         const p = @min(t.pos, t.len);
-        if (ch == '#' and (p == 0 or t.buf[p - 1] == ' ' or t.buf[p - 1] == '\t')) return;
-        // A '#' typed in front of what is already there would also become
-        // a comment start if that is whitespace-led -- the caret check above
-        // covers the character before; the one after is not the typist's
-        // problem (a `#` never turns a following char into a comment).
         std.mem.copyBackwards(u8, t.buf[p + 1 .. t.len + 1], t.buf[p..t.len]);
         t.buf[p] = ch;
         t.len += 1;
@@ -231,7 +228,7 @@ pub const Settings = struct {
     // ---- keyboard / theme
     /// -1: bindings follow the active layout ("current"); 0..3: pinned.
     bind_layout: i32 = -1,
-    /// Theme name ("" = none). `theme = NAME` includes Themes/NAME.conf.
+    /// Theme name ("" = none). `theme("NAME")` reads Themes/NAME.lua.
     theme: Text = .{},
 
     // ---- Dock and Clip
@@ -254,30 +251,15 @@ pub const Settings = struct {
 };
 
 // ----------------------------------------------------------------------------
-// Parsing: the rules of config.zig
+// Parsing: the rules of config.zig, for one line at a time (lualine.zig)
 // ----------------------------------------------------------------------------
 
-fn isColour(s: []const u8) bool {
-    if (s.len < 7 or s[0] != '#') return false;
-    for (s[1..7]) |ch| if (!std.ascii.isHex(ch)) return false;
-    return s.len == 7 or s[7] == ' ' or s[7] == '\t' or s[7] == '\r';
-}
+const lualine = @import("lualine.zig");
 
-/// Where a comment starts in `raw` (raw.len if none): a `#` at the start or
-/// after whitespace, unless it introduces a `#rrggbb` colour.
-fn commentStart(raw: []const u8) usize {
-    for (raw, 0..) |ch, i| {
-        if (ch != '#') continue;
-        if (!(i == 0 or raw[i - 1] == ' ' or raw[i - 1] == '\t')) continue;
-        if (isColour(raw[i..])) continue;
-        return i;
-    }
-    return raw.len;
-}
-
+/// Lua has real booleans: `true` and `false`, nothing else.
 pub fn parseBool(s: []const u8) ?bool {
-    inline for (.{ "true", "yes", "on", "1" }) |t| if (std.mem.eql(u8, s, t)) return true;
-    inline for (.{ "false", "no", "off", "0" }) |t| if (std.mem.eql(u8, s, t)) return false;
+    if (std.mem.eql(u8, s, "true")) return true;
+    if (std.mem.eql(u8, s, "false")) return false;
     return null;
 }
 
@@ -285,14 +267,6 @@ fn parseColour(value: []const u8) ?u32 {
     var v = std.mem.trimStart(u8, value, "#");
     if (std.mem.startsWith(u8, v, "0x")) v = v[2..];
     return std.fmt.parseInt(u32, v, 16) catch null;
-}
-
-/// Renamed options of the previous config format keep working in the
-/// compositor; so they do here.
-pub fn canonicalKey(key: []const u8) []const u8 {
-    if (std.mem.eql(u8, key, "default_column_width_fraction")) return "default_column_width";
-    if (std.mem.eql(u8, key, "min_column_width")) return "min_window_size";
-    return key;
 }
 
 /// A Pango font description the compositor accepts (config.validFont).
@@ -315,11 +289,107 @@ pub fn validPresets(text: []const u8) bool {
     return n > 0;
 }
 
-/// Apply one `key = value` pair. Invalid values are ignored, exactly as the
-/// compositor ignores them (it then keeps the earlier/default value).
-pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
+fn isCommandKey(key: []const u8) bool {
+    inline for (.{ "terminal", "launcher", "browser" }) |k| if (std.mem.eql(u8, key, k)) return true;
+    return false;
+}
+
+/// `bind`, `theme`, ... are functions in a config: `theme = "x"` would only
+/// replace the function, so it is not the setting.
+fn isFunctionName(key: []const u8) bool {
+    inline for (.{ "theme", "bind", "unbind", "include" }) |k| if (std.mem.eql(u8, key, k)) return true;
+    return false;
+}
+
+/// A number the way Lua writes them: digits, `.`, `-`, `0x..`. An
+/// expression (`4 * 2`, `base + 1`) is not one.
+fn isNumberLiteral(v: []const u8) bool {
+    if (v.len == 0) return false;
+    if (!(std.ascii.isDigit(v[0]) or v[0] == '-' or v[0] == '.')) return false;
+    for (v) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '.' and ch != '-' and ch != '+') return false;
+    return true;
+}
+
+/// The text a Lua literal stands for, in the plain form `apply` takes:
+/// `"foot -e htop"` -> foot -e htop, `{ 0.5, 1 }` -> 0.5, 1, `true` -> true.
+/// null for anything that is not such a literal (an expression, a call, ...):
+/// the compositor computes something this window cannot show. The result
+/// is in `out` or in `lit`.
+fn plainValue(key: []const u8, lit: []const u8, out: []u8) ?[]const u8 {
+    var fba = std.heap.FixedBufferAllocator.init(out);
+    const a = fba.allocator();
+    const v = std.mem.trim(u8, lit, " \t");
+    if (v.len == 0) return null;
+    switch (v[0]) {
+        '"', '\'', '[' => return (lualine.unquote(a, v) catch return null),
+        '{' => return tablePlain(a, key, v),
+        else => {},
+    }
+    if (std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "false")) return v;
+    if (!isNumberLiteral(v)) return null;
+    // A colour written as a plain number is decimal to Lua, while `apply`
+    // reads colours as hex: say it the hex way.
+    if (isColourKey(key) and !std.mem.startsWith(u8, v, "0x")) {
+        const n = std.fmt.parseInt(u32, v, 10) catch return null;
+        return std.fmt.allocPrint(a, "0x{x}", .{n}) catch null;
+    }
+    return v;
+}
+
+/// `{ "Main", "", "Web" }` -> `Main, , Web`; for a program the items are
+/// words of a command line: `{ "foot", "-e", "htop -d 5" }` -> `foot -e "htop -d 5"`.
+fn tablePlain(a: std.mem.Allocator, key: []const u8, v: []const u8) ?[]const u8 {
+    if (v[v.len - 1] != '}') return null;
+    const inner = v[1 .. v.len - 1];
+    const command = isCommandKey(key);
+    var out: std.ArrayList(u8) = .empty;
+    var n_items: usize = 0;
+    var start: usize = 0;
+    var quote: u8 = 0;
+    var j: usize = 0;
+    while (j <= inner.len) : (j += 1) {
+        if (j < inner.len) {
+            const ch = inner[j];
+            if (quote != 0) {
+                if (ch == '\\') {
+                    j += 1;
+                } else if (ch == quote) quote = 0;
+                continue;
+            }
+            if (ch == '"' or ch == '\'') {
+                quote = ch;
+                continue;
+            }
+            if (ch != ',') continue;
+        } else if (quote != 0) return null;
+
+        const item = std.mem.trim(u8, inner[start..j], " \t");
+        start = j + 1;
+        if (item.len == 0) {
+            if (j == inner.len) break; // a trailing comma
+            return null;
+        }
+        const text: []const u8 = switch (item[0]) {
+            '"', '\'' => (lualine.unquote(a, item) catch return null) orelse return null,
+            else => if (isNumberLiteral(item)) item else return null,
+        };
+        if (n_items > 0) out.appendSlice(a, if (command) " " else ", ") catch return null;
+        n_items += 1;
+        if (command and (text.len == 0 or std.mem.indexOfAny(u8, text, " \t") != null)) {
+            if (std.mem.indexOfScalar(u8, text, '"') != null) return null; // no escapes in a command line
+            out.append(a, '"') catch return null;
+            out.appendSlice(a, text) catch return null;
+            out.append(a, '"') catch return null;
+        } else out.appendSlice(a, text) catch return null;
+    }
+    return out.items;
+}
+
+/// Apply one `key = value` pair; `value` in the plain form of plainValue.
+/// Invalid values are ignored, exactly as the compositor refuses them (it
+/// then keeps the earlier/default value).
+pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
     const eql = std.mem.eql;
-    const key = canonicalKey(raw_key);
 
     inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
@@ -341,11 +411,7 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
             return;
         }
     }
-    inline for (.{
-        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",         "clip_collapsed",
-    }) |name| {
+    inline for (bool_keys) |name| {
         if (eql(u8, key, name)) {
             if (parseBool(value)) |b| @field(s, name) = b;
             return;
@@ -394,32 +460,54 @@ pub fn apply(s: *Settings, raw_key: []const u8, value: []const u8) void {
     }
 }
 
-/// Split one line of the file the way config.zig does. null for lines that
-/// carry no `key = value`.
+const bool_keys = .{
+    "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+    "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
+    "clip_on_top",         "clip_collapsed",
+};
+
+const number_keys = .{
+    "gap",                  "outer_gap",  "border_width",  "min_window_size", "drag_threshold", "dock_offset",
+    "default_column_width", "width_step", "floating_size", "workspace_count",
+};
+
+/// One line of the file that carries a setting.
 const Line = struct {
     key: []const u8,
+    /// The literal as written (`"nord"`, `{ 0.5, 1 }`, `8`).
     value: []const u8,
     /// Where the comment starts in the raw line (raw.len if none).
     comment: usize,
+    /// `theme("nord")` instead of `key = value`.
+    is_call: bool = false,
 };
 
-fn splitLine(raw: []const u8) ?Line {
-    const cs = commentStart(raw);
-    const body = std.mem.trim(u8, raw[0..cs], " \t\r");
-    if (body.len == 0) return null;
-    const eq = std.mem.indexOfScalar(u8, body, '=') orelse return null;
-    return .{
-        .key = std.mem.trim(u8, body[0..eq], " \t"),
-        .value = std.mem.trim(u8, body[eq + 1 ..], " \t\""),
-        .comment = cs,
-    };
+fn splitLine(lex: *lualine.Lexer, raw: []const u8) ?Line {
+    const c = lualine.code(lex, raw) orelse return null;
+    if (lualine.assignment(c.body)) |a| {
+        if (isFunctionName(a.key)) return null;
+        return .{ .key = a.key, .value = a.value, .comment = c.comment };
+    }
+    if (lualine.call(c.body)) |cl| {
+        if (cl.n == 1 and std.mem.eql(u8, cl.name, "theme")) {
+            return .{ .key = "theme", .value = cl.args[0], .comment = c.comment, .is_call = true };
+        }
+    }
+    return null;
 }
 
 pub fn parse(s: *Settings, text: []const u8) void {
+    var lex: lualine.Lexer = .{};
+    var buf: [1024]u8 = undefined;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
-        const l = splitLine(raw) orelse continue;
-        apply(s, l.key, l.value);
+        const l = splitLine(&lex, raw) orelse continue;
+        const v = plainValue(l.key, l.value, &buf) orelse {
+            // Something computed: the GUI cannot show it, and must not "fix" it.
+            if (std.mem.eql(u8, l.key, "mouse_mod")) s.mouse_mod.raw = true;
+            continue;
+        };
+        apply(s, l.key, v);
     }
 }
 
@@ -436,11 +524,6 @@ fn commandProblem(key: []const u8, label: []const u8, t: *const Text, storage: *
     const v = std.mem.trim(u8, t.get(), " \t");
     if (v.len == 0) {
         return .{ .key = key, .message = std.fmt.bufPrint(storage, "{s}: must not be empty", .{label}) catch "must not be empty" };
-    }
-    // A leading quote is stripped from the line by the compositor, which
-    // changes the meaning of what follows.
-    if (v[0] == '"') {
-        return .{ .key = key, .message = std.fmt.bufPrint(storage, "{s}: must not start with a quote", .{label}) catch "must not start with a quote" };
     }
     return null;
 }
@@ -477,12 +560,11 @@ pub fn problem(s: *const Settings, storage: *[96]u8) ?Problem {
 // Formatting + rendering
 // ----------------------------------------------------------------------------
 
-/// The value of `key` as it is written to the file (no `#` before a colour;
-/// render() adds one when the line already used one). null for keys this
+/// The value of `key` in plain text (no `#` before a colour, no quotes: the
+/// form `apply` takes). render() turns it into a Lua literal. null for keys this
 /// layer does not know, and for values it must not write.
-pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
+pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
     const eql = std.mem.eql;
-    const key = canonicalKey(raw_key);
 
     inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{d}", .{@field(s, name)}) catch null;
@@ -493,11 +575,7 @@ pub fn format(s: *const Settings, raw_key: []const u8, out: []u8) ?[]const u8 {
     inline for (.{ "border_focused", "border_unfocused", "border_floating" }) |name| {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{x:0>6}", .{@field(s, name)}) catch null;
     }
-    inline for (.{
-        "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-        "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
-        "clip_on_top",         "clip_collapsed",
-    }) |name| {
+    inline for (bool_keys) |name| {
         if (eql(u8, key, name)) return if (@field(s, name)) "true" else "false";
     }
     inline for (.{ "terminal", "launcher", "browser" }) |name| {
@@ -537,8 +615,7 @@ pub const keys = [_][]const u8{
 };
 
 fn keyIndex(key: []const u8) ?usize {
-    const k = canonicalKey(key);
-    for (keys, 0..) |name, i| if (std.mem.eql(u8, name, k)) return i;
+    for (keys, 0..) |name, i| if (std.mem.eql(u8, name, key)) return i;
     return null;
 }
 
@@ -575,6 +652,7 @@ pub fn render(
 
     var seen = [_]bool{false} ** keys.len;
     var vbuf: [64]u8 = undefined;
+    var lex: lualine.Lexer = .{};
 
     var lines = std.mem.splitScalar(u8, original, '\n');
     var first = true;
@@ -582,7 +660,7 @@ pub fn render(
         if (!first) try out.append(gpa, '\n');
         first = false;
 
-        const l = splitLine(raw) orelse {
+        const l = splitLine(&lex, raw) orelse {
             try out.appendSlice(gpa, raw);
             continue;
         };
@@ -603,24 +681,20 @@ pub fn render(
             continue;
         }
 
-        // `theme =` with nothing after it is an error for the compositor;
-        // clearing the theme comments the line out instead.
+        const indent_len = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+
+        // `theme("")` is an error for the compositor; clearing the theme
+        // comments the line out instead.
         if (new_v.len == 0 and isRemovable(name)) {
-            const ind = raw.len - std.mem.trimStart(u8, raw, " \t").len;
-            try out.appendSlice(gpa, raw[0..ind]);
-            try out.appendSlice(gpa, "# ");
-            try out.appendSlice(gpa, std.mem.trimStart(u8, raw, " \t"));
+            try out.appendSlice(gpa, raw[0..indent_len]);
+            try out.appendSlice(gpa, "-- ");
+            try out.appendSlice(gpa, raw[indent_len..]);
             continue;
         }
 
-        // Rewrite the line: indentation, key, value, then the old comment.
-        const indent_len = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+        // Rewrite the line: indentation, the statement, then the old comment.
         try out.appendSlice(gpa, raw[0..indent_len]);
-        try out.appendSlice(gpa, name);
-        try out.appendSlice(gpa, " = ");
-        // A colour that was written as `#rrggbb` stays that way.
-        if (isColourKey(name) and std.mem.startsWith(u8, l.value, "#")) try out.append(gpa, '#');
-        try out.appendSlice(gpa, new_v);
+        try appendStatement(&out, gpa, name, new_v, l.value, l.is_call);
 
         if (l.comment < raw.len) {
             try out.appendSlice(gpa, "  ");
@@ -640,16 +714,92 @@ pub fn render(
         if (sameValue(s, &def, name)) continue;
         if (!header_done) {
             if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
-            try out.appendSlice(gpa, "\n# ---- set by wlprefs ----\n");
+            try out.appendSlice(gpa, "\n-- ---- set by wlprefs ----\n");
             header_done = true;
         }
-        try out.appendSlice(gpa, name);
-        try out.appendSlice(gpa, " = ");
-        try out.appendSlice(gpa, new_v);
+        try appendStatement(&out, gpa, name, new_v, "", std.mem.eql(u8, name, "theme"));
         try out.append(gpa, '\n');
     }
 
     return out.toOwnedSlice(gpa);
+}
+
+/// `name = literal`, or `theme("name")`.
+fn appendStatement(
+    out: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    plain: []const u8,
+    old: []const u8,
+    is_call: bool,
+) !void {
+    if (is_call) {
+        try out.appendSlice(gpa, name);
+        try out.append(gpa, '(');
+        try lualine.appendQuoted(out, gpa, plain);
+        try out.append(gpa, ')');
+        return;
+    }
+    try out.appendSlice(gpa, name);
+    try out.appendSlice(gpa, " = ");
+    try appendLiteral(out, gpa, name, plain, old);
+}
+
+/// `plain` (the form `format` gives) as the Lua literal for key `name`.
+/// `old` is the literal that was there before, if any: a colour written as a
+/// number stays a number.
+fn appendLiteral(
+    out: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    plain: []const u8,
+    old: []const u8,
+) !void {
+    const eql = std.mem.eql;
+    if (isColourKey(name)) {
+        const was_number = old.len > 0 and old[0] != '"' and old[0] != '\'' and old[0] != '[';
+        try out.appendSlice(gpa, if (was_number) "0x" else "\"#");
+        try out.appendSlice(gpa, plain);
+        if (!was_number) try out.append(gpa, '"');
+        return;
+    }
+    inline for (number_keys ++ bool_keys) |k| {
+        if (eql(u8, name, k)) return out.appendSlice(gpa, plain);
+    }
+    if (eql(u8, name, "bind_layout")) {
+        if (std.fmt.parseInt(u32, plain, 10)) |_| {
+            return out.appendSlice(gpa, plain);
+        } else |_| {
+            return lualine.appendQuoted(out, gpa, plain);
+        }
+    }
+    if (eql(u8, name, "width_presets")) {
+        try out.appendSlice(gpa, "{ ");
+        var it = std.mem.tokenizeAny(u8, plain, ", \t");
+        var first = true;
+        while (it.next()) |t| {
+            if (!first) try out.appendSlice(gpa, ", ");
+            first = false;
+            try out.appendSlice(gpa, t);
+        }
+        try out.appendSlice(gpa, " }");
+        return;
+    }
+    if (eql(u8, name, "workspace_names")) {
+        if (std.mem.trim(u8, plain, " \t").len == 0) return out.appendSlice(gpa, "{}");
+        try out.appendSlice(gpa, "{ ");
+        var it = std.mem.splitScalar(u8, plain, ',');
+        var first = true;
+        while (it.next()) |t| {
+            if (!first) try out.appendSlice(gpa, ", ");
+            first = false;
+            try lualine.appendQuoted(out, gpa, std.mem.trim(u8, t, " \t"));
+        }
+        try out.appendSlice(gpa, " }");
+        return;
+    }
+    // Everything else is a string: enums, fonts, mouse_mod, programs.
+    try lualine.appendQuoted(out, gpa, plain);
 }
 
 /// Keys whose empty value means "not set": they cannot be written as `key =`.
@@ -695,6 +845,8 @@ test "defaults are the compositor's shipped default_config.lua" {
     try testing.expect(d.dock_enabled and d.clip_enabled and d.dock_on_top and d.dock_reserve_space);
     try testing.expect(!d.clip_collapsed);
     try testing.expectEqual(@as(usize, 0), d.workspace_names.len);
+    // The colours of the shipped file are strings like "#d8a657".
+    try testing.expectEqual(@as(u32, 0xd8a657), d.border_focused);
 }
 
 test "the struct's own defaults agree with the shipped file (except the text fields)" {
@@ -724,17 +876,17 @@ test "every key has a text form, and the key list has no duplicates" {
 test "parse follows config.zig, including what it ignores" {
     var s = Settings.init();
     parse(&s,
-        \\gap = 12   # comment
-        \\border_focused = #ff0000
-        \\focus_follows_mouse = yes
-        \\center_focused_column = always
-        \\terminal = foot -e htop
-        \\mouse_mod = Alt
+        \\gap = 12   -- comment
+        \\border_focused = "#ff0000"
+        \\focus_follows_mouse = true
+        \\center_focused_column = "always"
+        \\terminal = "foot -e htop"
+        \\mouse_mod = "Alt"
         \\workspace_count = 99
-        \\dock_edge = left
-        \\clip_corner = bottom_right
+        \\dock_edge = "left"
+        \\clip_corner = "bottom_right"
         \\dock_offset = -4
-        \\clip_corner = middle
+        \\clip_corner = "middle"
         \\
     );
     try testing.expectEqual(@as(i32, 12), s.gap);
@@ -749,19 +901,71 @@ test "parse follows config.zig, including what it ignores" {
     try testing.expectEqual(ClipCorner.bottom_right, s.clip_corner); // "middle": ignored
 }
 
-test "a trailing quote is trimmed from the value, exactly like the compositor does" {
+test "colours: strings with or without #, and plain numbers" {
     var s = Settings.init();
-    parse(&s, "terminal = foot -e \"htop -d 5\"\n");
-    // config.zig trims quotes at both ends of the value; parseCommand then
-    // tolerates the unterminated one, so the argv is the same either way.
-    try testing.expectEqualStrings("foot -e \"htop -d 5", s.terminal.get());
+    parse(&s,
+        \\border_focused = "#112233"
+        \\border_unfocused = 0x445566
+        \\border_floating = "778899"
+    );
+    try testing.expectEqual(@as(u32, 0x112233), s.border_focused);
+    try testing.expectEqual(@as(u32, 0x445566), s.border_unfocused);
+    try testing.expectEqual(@as(u32, 0x778899), s.border_floating);
+    // A decimal number is decimal to Lua, whatever it looks like in hex.
+    parse(&s, "border_focused = 255\n");
+    try testing.expectEqual(@as(u32, 0xff), s.border_focused);
 }
 
-test "renamed options of the old format are understood" {
+test "strings are read exactly: escapes, single quotes, long brackets" {
     var s = Settings.init();
-    parse(&s, "default_column_width_fraction = 0.4\nmin_column_width = 200\n");
-    try testing.expectApproxEqAbs(@as(f64, 0.4), s.default_column_width, 0.0001);
-    try testing.expectEqual(@as(i32, 200), s.min_window_size);
+    parse(&s, "terminal = \"foot -e \\\"htop -d 5\\\"\"\n");
+    try testing.expectEqualStrings("foot -e \"htop -d 5\"", s.terminal.get());
+    parse(&s, "launcher = [[sh -c \"x --y\"]]\nbrowser = 'my-browser'\n");
+    try testing.expectEqualStrings("sh -c \"x --y\"", s.launcher.get());
+    try testing.expectEqualStrings("my-browser", s.browser.get());
+    // `--` inside a string is not a comment.
+    parse(&s, "terminal = \"foot --server\"   -- real comment\n");
+    try testing.expectEqualStrings("foot --server", s.terminal.get());
+}
+
+test "tables: presets, names, and programs as an argv" {
+    var s = Settings.init();
+    parse(&s,
+        \\width_presets = { 0.25, 0.5 }
+        \\workspace_names = { "Main", "", "Web", }
+        \\launcher = { "wofi", "--show", "drun" }
+        \\browser = { "my browser", "--private" }
+    );
+    try testing.expectEqualStrings("0.25, 0.5", s.width_presets.get());
+    try testing.expectEqualStrings("Main, , Web", s.workspace_names.get());
+    try testing.expectEqualStrings("wofi --show drun", s.launcher.get());
+    try testing.expectEqualStrings("\"my browser\" --private", s.browser.get());
+}
+
+test "what is computed is left alone: expressions are not literals" {
+    var s = Settings.init();
+    parse(&s,
+        \\gap = 4 * 2 + 1
+        \\terminal = os.getenv("TERMINAL") or "foot"
+        \\mouse_mod = pick()
+        \\--[[
+        \\outer_gap = 99
+        \\]]
+        \\border_width = 3; outer_gap = 77
+    );
+    try testing.expectEqual(@as(i32, 8), s.gap);
+    try testing.expectEqualStrings("alacritty", s.terminal.get());
+    try testing.expect(s.mouse_mod.raw); // the GUI must not "fix" a computed mouse_mod
+    try testing.expectEqual(@as(i32, 8), s.outer_gap); // block comment, and two statements
+    try testing.expectEqual(@as(i32, 2), s.border_width);
+}
+
+test "assigning to `theme` or `bind` is not a setting" {
+    var s = Settings.init();
+    parse(&s, "theme = \"nord\"\n");
+    try testing.expectEqual(@as(usize, 0), s.theme.len);
+    parse(&s, "theme(\"nord\")\n");
+    try testing.expectEqualStrings("nord", s.theme.get());
 }
 
 test "mouse_mod: combinations, order, and values the GUI cannot show" {
@@ -784,10 +988,10 @@ test "mouse_mod: combinations, order, and values the GUI cannot show" {
 test "render replaces only modified lines and preserves comments" {
     const gpa = testing.allocator;
     const original =
-        \\# my config
-        \\gap = 8                          # between windows
+        \\-- my config
+        \\gap = 8                          -- between windows
         \\outer_gap = 8
-        \\bind = Super+q, close
+        \\bind("Super+q", "close")
         \\unknown_thing = 5
         \\focus_follows_mouse = false
         \\
@@ -801,19 +1005,45 @@ test "render replaces only modified lines and preserves comments" {
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
     try testing.expectEqualStrings(
-        \\# my config
-        \\gap = 20  # between windows
+        \\-- my config
+        \\gap = 20  -- between windows
         \\outer_gap = 8
-        \\bind = Super+q, close
+        \\bind("Super+q", "close")
         \\unknown_thing = 5
         \\focus_follows_mouse = true
         \\
     , out);
 }
 
+test "render leaves loops, helpers and multi-line code alone" {
+    const gpa = testing.allocator;
+    const original =
+        \\local base = 4
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\--[[ gap = 1
+        \\gap = 2 ]]
+        \\gap = 8
+        \\
+    ;
+    var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.gap = 9;
+    const out = try render(gpa, original, &s, &base);
+    defer gpa.free(out);
+    try testing.expectEqualStrings(
+        \\local base = 4
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\--[[ gap = 1
+        \\gap = 2 ]]
+        \\gap = 9
+        \\
+    , out);
+}
+
 test "render without changes is byte-identical" {
     const gpa = testing.allocator;
-    const original = "gap = 8 # x\r\nfoo\n\n  border_width = 3\n";
+    const original = "gap = 8 -- x\r\nfoo\n\n  border_width = 3\n";
     var base = Settings.init();
     parse(&base, original);
     const out = try render(gpa, original, &base, &base);
@@ -833,9 +1063,9 @@ test "render keeps CRLF line endings on rewritten lines" {
     try testing.expectEqualStrings("gap = 9\r\nouter_gap = 8\r\n", out);
 }
 
-test "render keeps '#' colours as they were written, and writes plain hex otherwise" {
+test "render keeps a colour written as a number a number, and writes \"#rrggbb\" otherwise" {
     const gpa = testing.allocator;
-    const original = "border_focused = #112233\nborder_unfocused = 445566\n";
+    const original = "border_focused = \"#112233\"\nborder_unfocused = 0x445566\n";
     var base = Settings.init();
     parse(&base, original);
     var s = base;
@@ -843,7 +1073,7 @@ test "render keeps '#' colours as they were written, and writes plain hex otherw
     s.border_unfocused = 0x010203;
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try testing.expectEqualStrings("border_focused = #aabbcc\nborder_unfocused = 010203\n", out);
+    try testing.expectEqualStrings("border_focused = \"#aabbcc\"\nborder_unfocused = 0x010203\n", out);
     var back = Settings.init();
     parse(&back, out);
     try testing.expectEqual(@as(u32, 0xaabbcc), back.border_focused);
@@ -862,16 +1092,16 @@ test "render appends missing keys that differ from the default, only those" {
     s.gap = 8; // same -> nothing
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "border_focused = 112233\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "border_focused = \"#112233\"\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "workspace_count = 6\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "dock_edge = left\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dock_edge = \"left\"\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "outer_gap") == null);
     try testing.expect(std.mem.startsWith(u8, out, "gap = 8\n"));
 }
 
 test "render: a commented-out example line does not count as the key being set" {
     const gpa = testing.allocator;
-    const original = "# workspace_names = Main, Web\ngap = 8\n";
+    const original = "-- workspace_names = { \"Main\", \"Web\" }\ngap = 8\n";
     var base = Settings.init();
     parse(&base, original);
     var s = base;
@@ -879,20 +1109,28 @@ test "render: a commented-out example line does not count as the key being set" 
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
     // The comment is untouched and a real line is appended.
-    try testing.expect(std.mem.startsWith(u8, out, "# workspace_names = Main, Web\ngap = 8\n"));
-    try testing.expect(std.mem.indexOf(u8, out, "\nworkspace_names = Main, Web\n") != null);
+    try testing.expect(std.mem.startsWith(u8, out, "-- workspace_names = { \"Main\", \"Web\" }\ngap = 8\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\nworkspace_names = { \"Main\", \"Web\" }\n") != null);
 }
 
-test "render: a renamed old key is rewritten in place, not duplicated" {
+test "render writes Lua: quoted strings, tables, escapes -- and reads it back" {
     const gpa = testing.allocator;
-    const original = "min_column_width = 200\n";
-    var base = Settings.init();
-    parse(&base, original);
+    const base = Settings.init();
     var s = base;
-    s.min_window_size = 300;
-    const out = try render(gpa, original, &s, &base);
+    s.terminal.set("foot -e \"htop -d 5\"");
+    s.width_presets.set("0.25, 0.5, 1");
+    s.workspace_names.set("Main, , Web");
+    s.bind_layout = 2;
+    s.font_menu.set("Serif 12");
+    const out = try render(gpa, "", &s, &base);
     defer gpa.free(out);
-    try testing.expectEqualStrings("min_window_size = 300\n", out);
+    try testing.expect(std.mem.indexOf(u8, out, "terminal = \"foot -e \\\"htop -d 5\\\"\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "width_presets = { 0.25, 0.5, 1 }\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "workspace_names = { \"Main\", \"\", \"Web\" }\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "bind_layout = 2\n") != null);
+    var back = Settings.init();
+    parse(&back, out);
+    try testing.expectEqual(@as(usize, 0), changedCount(&s, &back));
 }
 
 test "render round-trip: the written file parses back to the GUI values" {
@@ -920,7 +1158,7 @@ test "render round-trip: the written file parses back to the GUI values" {
 
 test "an unrecognised mouse_mod is never overwritten" {
     const gpa = testing.allocator;
-    const original = "mouse_mod = Super+Mod5\nmouse_mod_x = 1\n";
+    const original = "mouse_mod = \"Super+Mod5\"\nmouse_mod_x = 1\n";
     var base = Settings.init();
     parse(&base, original);
     try testing.expect(base.mouse_mod.raw);
@@ -932,12 +1170,12 @@ test "an unrecognised mouse_mod is never overwritten" {
     s.gap = 9;
     const out2 = try render(gpa, original, &s, &base);
     defer gpa.free(out2);
-    try testing.expect(std.mem.startsWith(u8, out2, "mouse_mod = Super+Mod5\n"));
+    try testing.expect(std.mem.startsWith(u8, out2, "mouse_mod = \"Super+Mod5\"\n"));
 }
 
-test "an invalid value in the file is left alone unless the user changes that key" {
+test "an invalid or computed value is left alone unless the user changes that key" {
     const gpa = testing.allocator;
-    const original = "gap = banana\nouter_gap = 8\n";
+    const original = "gap = banana\nouter_gap = 8\nborder_width = 2 + 1\n";
     var base = Settings.init();
     parse(&base, original);
     try testing.expectEqual(@as(i32, 8), base.gap); // default kept, like the compositor
@@ -945,7 +1183,13 @@ test "an invalid value in the file is left alone unless the user changes that ke
     s.outer_gap = 10;
     const out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try testing.expectEqualStrings("gap = banana\nouter_gap = 10\n", out);
+    try testing.expectEqualStrings("gap = banana\nouter_gap = 10\nborder_width = 2 + 1\n", out);
+    // Changing the computed one replaces the expression by the value.
+    s = base;
+    s.border_width = 5;
+    const out2 = try render(gpa, original, &s, &base);
+    defer gpa.free(out2);
+    try testing.expectEqualStrings("gap = banana\nouter_gap = 8\nborder_width = 5\n", out2);
 }
 
 test "a key that appears twice: both lines follow the change (the last one wins anyway)" {
@@ -971,10 +1215,10 @@ test "an edit made to the file in the meantime survives a save of other keys" {
     s.gap = 12; // ... and the user changed `gap` only ...
 
     // ... while someone edited `outer_gap` and added a bind by hand.
-    const on_disk_now = "gap = 8\nouter_gap = 30\nbind = Super+x, close\n";
+    const on_disk_now = "gap = 8\nouter_gap = 30\nbind(\"Super+x\", \"close\")\n";
     const out = try render(gpa, on_disk_now, &s, &base);
     defer gpa.free(out);
-    try testing.expectEqualStrings("gap = 12\nouter_gap = 30\nbind = Super+x, close\n", out);
+    try testing.expectEqualStrings("gap = 12\nouter_gap = 30\nbind(\"Super+x\", \"close\")\n", out);
 
     // And afterwards the GUI shows the file's value for the key it didn't touch.
     var new_base = Settings.init();
@@ -985,19 +1229,16 @@ test "an edit made to the file in the meantime survives a save of other keys" {
     try testing.expectEqual(@as(i32, 30), shown.outer_gap);
 }
 
-test "text fields refuse what a config line cannot hold" {
+test "text fields refuse control characters, and never overflow" {
     var t: Text = .{};
-    for ("foot #x") |ch| t.append(ch);
-    // The '#' after a space would start a comment: not typed.
-    try testing.expectEqualStrings("foot x", t.get());
+    // Everything printable is fine: the writer quotes what needs quoting.
+    for ("foot --x # y \"q\" \\") |ch| t.append(ch);
+    try testing.expectEqualStrings("foot --x # y \"q\" \\", t.get());
     t.clear();
-    t.append('#');
-    try testing.expectEqual(@as(usize, 0), t.len);
     t.append('a');
-    t.append('#'); // inside a word: fine (like a colour, or a URL fragment)
     t.append('\n');
     t.append(0x7f);
-    try testing.expectEqualStrings("a#", t.get());
+    try testing.expectEqualStrings("a", t.get());
     // Full: further typing is ignored, never overflows.
     for (0..400) |_| t.append('x');
     try testing.expectEqual(t.buf.len, t.len);
@@ -1010,9 +1251,10 @@ test "problem(): what blocks a save" {
 
     s.terminal.set("   ");
     try testing.expectEqualStrings("terminal", problem(&s, &st).?.key);
+    // Quotes are fine now: they are escaped when written.
     s.terminal.set("\"my term\" --x");
-    try testing.expectEqualStrings("terminal", problem(&s, &st).?.key);
-    s.terminal.set("foot -e \"htop -d 5\""); // a closing quote is fine
+    try testing.expect(problem(&s, &st) == null);
+    s.terminal.set("foot -e \"htop -d 5\"");
     try testing.expect(problem(&s, &st) == null);
 
     s.width_presets.set("0.5, 2");
@@ -1053,9 +1295,9 @@ test "bind_layout: current, pinned, invalid" {
     try testing.expectEqual(@as(i32, -1), s.bind_layout);
     parse(&s, "bind_layout = 1\n");
     try testing.expectEqual(@as(i32, 1), s.bind_layout);
-    parse(&s, "bind_layout = current\n");
+    parse(&s, "bind_layout = \"current\"\n");
     try testing.expectEqual(@as(i32, -1), s.bind_layout);
-    parse(&s, "bind_layout = 2\nbind_layout = 9\nbind_layout = de\n");
+    parse(&s, "bind_layout = 2\nbind_layout = 9\nbind_layout = \"de\"\n");
     try testing.expectEqual(@as(i32, 2), s.bind_layout);
 
     var buf: [16]u8 = undefined;
@@ -1070,11 +1312,11 @@ test "theme: written, validated, and clearing it comments the line out" {
     var s = base;
     s.theme.set("nord");
     var out = try render(gpa, "gap = 8\n", &s, &base);
-    try testing.expect(std.mem.indexOf(u8, out, "theme = nord\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "theme(\"nord\")\n") != null);
     gpa.free(out);
 
     // The file has a theme, the user clears the field.
-    const original = "theme = nord   # my look\ngap = 8\n";
+    const original = "theme(\"nord\")   -- my look\ngap = 8\n";
     base = Settings.init();
     parse(&base, original);
     try testing.expectEqualStrings("nord", base.theme.get());
@@ -1082,10 +1324,17 @@ test "theme: written, validated, and clearing it comments the line out" {
     s.theme.clear();
     out = try render(gpa, original, &s, &base);
     defer gpa.free(out);
-    try testing.expectEqualStrings("# theme = nord   # my look\ngap = 8\n", out);
+    try testing.expectEqualStrings("-- theme(\"nord\")   -- my look\ngap = 8\n", out);
     var back = Settings.init();
     parse(&back, out);
     try testing.expectEqual(@as(usize, 0), back.theme.len);
+
+    // Changing it rewrites the call in place.
+    s = base;
+    s.theme.set("gruvbox");
+    const out2 = try render(gpa, original, &s, &base);
+    defer gpa.free(out2);
+    try testing.expectEqualStrings("theme(\"gruvbox\")  -- my look\ngap = 8\n", out2);
 
     // A name that is not a file name is refused before it is written.
     var st: [96]u8 = undefined;
@@ -1124,18 +1373,11 @@ test "Text caret: insert in the middle, backspace, delete, movement" {
     try testing.expectEqualStrings("helo", t.get());
     try testing.expectEqual(@as(usize, 4), t.pos);
 
-    // The comment rule uses the character before the CARET.
+    // A '#' is just a character now (a comment in Lua is `--`).
     t.set("a b");
     t.home();
-    t.append('#'); // at the start: refused
-    try testing.expectEqualStrings("a b", t.get());
-    t.right();
-    t.right(); // a |b ... after the space
     t.append('#');
-    try testing.expectEqualStrings("a b", t.get());
-    t.end();
-    t.append('#'); // after a non-space
-    try testing.expectEqualStrings("a b#", t.get());
+    try testing.expectEqualStrings("#a b", t.get());
 }
 
 test "Text: set puts the caret at the end; a full field takes no more in the middle either" {

@@ -2,9 +2,9 @@
 //
 // The key bindings the compositor will actually have, for the read-only
 // "Keyboard Shortcut Preferences" page: wmaker-wl's shipped defaults, then
-// the user's `bind =` and `unbind =` lines on top, with the same rule the
-// compositor uses (a `bind` replaces a default on the same key combination,
-// `unbind` removes one). Editing is not here yet (docs/TODO.md): this only
+// the user's `bind("..", "..")` and `unbind("..")` lines on top, with the same
+// rule the compositor uses (a `bind` replaces a default on the same key
+// combination, `unbind` removes one). Editing is not here yet (docs/TODO.md): this only
 // shows what is in effect, and which entries come from the user's file.
 
 const std = @import("std");
@@ -13,9 +13,9 @@ const xkb = @import("xkbcommon");
 pub const Entry = struct {
     /// As written in the file: "Super+Shift+e".
     combo: []const u8,
-    /// Everything after the first comma: "exit", "spawn foot -e htop".
+    /// The second argument of bind(): "exit", "spawn foot -e htop".
     action: []const u8,
-    /// Comes from the user's config.conf (new, or replacing a default).
+    /// Comes from the user's config.lua (new, or replacing a default).
     user: bool,
 };
 
@@ -75,36 +75,7 @@ fn modName(t: []const u8) []const u8 {
     return t;
 }
 
-const Line = struct { key: []const u8, value: []const u8 };
-
-fn isColour(s: []const u8) bool {
-    if (s.len < 7 or s[0] != '#') return false;
-    for (s[1..7]) |ch| if (!std.ascii.isHex(ch)) return false;
-    return s.len == 7 or s[7] == ' ' or s[7] == '\t' or s[7] == '\r';
-}
-
-/// Same comment rule as config.zig.
-fn stripComment(raw: []const u8) []const u8 {
-    var end = raw.len;
-    for (raw, 0..) |ch, i| {
-        if (ch != '#') continue;
-        if (!(i == 0 or raw[i - 1] == ' ' or raw[i - 1] == '\t')) continue;
-        if (isColour(raw[i..])) continue;
-        end = i;
-        break;
-    }
-    return std.mem.trim(u8, raw[0..end], " \t\r");
-}
-
-fn splitLine(raw: []const u8) ?Line {
-    const line = stripComment(raw);
-    if (line.len == 0) return null;
-    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return null;
-    return .{
-        .key = std.mem.trim(u8, line[0..eq], " \t"),
-        .value = std.mem.trim(u8, line[eq + 1 ..], " \t\""),
-    };
-}
+const lualine = @import("lualine.zig");
 
 const Builder = struct {
     a: std.mem.Allocator,
@@ -119,11 +90,9 @@ const Builder = struct {
         return null;
     }
 
-    fn add(b: *Builder, value: []const u8, user: bool) !void {
-        // "combo, action": the combo cannot contain a comma.
-        const comma = std.mem.indexOfScalar(u8, value, ',') orelse return;
-        const combo = std.mem.trim(u8, value[0..comma], " \t");
-        const action = std.mem.trim(u8, value[comma + 1 ..], " \t");
+    fn add(b: *Builder, combo_text: []const u8, action_text: []const u8, user: bool) !void {
+        const combo = std.mem.trim(u8, combo_text, " \t");
+        const action = std.mem.trim(u8, action_text, " \t");
         if (combo.len == 0 or action.len == 0) return;
 
         const n = try normalize(b.a, combo);
@@ -141,8 +110,8 @@ const Builder = struct {
         }
     }
 
-    fn remove(b: *Builder, value: []const u8) !void {
-        const combo = std.mem.trim(u8, value, " \t");
+    fn remove(b: *Builder, combo_text: []const u8) !void {
+        const combo = std.mem.trim(u8, combo_text, " \t");
         if (combo.len == 0) return;
         const n = try normalize(b.a, combo);
         if (b.find(n)) |i| {
@@ -151,14 +120,22 @@ const Builder = struct {
         }
     }
 
+    /// `bind("combo", "action")` and `unbind("combo")` lines. A loop that
+    /// makes binds is not a line wlprefs can read: those binds are missing
+    /// from the list (and are left alone in the file).
     fn feed(b: *Builder, text: []const u8, user: bool) !void {
+        var lex: lualine.Lexer = .{};
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
-            const l = splitLine(raw) orelse continue;
-            if (std.mem.eql(u8, l.key, "bind")) {
-                try b.add(l.value, user);
-            } else if (std.mem.eql(u8, l.key, "unbind")) {
-                try b.remove(l.value);
+            const c = lualine.code(&lex, raw) orelse continue;
+            const call = lualine.call(c.body) orelse continue;
+            if (std.mem.eql(u8, call.name, "bind") and call.n == 2) {
+                const combo = (try lualine.unquote(b.a, call.args[0])) orelse continue;
+                const action = (try lualine.unquote(b.a, call.args[1])) orelse continue;
+                try b.add(combo, action, user);
+            } else if (std.mem.eql(u8, call.name, "unbind") and call.n == 1) {
+                const combo = (try lualine.unquote(b.a, call.args[0])) orelse continue;
+                try b.remove(combo);
             }
         }
     }
@@ -174,7 +151,7 @@ pub fn effective(a: std.mem.Allocator, defaults: []const u8, user: []const u8) !
 }
 
 // ----------------------------------------------------------------------------
-// Editing: from a list of bindings back to config.conf lines
+// Editing: from a list of bindings back to config.lua lines
 // ----------------------------------------------------------------------------
 
 extern fn xkb_utf32_to_keysym(ucs: u32) u32;
@@ -225,7 +202,7 @@ pub fn comboProblem(a: std.mem.Allocator, combo: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The `bind =` / `unbind =` lines that turn the shipped defaults into
+/// The `bind(..)` / `unbind(..)` lines that turn the shipped defaults into
 /// `list`: a line for every entry that is new or different, an `unbind` for
 /// every default that is gone. Entries equal to a default need no line.
 pub fn userLines(a: std.mem.Allocator, defaults: []const u8, list: []const Entry) ![]const []const u8 {
@@ -243,7 +220,7 @@ pub fn userLines(a: std.mem.Allocator, defaults: []const u8, list: []const Entry
                 break;
             }
         }
-        if (!kept) try lines.append(a, try std.fmt.allocPrint(a, "unbind = {s}", .{d.combo}));
+        if (!kept) try lines.append(a, try std.fmt.allocPrint(a, "unbind({s})", .{try lualine.quote(a, d.combo)}));
     }
     // New or changed entries.
     for (list) |e| {
@@ -255,12 +232,12 @@ pub fn userLines(a: std.mem.Allocator, defaults: []const u8, list: []const Entry
                 break;
             }
         }
-        if (!same) try lines.append(a, try std.fmt.allocPrint(a, "bind = {s}, {s}", .{ e.combo, e.action }));
+        if (!same) try lines.append(a, try std.fmt.allocPrint(a, "bind({s}, {s})", .{ try lualine.quote(a, e.combo), try lualine.quote(a, e.action) }));
     }
     return lines.toOwnedSlice(a);
 }
 
-/// Replace every `bind`/`unbind` line of `text` by `lines`: they go where the
+/// Replace every `bind(..)`/`unbind(..)` line of `text` by `lines`: they go where the
 /// first old one was (or at the end, under a heading, if there was none).
 /// Everything else in the file is untouched. Result owned by the caller.
 pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const []const u8) ![]u8 {
@@ -268,12 +245,15 @@ pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const
     defer kept.deinit(gpa);
     var insert_at: ?usize = null;
 
+    var lex: lualine.Lexer = .{};
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
-        if (splitLine(raw)) |l| {
-            if (std.mem.eql(u8, l.key, "bind") or std.mem.eql(u8, l.key, "unbind")) {
-                if (insert_at == null) insert_at = kept.items.len;
-                continue;
+        if (lualine.code(&lex, raw)) |c| {
+            if (lualine.call(c.body)) |call| {
+                if (std.mem.eql(u8, call.name, "bind") or std.mem.eql(u8, call.name, "unbind")) {
+                    if (insert_at == null) insert_at = kept.items.len;
+                    continue;
+                }
             }
         }
         try kept.append(gpa, raw);
@@ -301,7 +281,7 @@ pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const
     for (kept.items[0..@min(at, kept.items.len)]) |p| try Join.piece(&out, gpa, &first, p);
     if (insert_at == null and lines.len > 0) {
         try Join.piece(&out, gpa, &first, "");
-        try Join.piece(&out, gpa, &first, "# ---- key bindings (set by wlprefs) ----");
+        try Join.piece(&out, gpa, &first, "-- ---- key bindings (set by wlprefs) ----");
     }
     for (lines) |l| try Join.piece(&out, gpa, &first, l);
     for (kept.items[@min(at, kept.items.len)..]) |p| try Join.piece(&out, gpa, &first, p);
@@ -356,17 +336,17 @@ test "effective: defaults, then the user's replace, add and remove" {
     const a = arena.allocator();
 
     const defaults =
-        \\# comment
-        \\bind = Super+Return,       spawn_terminal
-        \\bind = Super+q,            close
-        \\bind = Super+Shift+e,      exit   # trailing comment
+        \\-- comment
+        \\bind("Super+Return",       "spawn_terminal")
+        \\bind("Super+q",            "close")
+        \\bind("Super+Shift+e",      "exit")   -- trailing comment
         \\gap = 8
     ;
     const user =
-        \\bind = shift+super+E, shell notify-send bye
-        \\unbind = Super+q
-        \\bind = Super+x, focus_left
-        \\bind = Super+Return, spawn foot
+        \\bind("shift+super+E", "shell notify-send bye")
+        \\unbind("Super+q")
+        \\bind("Super+x", "focus_left")
+        \\bind("Super+Return", "spawn foot")
     ;
     const list = try effective(a, defaults, user);
     try std.testing.expectEqual(@as(usize, 3), list.len);
@@ -383,20 +363,27 @@ test "effective: defaults, then the user's replace, add and remove" {
     try std.testing.expectEqualStrings("Super+x", list[2].combo);
 }
 
-test "effective: an action keeps its commas, malformed lines are skipped" {
+test "effective: strings of every kind, malformed and computed lines are skipped" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const list = try effective(arena.allocator(),
-        \\bind = Super+m, shell echo a, b
-        \\bind = nocomma
-        \\bind = , close
-        \\bind = Super+z,
-        \\unbind =
-        \\bind=Super+k,focus_up
+        \\bind("Super+m", "shell echo a, b")
+        \\bind('Super+n', [[shell echo "x"]])
+        \\bind("nocomma")
+        \\bind("", "close")
+        \\bind("Super+z", "")
+        \\unbind()
+        \\bind("Super+k","focus_up")
+        \\for i = 1, 9 do bind("Super+" .. i, "workspace " .. i) end
+        \\--[[
+        \\bind("Super+c", "close")
+        \\]]
+        \\-- bind("Super+d", "close")
     , "");
-    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqual(@as(usize, 3), list.len);
     try std.testing.expectEqualStrings("shell echo a, b", list[0].action);
-    try std.testing.expectEqualStrings("Super+k", list[1].combo);
+    try std.testing.expectEqualStrings("shell echo \"x\"", list[1].action);
+    try std.testing.expectEqualStrings("Super+k", list[2].combo);
     try std.testing.expect(!list[0].user);
 }
 
@@ -440,9 +427,9 @@ test "userLines: nothing for the defaults, bind for new and changed, unbind for 
     defer arena.deinit();
     const a = arena.allocator();
     const defaults =
-        \\bind = Super+Return, spawn_terminal
-        \\bind = Super+q, close
-        \\bind = Super+h, focus_left
+        \\bind("Super+Return", "spawn_terminal")
+        \\bind("Super+q", "close")
+        \\bind("Super+h", "focus_left")
     ;
     const unchanged = try effective(a, defaults, "");
     const none = try userLines(a, defaults, unchanged);
@@ -456,17 +443,17 @@ test "userLines: nothing for the defaults, bind for new and changed, unbind for 
     };
     try std.testing.expectEqual(@as(usize, 0), (try userLines(a, defaults, &respelled)).len);
 
-    // q removed, h changed, a new one.
+    // q removed, h changed, a new one (with quotes in the action).
     const edited = [_]Entry{
         .{ .combo = "Super+Return", .action = "spawn_terminal", .user = false },
         .{ .combo = "Super+h", .action = "focus_right", .user = true },
-        .{ .combo = "Super+x", .action = "minimize", .user = true },
+        .{ .combo = "Super+x", .action = "shell notify-send \"hi\"", .user = true },
     };
     const lines = try userLines(a, defaults, &edited);
     try std.testing.expectEqual(@as(usize, 3), lines.len);
-    try std.testing.expectEqualStrings("unbind = Super+q", lines[0]);
-    try std.testing.expectEqualStrings("bind = Super+h, focus_right", lines[1]);
-    try std.testing.expectEqualStrings("bind = Super+x, minimize", lines[2]);
+    try std.testing.expectEqualStrings("unbind(\"Super+q\")", lines[0]);
+    try std.testing.expectEqualStrings("bind(\"Super+h\", \"focus_right\")", lines[1]);
+    try std.testing.expectEqualStrings("bind(\"Super+x\", \"shell notify-send \\\"hi\\\"\")", lines[2]);
 
     // And the compositor's own rule turns that back into the same list.
     var text: std.ArrayList(u8) = .empty;
@@ -481,35 +468,35 @@ test "userLines: nothing for the defaults, bind for new and changed, unbind for 
 test "rewriteUserLines replaces the bind lines where the first one was" {
     const gpa = std.testing.allocator;
     const text =
-        \\# my config
+        \\-- my config
         \\gap = 8
-        \\bind = Super+x, close
-        \\terminal = foot
-        \\unbind = Super+q
-        \\bind = Super+y, exit
-        \\# end
+        \\bind("Super+x", "close")
+        \\terminal = "foot"
+        \\unbind("Super+q")
+        \\bind("Super+y", "exit")
+        \\-- end
         \\
     ;
-    const out = try rewriteUserLines(gpa, text, &.{ "bind = Super+z, minimize", "unbind = Super+h" });
+    const out = try rewriteUserLines(gpa, text, &.{ "bind(\"Super+z\", \"minimize\")", "unbind(\"Super+h\")" });
     defer gpa.free(out);
     try std.testing.expectEqualStrings(
-        \\# my config
+        \\-- my config
         \\gap = 8
-        \\bind = Super+z, minimize
-        \\unbind = Super+h
-        \\terminal = foot
-        \\# end
+        \\bind("Super+z", "minimize")
+        \\unbind("Super+h")
+        \\terminal = "foot"
+        \\-- end
         \\
     , out);
 }
 
 test "rewriteUserLines: no old bind lines -> a block at the end; no new lines -> they vanish" {
     const gpa = std.testing.allocator;
-    const a = try rewriteUserLines(gpa, "gap = 8\n", &.{"bind = Super+z, minimize"});
+    const a = try rewriteUserLines(gpa, "gap = 8\n", &.{"bind(\"Super+z\", \"minimize\")"});
     defer gpa.free(a);
-    try std.testing.expectEqualStrings("gap = 8\n\n# ---- key bindings (set by wlprefs) ----\nbind = Super+z, minimize\n", a);
+    try std.testing.expectEqualStrings("gap = 8\n\n-- ---- key bindings (set by wlprefs) ----\nbind(\"Super+z\", \"minimize\")\n", a);
 
-    const b = try rewriteUserLines(gpa, "gap = 8\nbind = Super+x, close\n", &.{});
+    const b = try rewriteUserLines(gpa, "gap = 8\nbind(\"Super+x\", \"close\")\n", &.{});
     defer gpa.free(b);
     try std.testing.expectEqualStrings("gap = 8\n", b);
 
@@ -519,14 +506,23 @@ test "rewriteUserLines: no old bind lines -> a block at the end; no new lines ->
     try std.testing.expectEqualStrings("gap = 8", c);
 
     // Empty file.
-    const d = try rewriteUserLines(gpa, "", &.{"bind = Super+z, minimize"});
+    const d = try rewriteUserLines(gpa, "", &.{"bind(\"Super+z\", \"minimize\")"});
     defer gpa.free(d);
-    try std.testing.expect(std.mem.indexOf(u8, d, "bind = Super+z, minimize\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "bind(\"Super+z\", \"minimize\")\n") != null);
 
-    // A commented-out bind line is a comment, not a bind.
-    const e = try rewriteUserLines(gpa, "# bind = Super+x, close\n", &.{"bind = Super+y, exit"});
+    // A commented-out bind line, a loop and a block comment are not bind lines.
+    const e = try rewriteUserLines(gpa,
+        \\-- bind("Super+x", "close")
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\--[[
+        \\bind("Super+c", "close")
+        \\]]
+        \\
+    , &.{"bind(\"Super+y\", \"exit\")"});
     defer gpa.free(e);
-    try std.testing.expect(std.mem.startsWith(u8, e, "# bind = Super+x, close\n"));
+    try std.testing.expect(std.mem.startsWith(u8, e, "-- bind(\"Super+x\", \"close\")\nfor i = 1, 3 do"));
+    try std.testing.expect(std.mem.indexOf(u8, e, "--[[\nbind(\"Super+c\", \"close\")\n]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, e, "bind(\"Super+y\", \"exit\")\n") != null);
 }
 
 test "sameList ignores order and key spelling" {

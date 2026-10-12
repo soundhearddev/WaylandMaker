@@ -1,19 +1,26 @@
 .{
-    .name = .wlprefs,
-    .version = "0.1.0",
-    .fingerprint = 0x47c6934e22735532,
+    .name = .wmaker_wl,
+    .version = "0.2.0",
+    .fingerprint = 0xa5a98cf56f86884e,
     .minimum_zig_version = "0.16.0",
 
-    // Same pinned versions wmaker-wl itself uses, so both projects stay
-    // in lockstep and share the zig package cache.
     .dependencies = .{
+        // Wayland protocol bindings (scanner + client library wrappers).
         .wayland = .{
             .url = "https://codeberg.org/ifreund/zig-wayland/archive/v0.6.0.tar.gz",
             .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
         },
+        // xkbcommon bindings: key names and keysyms for the key bindings.
         .xkbcommon = .{
             .url = "https://codeberg.org/ifreund/zig-xkbcommon/archive/v0.4.0.tar.gz",
             .hash = "xkbcommon-0.4.0-VDqIe0i2AgDRsok2GpMFYJ8SVhQS10_PI2M_CnHXsJJZ",
+        },
+        // Lua for the config (config.lua). Fetched with
+        //     zig fetch --save git+https://github.com/natecraddock/ziglua
+        // and built from source (Lua 5.4, see build.zig): no system Lua.
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua#8b2c14e0f9f89a9407dd7dd91752c7d8fd03cb62",
+            .hash = "zlua-0.1.0-hGRpC8yYBQAtI5hy60lb1vK9Tc7s-Ouu0aMFe2Kdc3_s",
         },
     },
 
@@ -21,5 +28,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "protocol",
+        "wlprefs",
+        "examples",
     },
 }
