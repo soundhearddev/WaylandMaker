@@ -6,7 +6,7 @@
 
 | File | Purpose | Sends Wayland requests? |
 |---|---|---|
-| `config.zig` + `default_config.conf` | Settings and keybindings, single source of truth | no |
+| `config.zig` + `default_config.lua` | Settings and keybindings, single source of truth | no |
 | `types.zig` | Data model and invariants | no |
 | `layout.zig` | Pure geometry (columns, scrolling, floating) | no |
 | `workspace.zig` | All window-tree mutations | no |
@@ -81,7 +81,7 @@ States: `idle → requested → running → ending → idle` (see `types.OpState
 
 ## Configuration
 
-`~/.config/wmaker-wl/config.conf`, format defined in `src/default_config.conf`.
+`~/.config/wmaker-wl/config.conf`, format defined in `src/default_config.lua`.
 
 Invalid lines produce a warning and are skipped; startup never fails because of the config.
 

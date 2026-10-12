@@ -31,7 +31,7 @@ pub const max_workspaces = 16;
 /// wmaker-wl's own default config, embedded at build time (build.zig). The
 /// defaults below are *this file*, not a copy of it: a default changed in
 /// the compositor changes here with the next build.
-pub const default_config_text = @embedFile("default_config.conf");
+pub const default_config_text = @embedFile("default_config.lua");
 
 pub const CenterMode = enum { on_overflow, always, never };
 pub const NewWindowMode = enum { new_column, stack };
@@ -245,7 +245,7 @@ pub const Settings = struct {
     clip_on_top: bool = true,
     clip_collapsed: bool = false,
 
-    /// The compositor's defaults: wmaker-wl's shipped default_config.conf.
+    /// The compositor's defaults: wmaker-wl's shipped default_config.lua.
     pub fn init() Settings {
         var s: Settings = .{};
         parse(&s, default_config_text);
@@ -683,7 +683,7 @@ pub fn rebase(cur: *Settings, old_base: *const Settings, new_base: *const Settin
 
 const testing = std.testing;
 
-test "defaults are the compositor's shipped default_config.conf" {
+test "defaults are the compositor's shipped default_config.lua" {
     const d = Settings.init();
     try testing.expectEqualStrings("alacritty", d.terminal.get());
     try testing.expectEqualStrings("fuzzel", d.launcher.get());

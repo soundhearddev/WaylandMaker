@@ -49,7 +49,7 @@ auf ihrer Seite, warum und was man stattdessen tut.
 - Werte, die der Compositor ablehnen oder falsch lesen würde (leeres Terminal, Befehl mit führendem
   Anführungszeichen, Presets außerhalb (0,1], kein Maus-Modifier), werden **nicht geschrieben**, mit
   Meldung. Ein Wert, den das GUI nicht darstellen kann (`mouse_mod = Super+Mod5`), bleibt wie er ist.
-- Die Standardwerte stammen aus `src/share/default_config.conf` (zur Bauzeit eingebettet), nicht aus
+- Die Standardwerte stammen aus `src/share/default_config.lua` (zur Bauzeit eingebettet), nicht aus
   einer Kopie. Ein Test im Compositor prüft, dass alles, was wlprefs schreibt, von `config.zig` mit
   demselben Wert gelesen wird (`wlprefs and the compositor agree`).
 - Danach bekommt jeder laufende `wmaker-wl` des Nutzers `SIGHUP` (über `/proc`, ohne `pkill`).

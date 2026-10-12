@@ -17,7 +17,7 @@ Scrollable tiling with floating windows for [river](https://codeberg.org/river/r
 | `Super` + Left/Right mouse | Move / Resize window |
 | `Super+q` / `Super+Shift+e` | Close window / Exit |
 
-Keybindings can be changed in `~/.config/wmaker-wl/config.conf` (template: `src/default_config.conf`).
+Keybindings can be changed in `~/.config/wmaker-wl/config.conf` (template: `src/default_config.lua`).
 
 ## Build
 

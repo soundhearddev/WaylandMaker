@@ -278,7 +278,7 @@ pub const Fonts = struct {
 };
 
 /// Process-wide, set once per (re)load of the configuration. Defaults are
-/// those of default_config.conf.
+/// those of default_config.lua.
 pub var fonts: Fonts = blk: {
     var f: Fonts = .{};
     f.set("Sans Bold 10", "Sans 10", "Sans 8");

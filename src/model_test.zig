@@ -402,7 +402,7 @@ test "every default key binding parses to a real command" {
     var cfg = try config.load(std.testing.io, std.testing.allocator);
     defer cfg.deinit();
 
-    // Reaching here means default_config.conf parsed; now every bind's
+    // Reaching here means default_config.lua parsed; now every bind's
     // command text must map to a Command and every key to a keysym.
     try std.testing.expect(cfg.binds.len > 40);
 

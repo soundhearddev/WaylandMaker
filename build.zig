@@ -130,8 +130,8 @@ pub fn buildWlprefs(
 
     // wmaker-wl's own default config. wlprefs takes its defaults from it,
     // so "differs from the default" means the same in both programs.
-    mod.addAnonymousImport("default_config.conf", .{
-        .root_source_file = b.path("src/share/default_config.conf"),
+    mod.addAnonymousImport("default_config.lua", .{
+        .root_source_file = b.path("src/share/default_config.lua"),
     });
 
     fn_link_graphics(b, mod);
@@ -178,8 +178,8 @@ pub fn buildWlprefs(
         .target = target,
         .optimize = optimize,
     });
-    settings_mod.addAnonymousImport("default_config.conf", .{
-        .root_source_file = b.path("src/share/default_config.conf"),
+    settings_mod.addAnonymousImport("default_config.lua", .{
+        .root_source_file = b.path("src/share/default_config.lua"),
     });
 
     const actions_mod = b.createModule(.{
