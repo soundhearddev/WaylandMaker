@@ -9,7 +9,8 @@
       `SHORTCUT`-Anzeige. Zeiger-Cursor wechselt über Menü/Desktop korrekt zum Pfeil
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
-- [x] **wlprefs** (`wlprefs/`, siehe `docs/WMPREFS.md` „Stand“): lädt `config.conf` jetzt wirklich (der
+- [x] **wlprefs** (`wlprefs/`, siehe `docs/WMPREFS.md` „Stand“; **liest/schreibt noch das alte `config.conf`, das der
+      Compositor seit der Lua-Migration nicht mehr lädt, siehe „Offen“ unten**): lädt `config.conf` jetzt wirklich (der
       erste Entwurf las die Datei nie und ersetzte sie beim ersten Speichern durch die paar Zeilen, die
       von den Standardwerten abwichen), speichert nur geänderte Schlüssel in der Datei selbst,
       atomar mit Backup, sperrt sich bei unlesbarer Datei, deckt alle Dock-/Clip-/Workspace-Namen-/
@@ -79,8 +80,8 @@
       kappen; ob/wie river danach einen neuen WM-Client akzeptiert, ohne dass alle verwalteten Fenster
       unverwaltet zurückbleiben, ist ungeklärt. SIGHUP-Reload deckt den eigentlichen
       Bedarf ("neue Config ohne Sitzung neu zu starten") ab.
-- [x] **Phase 5 (der machbare Teil): Themes und `include`.** `theme = NAME` liest `Themes/NAME.conf`
-      (neben der `config.conf`, sonst `/usr/local/share/` und `/usr/share/wmaker-wl/Themes/`), `include = DATEI`
+- [x] **Phase 5 (der machbare Teil): Themes und `include`.** `theme("NAME")` liest `Themes/NAME.lua`
+      (neben der `config.lua`, sonst `/usr/local/share/` und `/usr/share/wmaker-wl/Themes/`), `include("DATEI")`
       liest eine beliebige Datei an dieser Stelle (spätere Zeilen überschreiben, Tiefe höchstens 4, relativ zur
       einbindenden Datei, `~/` geht). Ein Theme darf **nur** Farben, `border_width` und Gaps setzen; alles
       andere (Tastenkürzel, Programme, `include`) wird mit Warnung ignoriert, ein heruntergeladenes Theme
@@ -146,4 +147,10 @@
       über `river_shell_surface_v1`-Nodes
 - [x] **Zeiger-Cursor über Root-Menü/Desktop**: wechselt via `wp_cursor_shape_manager_v1` zur normalen
       Pfeilform, statt das zuletzt von einem Fenster gesetzte Bild zu behalten
-- [ ] Rewrite des config handling für lua. lua anstatt .conf
+- [x] Rewrite des config handling für lua. lua anstatt .conf (`config.zig`/`lua.zig`; `config.lua` gewinnt bei
+      Dock-/Clip-Schaltern gegenüber dem gespeicherten `WMState`, `Config.explicit`; ein übrig gebliebenes
+      `config.conf` wird beim Start mit einer Warnung gemeldet)
+- [ ] **wlprefs auf Lua umstellen**: `wlprefs/src/{settings,binds,prefs,configfile}.zig` parsen und schreiben noch
+      `key = value`/`bind = Mod+Key, cmd` in `config.conf` und lesen `default_config.lua` als INI. Muss `config.lua`
+      (Zuweisungen `key = wert`, `bind("..", "..")`) editieren, ohne die Datei neu zu erzeugen.
+- [ ] Config allow own variables

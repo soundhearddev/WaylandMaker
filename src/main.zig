@@ -367,7 +367,8 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     wm.dockapps = files.dockapps;
     wm.dock_state_path = files.dock_state_path;
     // What the user changed with the mouse last time (Dock position, levels,
-    // Clip switches) wins over config.conf, exactly like the entries do.
+    // Clip switches) wins over the DEFAULTS, but not over what config.lua
+    // names itself (see applyDockState).
     if (files.dockapps.state) |st| applyDockState(&wm.cfg, st);
     wm.dock_gen +%= 1;
     // Copied, not borrowed: see gfx.Fonts.
@@ -375,16 +376,40 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     return files;
 }
 
+/// The saved Dock state (what was last changed with the mouse) fills in the
+/// options the user did NOT write in config.lua; an option config.lua names
+/// itself always wins (`cfg.explicit`, see config.Explicit). Without this,
+/// the state file silently overrode `dock_edge`, `clip_corner`, ... forever
+/// after the first save.
 fn applyDockState(cfg: *config.Config, st: dockapp.State) void {
-    if (st.edge) |v| cfg.dock_edge = v;
-    if (st.offset) |v| cfg.dock_offset = v;
-    if (st.dock_on_top) |v| cfg.dock_on_top = v;
-    if (st.dock_auto_raise) |v| cfg.dock_auto_raise = v;
-    if (st.clip_corner) |v| cfg.clip_corner = v;
-    if (st.clip_on_top) |v| cfg.clip_on_top = v;
-    if (st.clip_collapsed) |v| cfg.clip_collapsed = v;
-    if (st.clip_auto_collapse) |v| cfg.clip_auto_collapse = v;
-    if (st.clip_auto_raise) |v| cfg.clip_auto_raise = v;
+    const ex = cfg.explicit;
+    if (st.edge) |v| {
+        if (!ex.dock_edge) cfg.dock_edge = v;
+    }
+    if (st.offset) |v| {
+        if (!ex.dock_offset) cfg.dock_offset = v;
+    }
+    if (st.dock_on_top) |v| {
+        if (!ex.dock_on_top) cfg.dock_on_top = v;
+    }
+    if (st.dock_auto_raise) |v| {
+        if (!ex.dock_auto_raise) cfg.dock_auto_raise = v;
+    }
+    if (st.clip_corner) |v| {
+        if (!ex.clip_corner) cfg.clip_corner = v;
+    }
+    if (st.clip_on_top) |v| {
+        if (!ex.clip_on_top) cfg.clip_on_top = v;
+    }
+    if (st.clip_collapsed) |v| {
+        if (!ex.clip_collapsed) cfg.clip_collapsed = v;
+    }
+    if (st.clip_auto_collapse) |v| {
+        if (!ex.clip_auto_collapse) cfg.clip_auto_collapse = v;
+    }
+    if (st.clip_auto_raise) |v| {
+        if (!ex.clip_auto_raise) cfg.clip_auto_raise = v;
+    }
 }
 
 fn rebind(wm: *WindowManager) void {
@@ -814,4 +839,16 @@ test "onManage reaps closed windows before syncing the menu, in the same sequenc
     const reap_pos = at(body, "window_mod.reap(wm)");
     const sync_pos = at(body, "u.sync()");
     try std.testing.expect(sync_pos > reap_pos);
+}
+
+test "applyDockState: the saved state does not override what config.lua names itself" {
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    cfg.explicit.clip_corner = true;
+    cfg.clip_corner = .top_left;
+    applyDockState(&cfg, .{ .clip_corner = .bottom_right, .edge = .left });
+    // named in config.lua: the config wins
+    try std.testing.expectEqual(config.ClipCorner.top_left, cfg.clip_corner);
+    // not named: the saved state is used
+    try std.testing.expectEqual(config.DockEdge.left, cfg.dock_edge);
 }

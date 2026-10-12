@@ -17,7 +17,30 @@ Scrollable tiling with floating windows for [river](https://codeberg.org/river/r
 | `Super` + Left/Right mouse | Move / Resize window |
 | `Super+q` / `Super+Shift+e` | Close window / Exit |
 
-Keybindings can be changed in `~/.config/wmaker-wl/config.conf` (template: `src/default_config.lua`).
+Keybindings can be changed in `~/.config/wmaker-wl/config.lua` (template: `src/share/default_config.lua`).
+
+## Configuration
+
+The config is a **Lua script**: `$XDG_CONFIG_HOME/wmaker-wl/config.lua`, else `~/.config/wmaker-wl/config.lua`.
+It runs on top of the built-in `src/share/default_config.lua`, so you only write what you want to change:
+
+```lua
+gap = 10
+clip_corner = "bottom_right"
+bind("Super+Shift+h", "move_column_left")
+unbind("Super+q")
+```
+
+- Every global you set is an option; an unknown name or a bad value is a warning in the log (typos do not go
+  unnoticed), a Lua error ends the script at that line and keeps what ran before it. The session always starts.
+- `include("FILE")` and `theme("NAME")` (`Themes/NAME.lua`) work as described in `default_config.lua`.
+- Reload without restarting: `pkill -HUP wmaker-wl`.
+- The old `config.conf` (`key = value`) is **not read any more**; wmaker-wl logs a warning if one is still lying around.
+- Dock/Clip: what you change with the mouse is saved in `$XDG_STATE_HOME/wmaker-wl/WMState`
+  (`~/.local/state/wmaker-wl/WMState`). Options that **your `config.lua` names itself** (`dock_edge`, `dock_offset`,
+  `dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`,
+  `clip_auto_raise`) win over that saved state; everything you leave out follows the saved state. To let the mouse
+  decide again, delete the line from `config.lua`.
 
 ## Build
 
@@ -32,15 +55,17 @@ river -c ./zig-out/bin/wmaker-wl
 
 Window Maker's **Dock** (a column of 64 px tiles on a screen edge) and **Clip** (workspace tile with arrows,
 plus per-workspace launchers) are built in; configure them with the `dock_*` / `clip_*` options in
-`config.conf` and the entries in `~/.config/wmaker-wl/dockapps.conf` (or an existing `WMState`).
+`config.lua`; the tiles themselves live in the `WMState` property list (`$XDG_STATE_HOME/wmaker-wl/WMState`, or an
+existing Window Maker `~/GNUstep/Defaults/WMState`).
 
 Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`), several monitors
 (`focus_output_*`, `move_to_output_*`), themes (`theme = NAME`, `include = FILE`), XPM icons for Dock tiles,
 `OPEN_MENU` for directories and menu files, scrolling menus, and `bind_layout` / umlaut key names for
 non-US keyboards. See `docs/TODO.md` for what is done and what is not.
 
-**wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`. It edits
-`~/.config/wmaker-wl/config.conf` in place -- only the keys you change, comments and `bind` lines stay -- and tells
-a running wmaker-wl to reload. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
+**wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`.
+**Not ported to Lua yet:** it still reads and writes the old `~/.config/wmaker-wl/config.conf`, which wmaker-wl no
+longer loads -- changes saved there have no effect until wlprefs is moved to `config.lua`. Edit `config.lua` by hand
+for now. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
 
-See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how to define DockApps (`~/.config/wmaker-wl/dockapps.conf`).
+See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how DockApps, the Dock and the Clip work (`WMState`).

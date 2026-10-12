@@ -81,9 +81,13 @@ States: `idle → requested → running → ending → idle` (see `types.OpState
 
 ## Configuration
 
-`~/.config/wmaker-wl/config.conf`, format defined in `src/default_config.lua`.
+`$XDG_CONFIG_HOME/wmaker-wl/config.lua` (else `~/.config/wmaker-wl/config.lua`): a Lua 5.4 script (ziglua, linked statically, `lua.zig`) that runs on top of the built-in `src/share/default_config.lua`. Every global it sets is an option, `bind()`/`unbind()`/`include()`/`theme()` are the functions it can call. `config.zig` runs the built-in script first and then the user's, each in its own Lua state; the user's script only touches what it names.
 
-Invalid lines produce a warning and are skipped; startup never fails because of the config.
+A Lua error, an unknown option or a bad value produces a warning and is skipped; startup never fails because of the config. `pkill -HUP wmaker-wl` reloads it (`main.reloadConfig`).
+
+The old `config.conf` is not read any more; `config.load` logs a warning if it still exists next to `config.lua`.
+
+**Dock/Clip precedence.** The Dock/Clip switches (`dock_edge`, `dock_offset`, `dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`, `clip_auto_raise`) can also come from the saved `WMState` (what was last changed with the mouse). `Config.explicit` records which of them the user's `config.lua` names itself (the built-in defaults never count); `main.applyDockState` lets the saved state set only the others. A line in `config.lua` therefore always wins.
 
 Key names are xkbcommon keysyms and follow the **active keyboard layout**. The old QWERTZ remapping was removed: river compares against the active layout, and additional remapping made bindings incorrect.
 

@@ -1,3 +1,9 @@
+> **Achtung, Stand nach der Lua-Migration:** wmaker-wl liest seine Einstellungen jetzt aus `config.lua`
+> (siehe README, „Configuration“). wlprefs (`wlprefs/src/`) arbeitet noch mit dem alten `config.conf`
+> (`key = value`, `bind = Mod+Key, cmd`) und ist **noch nicht** portiert: was es speichert, lädt der Compositor nicht.
+> Die Beschreibungen unten sprechen deshalb noch von `config.conf`; gemeint ist das künftige `config.lua`.
+> Offen: `docs/TODO.md`, „wlprefs auf Lua umstellen“.
+
 # WPrefs für wmaker-wl: Bestandsaufnahme & Plan
 
 Dieses Dokument beschreibt, was X11 Window Makers `WPrefs.app` konfiguriert, was davon in

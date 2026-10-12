@@ -108,9 +108,28 @@ pub const max_pixels: i32 = 10_000;
 /// xkbcommon allows at most four layouts per keymap.
 pub const max_bind_layouts = 4;
 
+/// Dock/Clip options that the saved Dock state (WMState, see wm_files.zig)
+/// can also set. `true` = the user's own config.lua names the option, and
+/// then the config wins over the saved state; an option the user never wrote
+/// down is taken from the saved state (what was last changed with the mouse).
+/// The built-in defaults never count as "written down".
+pub const Explicit = struct {
+    dock_edge: bool = false,
+    dock_offset: bool = false,
+    dock_on_top: bool = false,
+    dock_auto_raise: bool = false,
+    clip_corner: bool = false,
+    clip_on_top: bool = false,
+    clip_collapsed: bool = false,
+    clip_auto_collapse: bool = false,
+    clip_auto_raise: bool = false,
+};
+
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     config_file: []const u8 = "(built-in defaults)",
+    /// Which Dock/Clip options config.lua sets itself, see `Explicit`.
+    explicit: Explicit = .{},
 
     // ---- layout ---------------------------------------------------------
     gap: i32 = 8,
@@ -283,10 +302,23 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) !Config {
         } else |err| {
             std.log.info("no user config at {s} ({t}); using defaults", .{ path, err });
         }
+        warnLegacyConfig(io, a, path);
     }
 
     cfg.binds = try binds.toOwnedSlice(a);
     return cfg;
+}
+
+/// Before the move to Lua the file was `config.conf` (`key = value` lines).
+/// It is not read any more (and neither does anything else pick it up), so
+/// say so instead of silently ignoring a file the user, or an older wlprefs,
+/// wrote: that looks exactly like "my config is not loaded".
+fn warnLegacyConfig(io: std.Io, a: std.mem.Allocator, lua_path: []const u8) void {
+    const dir = std.fs.path.dirname(lua_path) orelse return;
+    const old = std.fmt.allocPrint(a, "{s}/config.conf", .{dir}) catch return;
+    if (std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, old, a, .limited(1 << 20))) |_| {
+        std.log.warn("{s} is NOT read any more: the config is now {s} (Lua, see share/default_config.lua)", .{ old, lua_path });
+    } else |_| {}
 }
 
 fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
@@ -685,11 +717,22 @@ fn applyEntry(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!voi
     const L = ctx.L;
     const key = lua.toSlice(L, -2) orelse return;
     if (key.len == 0 or key[0] == '_' or baseline.contains(key)) return;
-    applyOption(ctx, key) catch |err| switch (err) {
+    if (applyOption(ctx, key)) |_| {
+        markExplicit(ctx, key);
+    } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.UnknownKey => ctx.warn("{s}: unknown option `{s}`", .{ ctx.origin, key }),
         error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, key, lua.typeName(L, -1) }),
-    };
+    }
+}
+
+/// Remember that the user's script (not the built-in defaults) set `key`,
+/// if it is one of the options the saved Dock state must not override.
+fn markExplicit(ctx: *Ctx, key: []const u8) void {
+    if (ctx.origin.len > 0 and ctx.origin[0] == '<') return; // "<built-in>", "<test>"
+    inline for (@typeInfo(Explicit).@"struct".fields) |f| {
+        if (std.mem.eql(u8, key, f.name)) @field(ctx.cfg.explicit, f.name) = true;
+    }
 }
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
@@ -1629,4 +1672,31 @@ test "Dock options: the new switches parse, defaults" {
     try parseText(arena.allocator(), &cfg, "dock_level = \"top\"\n");
     try std.testing.expectEqual(before + 1, cfg.parse_warnings);
     try std.testing.expect(!cfg.dock_on_top);
+}
+
+test "options config.lua sets itself are explicit; the built-in defaults are not" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{ .paths = &.{}, .texts = &.{} };
+    try parseFake(&files,
+        \\clip_corner = "bottom_right"
+        \\dock_edge = "left"
+        \\gap = 4
+    , &cfg);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(ClipCorner.bottom_right, cfg.clip_corner);
+    try std.testing.expect(cfg.explicit.clip_corner);
+    try std.testing.expect(cfg.explicit.dock_edge);
+    try std.testing.expect(!cfg.explicit.clip_on_top);
+    try std.testing.expect(!cfg.explicit.dock_offset);
+}
+
+test "the built-in default config marks no option explicit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var binds: std.ArrayList(Bind) = .empty;
+    try parse(arena.allocator(), default_config_text, &cfg, &binds, "<built-in>");
+    try std.testing.expectEqual(Explicit{}, cfg.explicit);
 }

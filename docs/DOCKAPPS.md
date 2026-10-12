@@ -49,8 +49,16 @@ $XDG_STATE_HOME/wmaker-wl/WMState      (sonst ~/.local/state/wmaker-wl/WMState)
 
 wmaker-wl schreibt die erste Datei selbst (atomar, per `rename`), sobald man Kacheln bewegt,
 hinzufügt, entfernt oder Schalter ändert (`dock_save_state = true`). Beim Start gewinnt sie vor
-`~/GNUstep`; ein leeres gespeichertes Dock bleibt leer. Löschen setzt auf `~/GNUstep` bzw. `config.conf`
-zurück.
+`~/GNUstep`; ein leeres gespeichertes Dock bleibt leer. Löschen setzt auf `~/GNUstep` bzw. die Werte der
+`config.lua` zurück.
+
+**Vorrang gegenüber `config.lua`:** Die gespeicherten Schalter (`dock_edge`, `dock_offset`,
+`dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`,
+`clip_auto_collapse`, `clip_auto_raise`) füllen nur die Optionen, die in der eigenen `config.lua`
+**nicht** stehen. Steht eine davon in der `config.lua`, gewinnt die Config (auch nach einem Neustart
+oder `SIGHUP`); Änderungen mit der Maus an dieser Option gelten dann nur bis dahin. Zeile aus der
+`config.lua` löschen, damit wieder die Maus entscheidet. Die eingebauten Standardwerte zählen nicht
+als „selbst geschrieben“.
 
 Gelesen und geschrieben werden:
 
@@ -66,7 +74,7 @@ Clip `x`.
 
 ## Dock-Optionen
 
-`dock_*` / `clip_*` in `config.conf`; Fensterzuordnung über `app_id` statt `WM_CLASS`
+`dock_*` / `clip_*` in `config.lua` (Lua-Variablen, z. B. `clip_corner = "bottom_right"`); Fensterzuordnung über `app_id` statt `WM_CLASS`
 (`DockApp.matches`: expliziter `WMakerWLAppId`, `dockapp:<Name>`, Teile von `instance.Class`,
 Programmname).
 

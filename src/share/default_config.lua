@@ -50,7 +50,7 @@ terminal = "alacritty"
 launcher = "fuzzel"
 browser = "firefox"
 
--- ---- WindowMaker compatibility (see attributes.conf) -------------------------
+-- ---- WindowMaker compatibility (WMRootMenu, WMWindowAttributes, WMState) ------
 enable_wmaker_compat = false
 
 -- ---- session ------------------------------------------------------------------
@@ -100,6 +100,15 @@ bind_layout = "current"
 -- the tile with the workspace number and two arrows (upper right: next
 -- workspace, lower left: previous), plus the Clip entries of the current
 -- workspace. Both are drawn on the first output.
+--
+-- Precedence: wmaker-wl also remembers what you change with the mouse (move
+-- the Dock/Clip, "Keep on Top", Collapsed, ...) in
+-- $XDG_STATE_HOME/wmaker-wl/WMState. An option you write in YOUR config.lua
+-- (dock_edge, dock_offset, dock_on_top, dock_auto_raise, clip_corner,
+-- clip_on_top, clip_collapsed, clip_auto_collapse, clip_auto_raise) always
+-- wins over that saved state. An option you leave out takes the saved value
+-- (or the default below if nothing was saved yet). The lines below are only
+-- the defaults: they do not count as "written by you".
 dock_enabled = true
 dock_edge = "right"                -- left | right
 dock_offset = 0                  -- px from the top of the screen
