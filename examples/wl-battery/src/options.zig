@@ -19,7 +19,9 @@ pub const usage =
     \\options:
     \\  -n, --name NAME      app_id suffix; keep it equal to the program name (default: wl-battery)
     \\  -b, --battery NAME   power supply to show, e.g. BAT1 (default: the first battery)
-    \\  -i, --interval SEC   read the battery every SEC seconds, 1..3600 (default: 5)
+    \\  -i, --interval SEC   read the battery at least every SEC seconds, 1..3600 (default: 5);
+    \\                       plug/unplug and charge changes arrive as kernel events at once
+    \\  -v, --verbose        print every redraw to stderr (to see what it does)
     \\      --snapshot FILE  draw one frame into FILE (PPM image) and exit; no
     \\                       Wayland connection needed
     \\  -h, --help           show this text
@@ -32,6 +34,7 @@ pub const Options = struct {
     name: []const u8 = "wl-battery",
     battery: ?[]const u8 = null,
     interval: u32 = 5,
+    verbose: bool = false,
     snapshot: ?[:0]const u8 = null,
 };
 
@@ -55,7 +58,9 @@ pub fn parse(it: anytype) Error!Options {
     while (it.next()) |arg| {
         if (eql(arg, "-h") or eql(arg, "--help")) return error.HelpRequested;
 
-        if (try value(arg, "-n", "--name", it)) |v| {
+        if (eql(arg, "-v") or eql(arg, "--verbose")) {
+            o.verbose = true;
+        } else if (try value(arg, "-n", "--name", it)) |v| {
             if (!validName(v)) return error.InvalidName;
             o.name = v;
         } else if (try value(arg, "-b", "--battery", it)) |v| {
@@ -138,6 +143,12 @@ test "no arguments: the defaults" {
     try std.testing.expectEqualStrings("wl-battery", o.name);
     try std.testing.expect(o.battery == null and o.snapshot == null);
     try std.testing.expectEqual(@as(u32, 5), o.interval);
+    try std.testing.expect(!o.verbose);
+}
+
+test "verbose" {
+    try std.testing.expect((try run(&.{"-v"})).verbose);
+    try std.testing.expect((try run(&.{"--verbose"})).verbose);
 }
 
 test "every option, in all its spellings" {

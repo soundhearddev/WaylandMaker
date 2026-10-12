@@ -41,8 +41,6 @@ const seatmod = @import("seat.zig");
 const Window = types.Window;
 const WindowManager = types.WindowManager;
 
-pub const tile = dock_mod.tile;
-
 /// Does this app_id declare a DockApp?
 pub fn isDockApp(app_id: ?[]const u8) bool {
     return dockapp.isSelfDeclared(app_id);
@@ -102,8 +100,8 @@ pub const Size = struct { w: i32, h: i32 };
 /// No hint means a whole tile. (A minimum above a tile cannot be honoured
 /// inside the tile; the window then overflows it rather than being cut.)
 pub fn hostedSize(min_w: i32, min_h: i32, max_w: i32, max_h: i32) Size {
-    const w = if (max_w > 0) @min(max_w, tile) else tile;
-    const h = if (max_h > 0) @min(max_h, tile) else tile;
+    const w = if (max_w > 0) @min(max_w, dock_mod.tile) else dock_mod.tile;
+    const h = if (max_h > 0) @min(max_h, dock_mod.tile) else dock_mod.tile;
     return .{ .w = @max(w, min_w), .h = @max(h, min_h) };
 }
 
@@ -111,8 +109,8 @@ pub fn hostedSize(min_w: i32, min_h: i32, max_w: i32, max_h: i32) Size {
 /// is the output-local (tx, ty) of the output at `out`.
 pub fn tileRect(out: types.Rect, tx: i32, ty: i32, w: i32, h: i32) types.Rect {
     return .{
-        .x = out.x + tx + @divTrunc(tile - w, 2),
-        .y = out.y + ty + @divTrunc(tile - h, 2),
+        .x = out.x + tx + @divTrunc(dock_mod.tile - w, 2),
+        .y = out.y + ty + @divTrunc(dock_mod.tile - h, 2),
         .w = w,
         .h = h,
     };
@@ -313,7 +311,7 @@ test "tileRect centres the window in the tile of the output" {
     try std.testing.expectEqual(@as(i32, 1920 + 1856 + 8), r.x);
     try std.testing.expectEqual(@as(i32, 128 + 8), r.y);
     try std.testing.expectEqual(@as(i32, 48), r.w);
-    const full = tileRect(out, 0, 0, tile, tile);
+    const full = tileRect(out, 0, 0, dock_mod.tile, dock_mod.tile);
     try std.testing.expectEqual(@as(i32, 1920), full.x);
     // Larger than the tile: it overflows evenly.
     const big = tileRect(out, 100, 100, 100, 64);

@@ -26,6 +26,7 @@ const battery = @import("battery.zig");
 const face = @import("face.zig");
 const options = @import("options.zig");
 const sysfs = @import("sysfs.zig");
+const uevent = @import("uevent.zig");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -37,6 +38,7 @@ test {
     _ = face;
     _ = options;
     _ = sysfs;
+    _ = uevent;
 }
 
 /// linux/input-event-codes.h BTN_LEFT.
@@ -66,8 +68,11 @@ const State = struct {
     /// Both buffers' pixels, one after the other.
     pixels: []u32 = &.{},
 
-    /// --battery NAME (null: the first battery).
-    want: ?[]const u8 = null,
+    /// Cached sysfs file descriptors: a read is a few pread() calls.
+    reader: sysfs.Reader = .{},
+    /// Kernel uevent socket, -1: none (then only the timer).
+    uevent_fd: c_int = -1,
+    verbose: bool = false,
     interval_ms: i64 = 5000,
     /// Monotonic ms of the next sysfs read; 0 = read at once.
     next_read: i64 = 0,
@@ -99,7 +104,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var state: State = .{
-        .want = opts.battery,
+        .reader = .{ .wanted = opts.battery },
+        .verbose = opts.verbose,
         .interval_ms = @as(i64, opts.interval) * 1000,
     };
 
@@ -107,7 +113,8 @@ pub fn main(init: std.process.Init) !void {
     // and for the screenshot in the README.
     if (opts.snapshot) |path| {
         var px: face.Pixels = undefined;
-        face.render(&px, sysfs.read(opts.battery));
+        var reader: sysfs.Reader = .{ .wanted = opts.battery };
+        face.render(&px, reader.read());
         writePpm(path, &px) catch |err| {
             std.debug.print("wl-battery: cannot write {s}: {t}\n", .{ path, err });
             std.process.exit(1);
@@ -128,6 +135,7 @@ pub fn main(init: std.process.Init) !void {
     // skip every `defer` below. The handlers only set a flag; poll() is what
     // notices (it returns EINTR), see run loop.
     installExitSignalHandlers();
+    state.uevent_fd = uevent.open();
 
     const registry = try display.getRegistry();
     registry.setListener(*State, registryListener, &state);
@@ -201,19 +209,35 @@ fn runLoop(display: *wl.Display, state: *State) !void {
             return error.FlushFailed;
         }
 
-        var pfd: c.struct_pollfd = .{
-            .fd = display.getFd(),
-            .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
-            .revents = 0,
+        var pfds = [2]c.struct_pollfd{
+            .{
+                .fd = display.getFd(),
+                .events = @intCast(c.POLLIN | (if (flushed == .AGAIN) c.POLLOUT else 0)),
+                .revents = 0,
+            },
+            .{ .fd = state.uevent_fd, .events = @intCast(c.POLLIN), .revents = 0 },
         };
-        const rc = c.poll(&pfd, 1, msUntilNextRead(state));
+        const nfds: c.nfds_t = if (state.uevent_fd >= 0) 2 else 1;
+        const rc = c.poll(&pfds, nfds, msUntilNextRead(state));
 
-        if (rc > 0 and pfd.revents & c.POLLIN != 0) {
+        if (rc > 0 and pfds[0].revents & c.POLLIN != 0) {
             if (display.readEvents() != .SUCCESS) return error.DispatchFailed;
         } else {
             display.cancelRead();
             // The compositor went away.
-            if (rc > 0 and pfd.revents & (c.POLLERR | c.POLLHUP) != 0) return;
+            if (rc > 0 and pfds[0].revents & (c.POLLERR | c.POLLHUP) != 0) return;
+        }
+
+        // The kernel says a power supply changed: read now, not at the next tick.
+        if (rc > 0 and nfds == 2 and pfds[1].revents & c.POLLIN != 0) {
+            switch (uevent.drain(state.uevent_fd)) {
+                .none => {},
+                .change => state.force = true,
+                .topology => {
+                    state.reader.rediscover();
+                    state.force = true;
+                },
+            }
         }
         if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
     }
@@ -225,17 +249,21 @@ fn nowMs() i64 {
     return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
 }
 
+/// Without a battery nothing changes by itself (a new one announces itself
+/// by uevent), so the timer can be slow.
+const idle_ms: i64 = 60_000;
+
 /// Milliseconds until the battery is read next.
 fn msUntilNextRead(state: *const State) c_int {
     const wait = state.next_read - nowMs();
-    return @intCast(std.math.clamp(wait, 1, state.interval_ms));
+    return @intCast(std.math.clamp(wait, 1, @max(state.interval_ms, idle_ms)));
 }
 
 fn redrawIfNeeded(state: *State) void {
     const t = nowMs();
     if (state.force or t >= state.next_read) {
-        state.bat = sysfs.read(state.want);
-        state.next_read = t + state.interval_ms;
+        state.bat = state.reader.read();
+        state.next_read = t + (if (state.bat.present) state.interval_ms else idle_ms);
         state.force = false;
     }
     if (!state.dirty) {
@@ -257,6 +285,10 @@ fn redrawIfNeeded(state: *State) void {
     state.bufs[idx].busy = true;
     state.shown = state.bat;
     state.dirty = false;
+    if (state.verbose) {
+        const b = state.bat;
+        std.debug.print("wl-battery: draw present={} {d}% {t} ac={} power={any}mW time={any}min\n", .{ b.present, b.percent, b.status, b.ac, b.power_mw, b.minutes });
+    }
 }
 
 // ----------------------------------------------------------------------------

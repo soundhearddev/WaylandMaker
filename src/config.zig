@@ -104,6 +104,9 @@ pub const max_workspaces = 16;
 /// value such as `gap = 2000000000` would overflow `i32` there and crash the
 /// window manager, so it is refused when the file is read instead.
 pub const max_pixels: i32 = 10_000;
+/// Allowed range of `dock_size` (px per tile).
+pub const min_dock_size: i32 = 16;
+pub const max_dock_size: i32 = 256;
 
 /// xkbcommon allows at most four layouts per keymap.
 pub const max_bind_layouts = 4;
@@ -220,6 +223,9 @@ pub const Config = struct {
     /// tile is the Window Maker logo tile, the others are the DockApps of
     /// WMState.
     dock_enabled: bool = true,
+    /// Edge length of one Dock/Clip tile in px (Window Maker's icon size,
+    /// default 64). The icon inside is 3/4 of it.
+    dock_size: i32 = 64,
     dock_edge: DockEdge = .right,
     /// Distance of the Dock's top edge from the top of the screen, in px.
     dock_offset: i32 = 0,
@@ -758,6 +764,13 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
             @field(cfg, name) = @intCast(v);
             return;
         }
+    }
+
+    if (eql(u8, key, "dock_size")) {
+        const v = lua.toInteger(L, -1) orelse return error.Invalid;
+        if (v < min_dock_size or v > max_dock_size) return error.Invalid;
+        cfg.dock_size = @intCast(v);
+        return;
     }
 
     inline for (.{ "default_column_width", "width_step", "floating_size" }) |name| {

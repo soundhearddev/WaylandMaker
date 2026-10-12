@@ -95,7 +95,7 @@ enable_dockapps = true
 bind_layout = "current"
 
 -- ---- Dock and Clip ----------------------------------------------------------
--- The Dock is Window Maker's column of 64 px tiles on a screen edge (a logo
+-- The Dock is Window Maker's column of tiles (dock_size, 64 px by default) on a screen edge (a logo
 -- tile, then the entries of WMState). The Clip is
 -- the tile with the workspace number and two arrows (upper right: next
 -- workspace, lower left: previous), plus the Clip entries of the current
@@ -110,6 +110,7 @@ bind_layout = "current"
 -- (or the default below if nothing was saved yet). The lines below are only
 -- the defaults: they do not count as "written by you".
 dock_enabled = true
+dock_size = 64                   -- px per tile (16..256); the icon inside is 3/4 of it
 dock_edge = "right"                -- left | right
 dock_offset = 0                  -- px from the top of the screen
 dock_on_top = true               -- false: below the windows (the Dock menu changes it at run time)

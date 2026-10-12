@@ -41,6 +41,7 @@ const action = root.action;
 const wm_files = root.wm_files;
 const dockapp = root.dockapp;
 const dockhost = root.dockhost;
+const dock_mod = root.dock;
 const proc = root.proc;
 const ui_mod = root.ui;
 const gfx = root.gfx;
@@ -372,6 +373,7 @@ fn loadFromConfigImpl(wm: *WindowManager) !wm_files.Loaded {
     if (files.dockapps.state) |st| applyDockState(&wm.cfg, st);
     wm.dock_gen +%= 1;
     // Copied, not borrowed: see gfx.Fonts.
+    dock_mod.setSize(wm.cfg.dock_size);
     gfx.fonts.set(wm.cfg.font_menu_title, wm.cfg.font_menu, wm.cfg.font_dock);
     return files;
 }

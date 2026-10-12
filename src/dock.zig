@@ -41,10 +41,21 @@ const Rect = types.Rect;
 // Look (Window Maker / NeXT, same palette as the menu in ui.zig)
 // ----------------------------------------------------------------------------
 
-/// Window Maker's default icon size.
-pub const tile: i32 = 64;
-/// Side of the (square) icon inside a tile.
-pub const icon_size: i32 = 48;
+/// Default tile size (Window Maker's default icon size).
+pub const default_tile: i32 = 64;
+/// Edge length of a tile in px. Set from `dock_size` in config.lua (see
+/// `setSize`); a plain variable because the whole Dock geometry is derived
+/// from it and the compositor is single-threaded.
+pub var tile: i32 = default_tile;
+/// Side of the (square) icon inside a tile: 3/4 of the tile (48 of 64).
+pub var icon_size: i32 = 48;
+
+/// Apply the configured tile size. Everything is recomputed from `tile`
+/// on the next layout pass (ui.prepareBar re-creates surfaces whose size changed).
+pub fn setSize(size: i32) void {
+    tile = size;
+    icon_size = @divTrunc(size * 3, 4);
+}
 /// Edge length of the workspace arrow buttons in the Clip's corners.
 pub const arrow: i32 = 16;
 

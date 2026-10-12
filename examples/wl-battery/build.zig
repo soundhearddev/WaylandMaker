@@ -29,7 +29,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true, // fopen, opendir, poll
+        .link_libc = true, // fopen, opendir, poll, netlink
+        .single_threaded = true,
+        .strip = optimize != .Debug,
     });
     exe_module.addImport("wayland", wayland_module);
     exe_module.linkSystemLibrary("wayland-client", .{});

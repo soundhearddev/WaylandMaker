@@ -374,23 +374,36 @@ fn fmtPower(buf: []u8, mw: u32) []const u8 {
     return std.fmt.bufPrint(buf, "{d}W", .{(mw + 500) / 1000}) catch "";
 }
 
+/// Tile and empty LCD: the same for every frame, so it is painted once
+/// (4096 float blends) and then only copied (one memcpy).
+var bg: Pixels = undefined;
+var bg_ready = false;
+
+fn background() *const Pixels {
+    if (!bg_ready) {
+        const px = &bg;
+        // Diagonal gradient and the two-step bevel of dock.zig's tiles.
+        for (0..side) |yy| {
+            for (0..side) |xx| {
+                const t = @as(f32, @floatFromInt(xx + yy)) / (2.0 * (side - 1));
+                px[yy * side + xx] = mix(col_tile_from, col_tile_to, t);
+            }
+        }
+        bevel(px, 0, 0, tile, tile, col_light, col_dark);
+        bevel(px, 1, 1, tile - 2, tile - 2, col_light, col_dark);
+        // The recessed LCD.
+        bevel(px, lcd_x - 1, lcd_y - 1, lcd_w + 2, lcd_h + 2, col_dark, col_light);
+        fillRect(px, lcd_x, lcd_y, lcd_w, lcd_h, col_lcd);
+        bg_ready = true;
+    }
+    return &bg;
+}
+
 pub fn render(px: *Pixels, info: Info) void {
     const pct: u8 = if (info.present) @min(info.percent, 100) else 0;
     const lit = levelColor(info);
 
-    // Tile: diagonal gradient and the two-step bevel of dock.zig's tiles.
-    for (0..side) |yy| {
-        for (0..side) |xx| {
-            const t = @as(f32, @floatFromInt(xx + yy)) / (2.0 * (side - 1));
-            px[yy * side + xx] = mix(col_tile_from, col_tile_to, t);
-        }
-    }
-    bevel(px, 0, 0, tile, tile, col_light, col_dark);
-    bevel(px, 1, 1, tile - 2, tile - 2, col_light, col_dark);
-
-    // The recessed LCD.
-    bevel(px, lcd_x - 1, lcd_y - 1, lcd_w + 2, lcd_h + 2, col_dark, col_light);
-    fillRect(px, lcd_x, lcd_y, lcd_w, lcd_h, col_lcd);
+    px.* = background().*; // tile + LCD, built once
 
     // Row A: status symbol, plug when on AC, power.
     if (!info.present) {
