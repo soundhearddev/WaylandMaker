@@ -681,7 +681,10 @@ pub fn render(
             continue;
         }
 
-        const indent_len = raw.len - std.mem.trimStart(u8, raw, " \t").len;
+        // Indentation, after a byte order mark if the file starts with one:
+        // both stay as they are when the line is rewritten.
+        const bom: usize = if (std.mem.startsWith(u8, raw, "\xEF\xBB\xBF")) 3 else 0;
+        const indent_len = bom + (raw.len - bom - std.mem.trimStart(u8, raw[bom..], " \t").len);
 
         // `theme("")` is an error for the compositor; clearing the theme
         // comments the line out instead.

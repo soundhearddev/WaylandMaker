@@ -880,8 +880,8 @@ test "recheckFloating: a window still in its initial placement (new) is left for
 }
 
 // ----------------------------------------------------------------------------
-// wlprefs and the compositor must agree. wlprefs writes config.conf lines; the
-// compositor reads them. Every key wlprefs knows is written with a value that
+// wlprefs and the compositor must agree. wlprefs writes config.lua lines (a
+// Lua dialect, see wlprefs/src/lualine.zig); the compositor runs them. Every key wlprefs knows is written with a value that
 // differs from the default, and read back by config.zig.
 // ----------------------------------------------------------------------------
 
@@ -1075,7 +1075,7 @@ test "everything wlprefs writes is read back by the compositor with the same val
     try std.testing.expectEqual(@as(?u32, 1), cfg.bind_layout);
     // `theme` needs an Includer to do anything; here it is only a line that
     // must not stop the parse.
-    try std.testing.expect(std.mem.indexOf(u8, text, "theme = nord\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "theme(\"nord\")\n") != null);
 }
 
 test "wlprefs' action list is exactly what the compositor knows" {
@@ -1111,8 +1111,8 @@ test "the compositor accepts a config that wlprefs edited in place, binds includ
     const gpa = std.testing.allocator;
     const original =
         \\gap = 8
-        \\bind = Super+x, shell notify-send hi
-        \\unbind = Super+q
+        \\bind("Super+x", "shell notify-send hi")
+        \\unbind("Super+q")
         \\
     ;
     var base = prefs_settings.Settings.init();
@@ -1125,8 +1125,8 @@ test "the compositor accepts a config that wlprefs edited in place, binds includ
     var cfg = try parseWithCompositor(gpa, text);
     defer cfg.deinit();
     try std.testing.expectEqual(@as(i32, 20), cfg.gap);
-    try std.testing.expect(std.mem.indexOf(u8, text, "bind = Super+x, shell notify-send hi") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "unbind = Super+q") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "bind(\"Super+x\", \"shell notify-send hi\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "unbind(\"Super+q\")") != null);
 }
 
 // ----------------------------------------------------------------------------

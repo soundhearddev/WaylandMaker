@@ -41,6 +41,21 @@ pub fn openLibs(L: *State) void {
     L.openLibs();
 }
 
+/// A config is trusted, but two standard functions would not just do the
+/// wrong thing, they would take the whole session with them: `os.exit()`
+/// ends the compositor from inside a config, and `io.read()` blocks on
+/// stdin forever (the instruction limit cannot interrupt a blocked call).
+/// Call right after openLibs.
+pub fn harden(L: *State) void {
+    inline for (.{ .{ "os", "exit" }, .{ "io", "read" } }) |p| {
+        if (L.getGlobal(p[0]) == .table) {
+            L.pushNil();
+            L.setField(-2, p[1]);
+        }
+        L.pop(1); // the table, or whatever else the global was
+    }
+}
+
 fn instructionLimit(L: *State, _: zlua.Event, _: *zlua.DebugInfo) void {
     L.raiseErrorStr("script ran for far too long (endless loop?)", .{});
 }

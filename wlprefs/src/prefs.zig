@@ -7,7 +7,7 @@
 //
 // What this exists to guarantee (the first version of wlprefs got all of it
 // wrong -- it never read the file, so the first Save replaced the user's
-// whole config.conf with the few lines that differed from the defaults):
+// whole config.lua with the few lines that differed from the defaults):
 //
 //   * `load()` reads the file once at start-up. If it exists but cannot be
 //     read, saving is DISABLED, not silently done from an empty state.
@@ -288,9 +288,9 @@ pub const Prefs = struct {
 
     /// What to say when the window opens.
     pub fn openingMessage(p: *Prefs) []const u8 {
-        if (p.path == null) return "No HOME / XDG_CONFIG_HOME: cannot find config.conf";
+        if (p.path == null) return "No HOME / XDG_CONFIG_HOME: cannot find config.lua";
         if (p.load_error) |e| return configfile.readErrorText(e);
-        if (p.is_new) return "No config.conf yet: it is created on the first Save";
+        if (p.is_new) return "No config.lua yet: it is created on the first Save";
         return "";
     }
 
@@ -317,7 +317,7 @@ pub const Prefs = struct {
     pub fn save(p: *Prefs) SaveResult {
         const path = p.path orelse return .{
             .outcome = .refused,
-            .message = "No HOME / XDG_CONFIG_HOME: cannot find config.conf",
+            .message = "No HOME / XDG_CONFIG_HOME: cannot find config.lua",
         };
         if (p.load_error) |e| return .{ .outcome = .refused, .message = configfile.readErrorText(e) };
 
@@ -450,17 +450,17 @@ test "THE BUG: saving one setting keeps the rest of the user's config" {
     defer t.cleanup();
 
     const original =
-        \\# my wmaker-wl config
-        \\gap = 14                       # roomy
-        \\terminal = foot
-        \\bind = Super+Return, spawn_terminal
-        \\bind = Super+Shift+x, shell notify-send hi
-        \\unbind = Super+q
+        \\-- my wmaker-wl config
+        \\gap = 14                       -- roomy
+        \\terminal = "foot"
+        \\bind("Super+Return", "spawn_terminal")
+        \\bind("Super+Shift+x", "shell notify-send hi")
+        \\unbind("Super+q")
         \\some_future_option = 42
         \\
     ;
-    try t.write("config.conf", original);
-    const path = try t.path("config.conf");
+    try t.write("config.lua", original);
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -475,24 +475,24 @@ test "THE BUG: saving one setting keeps the rest of the user's config" {
     const r = p.save();
     try testing.expectEqual(Outcome.saved, r.outcome);
 
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
     try testing.expectEqualStrings(
-        \\# my wmaker-wl config
-        \\gap = 14                       # roomy
-        \\terminal = foot
-        \\bind = Super+Return, spawn_terminal
-        \\bind = Super+Shift+x, shell notify-send hi
-        \\unbind = Super+q
+        \\-- my wmaker-wl config
+        \\gap = 14                       -- roomy
+        \\terminal = "foot"
+        \\bind("Super+Return", "spawn_terminal")
+        \\bind("Super+Shift+x", "shell notify-send hi")
+        \\unbind("Super+q")
         \\some_future_option = 42
         \\
-        \\# ---- set by wlprefs ----
+        \\-- ---- set by wlprefs ----
         \\focus_follows_mouse = true
         \\
     , now);
 
     // The previous file is kept.
-    const bak = try t.slurp("config.conf.bak");
+    const bak = try t.slurp("config.lua.bak");
     defer gpa.free(bak);
     try testing.expectEqualStrings(original, bak);
 }
@@ -502,7 +502,7 @@ test "an unreadable config disables saving instead of overwriting it" {
     const t = try Tmp.make(gpa);
     defer t.cleanup();
     // A directory where the file should be.
-    const d = try t.path("config.conf");
+    const d = try t.path("config.lua");
     defer gpa.free(d);
     const dz = try gpa.dupeZ(u8, d);
     defer gpa.free(dz);
@@ -517,14 +517,14 @@ test "an unreadable config disables saving instead of overwriting it" {
     const r = p.save();
     try testing.expectEqual(Outcome.refused, r.outcome);
     // And nothing was created or replaced.
-    try testing.expect(!(try t.exists("config.conf.bak")));
+    try testing.expect(!(try t.exists("config.lua.bak")));
 }
 
 test "no config yet: a first save creates it with only what differs" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    const path = try std.fmt.allocPrint(gpa, "{s}/new/dir/config.conf", .{t.dir});
+    const path = try std.fmt.allocPrint(gpa, "{s}/new/dir/config.lua", .{t.dir});
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -540,7 +540,7 @@ test "no config yet: a first save creates it with only what differs" {
         else => return error.Missing,
     };
     defer gpa.free(text);
-    try testing.expectEqualStrings("\n# ---- set by wlprefs ----\ngap = 20\n", text);
+    try testing.expectEqualStrings("\n-- ---- set by wlprefs ----\ngap = 20\n", text);
     try testing.expect(!p.is_new);
 }
 
@@ -548,8 +548,8 @@ test "saving twice: the backup keeps the file as it was before wlprefs, not our 
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 5\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 5\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -559,10 +559,10 @@ test "saving twice: the backup keeps the file as it was before wlprefs, not our 
     p.cur.gap = 7;
     try testing.expectEqual(Outcome.saved, p.save().outcome);
 
-    const bak = try t.slurp("config.conf.bak");
+    const bak = try t.slurp("config.lua.bak");
     defer gpa.free(bak);
     try testing.expectEqualStrings("gap = 5\n", bak);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
     try testing.expectEqualStrings("gap = 7\n", now);
 }
@@ -571,8 +571,8 @@ test "a by-hand edit made while the window is open survives, and shows afterward
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 8\nouter_gap = 8\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 8\nouter_gap = 8\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -580,12 +580,12 @@ test "a by-hand edit made while the window is open survives, and shows afterward
     p.cur.gap = 12;
 
     // Someone edits the file in an editor.
-    try t.write("config.conf", "gap = 8\nouter_gap = 30\nbind = Super+x, close\n");
+    try t.write("config.lua", "gap = 8\nouter_gap = 30\nbind(\"Super+x\", \"close\")\n");
 
     try testing.expectEqual(Outcome.saved, p.save().outcome);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
-    try testing.expectEqualStrings("gap = 12\nouter_gap = 30\nbind = Super+x, close\n", now);
+    try testing.expectEqualStrings("gap = 12\nouter_gap = 30\nbind(\"Super+x\", \"close\")\n", now);
     // The window now shows the file's outer_gap, and is clean.
     try testing.expectEqual(@as(i32, 30), p.cur.outer_gap);
     try testing.expect(!p.dirty());
@@ -601,8 +601,8 @@ test "the file turning unreadable between load and save refuses, it does not ove
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 8\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 8\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -622,8 +622,8 @@ test "invalid values are refused with a message and nothing is written" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 8\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 8\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -633,7 +633,7 @@ test "invalid values are refused with a message and nothing is written" {
     const r = p.save();
     try testing.expectEqual(Outcome.refused, r.outcome);
     try testing.expect(std.mem.indexOf(u8, r.message, "Terminal") != null);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
     try testing.expectEqualStrings("gap = 8\n", now);
 }
@@ -642,21 +642,21 @@ test "nothing changed: nothing is written" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 8   # same\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 8   -- same\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();
     try testing.expectEqual(Outcome.unchanged, p.save().outcome);
-    try testing.expect(!(try t.exists("config.conf.bak")));
+    try testing.expect(!(try t.exists("config.lua.bak")));
 }
 
 test "revert page / revert all" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "gap = 8\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "gap = 8\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();
@@ -676,8 +676,8 @@ test "a value the GUI cannot represent is carried through a save untouched" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "mouse_mod = Super+Mod5\ngap = 8\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "mouse_mod = \"Super+Mod5\"\ngap = 8\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();
@@ -685,17 +685,17 @@ test "a value the GUI cannot represent is carried through a save untouched" {
     // `mouse_mod` must pass validation as it is, and survive.
     p.cur.gap = 10;
     try testing.expectEqual(Outcome.saved, p.save().outcome);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
-    try testing.expectEqualStrings("mouse_mod = Super+Mod5\ngap = 10\n", now);
+    try testing.expectEqualStrings("mouse_mod = \"Super+Mod5\"\ngap = 10\n", now);
 }
 
 test "editing the key bindings: add, change, remove, and the file ends up with the minimal lines" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "# mine\ngap = 8\nbind = Super+x, shell notify-send old\nterminal = foot\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "-- mine\ngap = 8\nbind(\"Super+x\", \"shell notify-send old\")\nterminal = \"foot\"\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
 
     var p = try Prefs.init(gpa, path);
@@ -723,14 +723,14 @@ test "editing the key bindings: add, change, remove, and the file ends up with t
     try testing.expect(p.changed() >= 1);
 
     try testing.expectEqual(Outcome.saved, p.save().outcome);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
     // Comments and other keys survive; the bind lines are the minimal set.
-    try testing.expect(std.mem.startsWith(u8, now, "# mine\ngap = 8\n"));
-    try testing.expect(std.mem.indexOf(u8, now, "terminal = foot\n") != null);
-    try testing.expect(std.mem.indexOf(u8, now, "bind = Super+q, exit\n") != null);
-    try testing.expect(std.mem.indexOf(u8, now, "unbind = Super+h\n") != null);
-    try testing.expect(std.mem.indexOf(u8, now, "bind = Super+m, minimize\n") != null);
+    try testing.expect(std.mem.startsWith(u8, now, "-- mine\ngap = 8\n"));
+    try testing.expect(std.mem.indexOf(u8, now, "terminal = \"foot\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "bind(\"Super+q\", \"exit\")\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "unbind(\"Super+h\")\n") != null);
+    try testing.expect(std.mem.indexOf(u8, now, "bind(\"Super+m\", \"minimize\")\n") != null);
     // No line for a default that was left alone.
     try testing.expect(std.mem.indexOf(u8, now, "Super+Return") == null);
 
@@ -756,7 +756,7 @@ test "bindings: bad keys and bad actions are refused with a reason; same keys re
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    const path = try t.path("config.conf");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();
@@ -793,8 +793,8 @@ test "revert and 'defaults' on the key bindings" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    try t.write("config.conf", "bind = Super+x, close\nunbind = Super+q\n");
-    const path = try t.path("config.conf");
+    try t.write("config.lua", "bind(\"Super+x\", \"close\")\nunbind(\"Super+q\")\n");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();
@@ -812,7 +812,7 @@ test "revert and 'defaults' on the key bindings" {
     try p.bindsToDefaults();
     try testing.expect(p.bindsDirty());
     try testing.expectEqual(Outcome.saved, p.save().outcome);
-    const now = try t.slurp("config.conf");
+    const now = try t.slurp("config.lua");
     defer gpa.free(now);
     try testing.expect(std.mem.indexOf(u8, now, "bind") == null);
     try testing.expect(std.mem.indexOf(u8, now, "unbind") == null);
@@ -831,7 +831,7 @@ test "defaultsFor puts one page's keys back, and only those" {
     const gpa = testing.allocator;
     const t = try Tmp.make(gpa);
     defer t.cleanup();
-    const path = try t.path("config.conf");
+    const path = try t.path("config.lua");
     defer gpa.free(path);
     var p = try Prefs.init(gpa, path);
     defer p.deinit();

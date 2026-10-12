@@ -34,6 +34,12 @@ pub const Code = struct {
 /// The code of one line, or null for a blank line, a comment, a line that is
 /// part of a block comment, or a line with more than one statement.
 pub fn code(lex: *Lexer, raw: []const u8) ?Code {
+    // A UTF-8 byte order mark (some editors add one to the first line) is not
+    // part of the code, but it stays part of the line.
+    if (std.mem.startsWith(u8, raw, "\xEF\xBB\xBF")) {
+        const c = code(lex, raw[3..]) orelse return null;
+        return .{ .body = c.body, .comment = c.comment + 3 };
+    }
     if (lex.in_block) {
         if (std.mem.indexOf(u8, raw, "]]") != null) lex.in_block = false;
         return null;
@@ -218,6 +224,7 @@ const testing = std.testing;
 
 test "code: comments, strings that contain `--`, semicolons, block comments" {
     var lex: Lexer = .{};
+    try testing.expectEqualStrings("gap = 8", code(&lex, "\xEF\xBB\xBFgap = 8").?.body);
     try testing.expect(code(&lex, "") == null);
     try testing.expect(code(&lex, "-- a comment") == null);
     try testing.expect(code(&lex, "   -- indented") == null);

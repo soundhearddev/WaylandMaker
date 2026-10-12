@@ -399,6 +399,9 @@ const Ctx = struct {
     /// Directory of the file being run: relative includes and Themes/ start here.
     dir: []const u8,
     depth: u8,
+    /// The script is the user's own (not the built-in defaults): the Dock/Clip
+    /// options it names count as written down, see `Explicit`.
+    user_script: bool,
     /// An allocation failed inside a Lua callback (which cannot return an
     /// error); parseWith reports it when the script is done.
     oom: bool = false,
@@ -467,6 +470,7 @@ pub fn parseWith(
         .inc = inc,
         .dir = if (inc) |i| i.dir else ".",
         .depth = if (inc) |i| i.depth else 0,
+        .user_script = origin.len > 0 and origin[0] != '<',
     };
     const outer = active;
     active = &ctx;
@@ -480,6 +484,7 @@ pub fn parseWith(
         themeInto(&ctx, text, origin);
     } else {
         lua.openLibs(L);
+        lua.harden(L);
         lua.register(L, "bind", cBind);
         lua.register(L, "unbind", cUnbind);
         lua.register(L, "include", cInclude);
@@ -510,8 +515,11 @@ fn luaFailed(ctx: *Ctx) void {
 }
 
 /// Run `text` in the script's own environment. The stack stays balanced.
-fn runChunk(ctx: *Ctx, text: []const u8, origin: []const u8) void {
+fn runChunk(ctx: *Ctx, raw_text: []const u8, origin: []const u8) void {
     const name = chunkName(ctx, origin) orelse return;
+    // Editors on other systems like to start a file with a UTF-8 byte order
+    // mark; Lua's loader for strings (unlike its file loader) chokes on it.
+    const text = if (std.mem.startsWith(u8, raw_text, "\xEF\xBB\xBF")) raw_text[3..] else raw_text;
     if (!lua.load(ctx.L, text, name)) return luaFailed(ctx);
     if (!lua.call(ctx.L)) luaFailed(ctx);
 }
@@ -717,11 +725,20 @@ fn applyEntry(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!voi
     const L = ctx.L;
     const key = lua.toSlice(L, -2) orelse return;
     if (key.len == 0 or key[0] == '_' or baseline.contains(key)) return;
-    applyOption(ctx, key) catch |err| switch (err) {
+    if (applyOption(ctx, key)) {
+        // Only an option that was actually applied counts as "named".
+        if (ctx.user_script) markExplicit(ctx.cfg, key);
+    } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.UnknownKey => ctx.warn("{s}: unknown option `{s}`", .{ ctx.origin, key }),
         error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, key, lua.typeName(L, -1) }),
-    };
+    }
+}
+
+fn markExplicit(cfg: *Config, key: []const u8) void {
+    inline for (@typeInfo(Explicit).@"struct".fields) |f| {
+        if (std.mem.eql(u8, key, f.name)) @field(cfg.explicit, f.name) = true;
+    }
 }
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
@@ -1385,6 +1402,33 @@ test "values of the wrong type are refused, not converted" {
     try std.testing.expectEqual(@as(usize, 4), cfg.width_presets.len);
     try std.testing.expectEqual(@as(usize, 0), cfg.workspace_names.len);
     try std.testing.expectEqual(@as(u32, 6), cfg.parse_warnings);
+}
+
+test "os.exit and io.read are not available to a config" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    // Both are nil now: calling them is an ordinary Lua error (one warning),
+    // not the end of the process or a read that never returns.
+    try parseText(arena.allocator(), &cfg, "gap = 3\nos.exit(0)\n");
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+    try parseText(arena.allocator(), &cfg, "local x = io.read()\n");
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+    // The rest of both libraries is still there.
+    try parseText(arena.allocator(), &cfg, "gap = #os.date() > 0 and 4 or 5\n");
+    try std.testing.expectEqual(@as(i32, 4), cfg.gap);
+}
+
+test "a UTF-8 byte order mark at the start of the file is skipped" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg, "\xEF\xBB\xBFgap = 3\n");
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
 }
 
 test "an endless loop is aborted instead of hanging the session" {
