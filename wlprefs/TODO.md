@@ -1,7 +1,11 @@
-# wlprefs TODO
+# wlprefs: was noch fehlt
 
+Stand: nach der Lua-Umstellung. Alles hier ist **noch nicht gemacht und nicht getestet**.
+Sortiert nach: großer Nutzen, kleiner Aufwand zuerst.
 
-## 1. Fehlende Einstellungen
+---
+
+## 1. Fehlende Einstellungen (zuerst, am einfachsten)
 
 Der Compositor kennt diese Optionen, wlprefs zeigt sie nicht an. Jede braucht dasselbe:
 einen Eintrag in `keys` und ein Feld in `Settings` (`wlprefs/src/settings.zig`), ein Widget auf der
@@ -9,16 +13,17 @@ passenden Seite (`wlprefs/src/panels.zig`) und die Standardwerte stehen schon in
 Der vorhandene Test "every key has a text form" und der Abgleichstest in `src/model_test.zig`
 decken neue Schlüssel automatisch mit ab.
 
-- [ ] `focus_new_windows` – Seite Window Focus (Checkbox)
-- [ ] `workspace_wrap` – Seite Workspace (Checkbox)
-- [ ] `clip_scroll_workspaces` – Seite Docks (Checkbox)
-- [ ] `dock_auto_raise` – Seite Docks (Checkbox)
-- [ ] `dock_single_click` – Seite Docks (Checkbox)
-- [ ] `dock_save_state` – Seite Docks (Checkbox)
-- [ ] `clip_auto_collapse` – Seite Docks (Checkbox)
-- [ ] `clip_auto_raise` – Seite Docks (Checkbox)
-- [ ] `font_menu_title`, `font_menu`, `font_dock` – Seite Fonts (drei Textfelder, Prüfung mit `validFont`)
-- [ ] `menu_submenu_align` – Seite Menu (Auswahl)
+- [x] `focus_new_windows` – Seite Window Focus (Checkbox)
+- [x] `workspace_wrap` – Seite Workspace (Checkbox)
+- [x] `clip_scroll_workspaces` – Seite Other Configurations (Checkbox)
+- [x] `dock_auto_raise` – Seite Other Configurations (Checkbox)
+- [x] `dock_single_click` – Seite Other Configurations (Checkbox)
+- [x] `dock_save_state` – Seite Other Configurations (Checkbox)
+- [x] `clip_auto_collapse` – Seite Other Configurations (Checkbox)
+- [x] `clip_auto_raise` – Seite Other Configurations (Checkbox)
+- [x] `font_menu_title`, `font_menu`, `font_dock` – Seite Fonts (drei Textfelder, Prüfung mit `validFont`)
+- [ ] `menu_submenu_align` – Seite Menu: bleibt offen. Die Menü-Seite ist bewusst „nur Anzeige“, ein echter
+      Schalter braucht Klick-Behandlung in `window.zig` und `panel_menu.zig`.
 
 Danach `docs/WMPREFS.md` (Tabelle "Echte Seiten") ergänzen.
 

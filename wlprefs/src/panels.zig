@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: 0BSD
 //
 // The settings pages of wlprefs. Each page maps a WPrefs.app section onto
-// the config.conf keys wmaker-wl really has (docs/WMPREFS.md). A section
+// the config.lua keys wmaker-wl really has (docs/WMPREFS.md). A section
 // without a counterpart says so and says why, instead of showing controls
 // that would do nothing.
 //
@@ -367,17 +367,19 @@ pub const Ctx = struct {
 // ---------------------------------------------------------------------------
 
 pub fn focus(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 96, "Focus");
-    c.checkbox(ox + 40, oy + 40, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
-    c.hint(ox + 40, oy + 62, "Focus changes as soon as the mouse pointer enters a window.");
-    c.hint(ox + 40, oy + 80, "Off: focus only via click or keyboard shortcut.");
+    c.frame(ox + 20, oy + 10, 480, 126, "Focus");
+    c.checkbox(ox + 40, oy + 34, "Focus follows mouse (sloppy focus)", &s.focus_follows_mouse);
+    c.hint(ox + 40, oy + 54, "Focus changes as soon as the mouse pointer enters a window.");
+    c.hint(ox + 40, oy + 70, "Off: focus only via click or keyboard shortcut.");
+    c.checkbox(ox + 40, oy + 96, "New windows take the focus", &s.focus_new_windows);
+    c.hint(ox + 40, oy + 114, "Off: a new window opens in the background.");
 
-    c.frame(ox + 20, oy + 122, 480, 96, "Scrolling");
-    c.label(ox + 40, oy + 146, "Center focused column:");
+    c.frame(ox + 20, oy + 144, 480, 88, "Scrolling");
+    c.label(ox + 40, oy + 168, "Center focused column:");
     var m = s.center_focused_column;
-    if (c.radio(ox + 40, oy + 170, "on overflow", m == .on_overflow)) m = .on_overflow;
-    if (c.radio(ox + 190, oy + 170, "always", m == .always)) m = .always;
-    if (c.radio(ox + 300, oy + 170, "never", m == .never)) m = .never;
+    if (c.radio(ox + 40, oy + 192, "on overflow", m == .on_overflow)) m = .on_overflow;
+    if (c.radio(ox + 190, oy + 192, "always", m == .always)) m = .always;
+    if (c.radio(ox + 300, oy + 192, "never", m == .never)) m = .never;
     s.center_focused_column = m;
 }
 
@@ -396,15 +398,16 @@ pub fn windowHandling(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 }
 
 pub fn workspace(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 14, oy + 6, 492, 100, "Workspaces");
+    c.frame(ox + 14, oy + 6, 492, 116, "Workspaces");
     c.stepInt(ox + 34, oy + 28, "Number of workspaces:", &s.workspace_count, 1, settings.max_workspaces, 1);
     c.textField(ox + 34, oy + 54, 452, "Names:", &s.workspace_names);
     c.hint(ox + 34, oy + 82, "Comma separated; shown in the Clip and the menu. Empty = no name.");
+    c.checkbox(ox + 34, oy + 98, "Next on the last workspace wraps around to the first", &s.workspace_wrap);
 
-    c.frame(ox + 14, oy + 112, 492, 112, "Columns");
-    c.stepFrac(ox + 34, oy + 134, "Default width:", &s.default_column_width, 0.05);
-    c.stepFrac(ox + 34, oy + 160, "Step size (Wider / Narrower):", &s.width_step, 0.05);
-    c.textField(ox + 34, oy + 188, 452, "Presets:", &s.width_presets);
+    c.frame(ox + 14, oy + 128, 492, 104, "Columns");
+    c.stepFrac(ox + 34, oy + 150, "Default width:", &s.default_column_width, 0.05);
+    c.stepFrac(ox + 34, oy + 176, "Step size (Wider / Narrower):", &s.width_step, 0.05);
+    c.textField(ox + 34, oy + 202, 452, "Presets:", &s.width_presets);
 }
 
 pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
@@ -414,7 +417,7 @@ pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.colour(ox + 34, oy + 80, "Unfocused:", &s.border_unfocused);
     c.colour(ox + 34, oy + 106, "Floating:", &s.border_floating);
     c.textField(ox + 34, oy + 136, 300, "Theme:", &s.theme);
-    c.hint(ox + 346, oy + 140, "Themes/NAME.conf");
+    c.hint(ox + 346, oy + 140, "Themes/NAME.lua");
 
     if (c.cv) |cv| {
         // Live preview of the three frames.
@@ -435,7 +438,7 @@ pub fn mouse(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.frame(ox + 20, oy + 14, 480, 108, "Mouse Modifier");
     c.label(ox + 40, oy + 38, "Move (left button) / resize (right button) while holding:");
     if (s.mouse_mod.raw) {
-        c.hint(ox + 40, oy + 70, "A custom value in config.conf (e.g. with Mod3/Mod5).");
+        c.hint(ox + 40, oy + 70, "A custom value in config.lua (e.g. with Mod3/Mod5).");
         c.hint(ox + 40, oy + 90, "It is kept exactly as it is and will not be overwritten.");
     } else {
         c.checkbox(ox + 40, oy + 66, "Super", &s.mouse_mod.super);
@@ -489,14 +492,35 @@ pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.checkbox(ox + 288, oy + 184, "Start collapsed", &s.clip_collapsed);
 }
 
-/// WPrefs' "Other Configurations": session and compatibility switches.
+/// WPrefs' "Other Configurations": session and compatibility switches, and
+/// the behaviour switches of the Dock and the Clip that did not fit on the
+/// Docks page.
 pub fn configurations(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 20, oy + 14, 480, 160, "Session & Compatibility");
-    c.checkbox(ox + 40, oy + 42, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
-    c.checkbox(ox + 40, oy + 70, "Run the autostart script on launch", &s.enable_autostart);
-    c.checkbox(ox + 40, oy + 98, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
-    c.hint(ox + 40, oy + 130, "Files in ~/.config/wmaker-wl always take precedence over those.");
-    c.hint(ox + 40, oy + 148, "Autostart and autolaunch only run when wmaker-wl starts.");
+    c.frame(ox + 20, oy + 8, 480, 126, "Session & Compatibility");
+    c.checkbox(ox + 40, oy + 32, "Start the DockApps marked autolaunch on launch", &s.enable_dockapps);
+    c.checkbox(ox + 40, oy + 54, "Run the autostart script on launch", &s.enable_autostart);
+    c.checkbox(ox + 40, oy + 76, "Also read Window Maker's files (~/GNUstep/...)", &s.enable_wmaker_compat);
+    c.hint(ox + 40, oy + 100, "Files in ~/.config/wmaker-wl always take precedence over those.");
+    c.hint(ox + 40, oy + 116, "Autostart and autolaunch only run when wmaker-wl starts.");
+
+    c.frame(ox + 20, oy + 142, 480, 90, "Dock & Clip behaviour");
+    c.checkbox(ox + 40, oy + 166, "Dock: raise under pointer", &s.dock_auto_raise);
+    c.checkbox(ox + 40, oy + 188, "Dock: one click starts", &s.dock_single_click);
+    c.checkbox(ox + 40, oy + 210, "Dock: remember tiles", &s.dock_save_state);
+    c.checkbox(ox + 250, oy + 166, "Clip: fold when pointer leaves", &s.clip_auto_collapse);
+    c.checkbox(ox + 250, oy + 188, "Clip: raise under pointer", &s.clip_auto_raise);
+    c.checkbox(ox + 250, oy + 210, "Clip: wheel switches workspace", &s.clip_scroll_workspaces);
+}
+
+/// Fonts: the three Pango descriptions the compositor draws its menus and
+/// the Clip with.
+pub fn fonts(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
+    c.frame(ox + 20, oy + 14, 480, 132, "Fonts");
+    c.textField(ox + 40, oy + 40, 440, "Menu title:", &s.font_menu_title);
+    c.textField(ox + 40, oy + 72, 440, "Menu rows:", &s.font_menu);
+    c.textField(ox + 40, oy + 104, 440, "Clip:", &s.font_dock);
+    c.hint(ox + 40, oy + 160, "A Pango font description, e.g. \"Sans Bold 10\" or \"Serif 12\".");
+    c.hint(ox + 40, oy + 178, "An unknown family falls back to the default font.");
 }
 
 /// A section that has no counterpart (yet): the reason, not dead controls.
@@ -548,7 +572,7 @@ pub fn shortcuts(
         return;
     }
 
-    c.hint(ox + 20, oy + 4, "* = from your config.conf. Changes are written with Save.");
+    c.hint(ox + 20, oy + 4, "* = from your config.lua. Changes are written with Save.");
 
     const lx = ox + 20;
     const ly = oy + 22;

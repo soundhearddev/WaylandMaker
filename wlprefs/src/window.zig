@@ -668,9 +668,9 @@ pub const Window = struct {
     /// The config keys a page edits (for its Defaults button).
     fn pageKeys(cat: Category) []const []const u8 {
         return switch (cat) {
-            .focus => &.{ "focus_follows_mouse", "center_focused_column" },
+            .focus => &.{ "focus_follows_mouse", "focus_new_windows", "center_focused_column" },
             .window_handling => &.{ "new_window", "gap", "outer_gap", "min_window_size" },
-            .workspace => &.{ "workspace_count", "workspace_names", "default_column_width", "width_step", "width_presets" },
+            .workspace => &.{ "workspace_count", "workspace_names", "workspace_wrap", "default_column_width", "width_step", "width_presets" },
             .appearance => &.{ "border_width", "border_focused", "border_unfocused", "border_floating", "theme" },
             .mouse_settings => &.{ "mouse_mod", "drag_threshold", "floating_size" },
             .ergonomic => &.{ "terminal", "launcher", "browser" },
@@ -678,7 +678,12 @@ pub const Window = struct {
                 "dock_enabled", "dock_edge",   "dock_offset", "dock_on_top",    "dock_reserve_space",
                 "clip_enabled", "clip_corner", "clip_on_top", "clip_collapsed",
             },
-            .configurations => &.{ "enable_dockapps", "enable_autostart", "enable_wmaker_compat" },
+            .configurations => &.{
+                "enable_dockapps",        "enable_autostart", "enable_wmaker_compat", "dock_auto_raise",
+                "dock_single_click",      "dock_save_state",  "clip_auto_collapse",   "clip_auto_raise",
+                "clip_scroll_workspaces",
+            },
+            .font_simple => &.{ "font_menu_title", "font_menu", "font_dock" },
             .keyboard_shortcuts => &.{"bind_layout"},
             else => &.{},
         };
@@ -716,6 +721,7 @@ pub const Window = struct {
             .ergonomic => panels.ergonomic(ctx, ox, oy, s),
             .docks => panels.docks(ctx, ox, oy, s),
             .configurations => panels.configurations(ctx, ox, oy, s),
+            .font_simple => panels.fonts(ctx, ox, oy, s),
             .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bindList(), &win.bind_scroll, &win.bind_ui, s),
             else => return false,
         }
@@ -1157,18 +1163,13 @@ pub const Window = struct {
                 .headline = "Not part of wlprefs yet",
                 .text = "The applications menu is the file\n" ++
                     "~/.config/wmaker-wl/RootMenu (text or property list format).\n" ++
-                    "Edit it by hand; it is reloaded together with config.conf.\n\n" ++
+                    "Edit it by hand; it is reloaded together with config.lua.\n\n" ++
                     "A menu editor is on the list in docs/TODO.md.",
             },
             .hot_corner_shortcuts => .{
                 .headline = "Not implemented in wmaker-wl",
                 .text = "Hot corners have no counterpart yet. Use a key binding\n" ++
                     "instead (Keyboard Shortcuts).",
-            },
-            .font_simple => .{
-                .headline = "Not configurable yet",
-                .text = "wmaker-wl draws its menus with Pango's default \"Sans\".\n" ++
-                    "Fonts will arrive with themes (docs/WMPREFS.md, section 3.3).",
             },
             .expert => .{
                 .headline = "Nothing to configure here",

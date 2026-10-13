@@ -241,6 +241,11 @@ pub const Settings = struct {
     clip_corner: ClipCorner = .top_left,
     clip_on_top: bool = true,
     clip_collapsed: bool = false,
+    dock_auto_raise: bool = false,
+    dock_single_click: bool = false,
+    dock_save_state: bool = true,
+    clip_auto_collapse: bool = false,
+    clip_auto_raise: bool = false,
 
     /// The compositor's defaults: wmaker-wl's shipped default_config.lua.
     pub fn init() Settings {
@@ -425,6 +430,14 @@ pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
         }
     }
 
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
+        if (eql(u8, key, name)) {
+            // The compositor refuses an invalid font and keeps the old one.
+            if (validFont(value)) @field(s, name).set(value);
+            return;
+        }
+    }
+
     if (eql(u8, key, "width_presets")) {
         if (validPresets(value)) s.width_presets.set(value);
     } else if (eql(u8, key, "workspace_names")) {
@@ -461,9 +474,11 @@ pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
 }
 
 const bool_keys = .{
-    "focus_follows_mouse", "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
-    "dock_enabled",        "dock_on_top",          "dock_reserve_space", "clip_enabled",
-    "clip_on_top",         "clip_collapsed",
+    "focus_follows_mouse",    "enable_wmaker_compat", "enable_autostart",   "enable_dockapps",
+    "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
+    "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
+    "clip_scroll_workspaces", "dock_auto_raise",      "dock_single_click",  "dock_save_state",
+    "clip_auto_collapse",     "clip_auto_raise",
 };
 
 const number_keys = .{
@@ -603,15 +618,18 @@ pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
 
 /// All keys written by the GUI (the order is the order of appending).
 pub const keys = [_][]const u8{
-    "gap",                 "outer_gap",            "default_column_width",  "width_presets",
-    "width_step",          "min_window_size",      "center_focused_column", "new_window",
-    "border_width",        "border_focused",       "border_unfocused",      "border_floating",
-    "workspace_count",     "workspace_names",      "drag_threshold",        "floating_size",
-    "focus_follows_mouse", "mouse_mod",            "terminal",              "launcher",
-    "browser",             "enable_wmaker_compat", "enable_autostart",      "enable_dockapps",
-    "bind_layout",         "theme",                "dock_enabled",          "dock_edge",
-    "dock_offset",         "dock_on_top",          "dock_reserve_space",    "clip_enabled",
-    "clip_corner",         "clip_on_top",          "clip_collapsed",
+    "gap",                 "outer_gap",              "default_column_width",  "width_presets",
+    "width_step",          "min_window_size",        "center_focused_column", "new_window",
+    "border_width",        "border_focused",         "border_unfocused",      "border_floating",
+    "workspace_count",     "workspace_names",        "drag_threshold",        "floating_size",
+    "focus_follows_mouse", "mouse_mod",              "terminal",              "launcher",
+    "browser",             "enable_wmaker_compat",   "enable_autostart",      "enable_dockapps",
+    "bind_layout",         "theme",                  "dock_enabled",          "dock_edge",
+    "dock_offset",         "dock_on_top",            "dock_reserve_space",    "clip_enabled",
+    "clip_corner",         "clip_on_top",            "clip_collapsed",        "focus_new_windows",
+    "workspace_wrap",      "clip_scroll_workspaces", "dock_auto_raise",       "dock_single_click",
+    "dock_save_state",     "clip_auto_collapse",     "clip_auto_raise",       "font_menu_title",
+    "font_menu",           "font_dock",
 };
 
 fn keyIndex(key: []const u8) ?usize {
@@ -859,7 +877,9 @@ test "the struct's own defaults agree with the shipped file (except the text fie
     const plain: Settings = .{};
     for (keys) |k| {
         if (std.mem.eql(u8, k, "terminal") or std.mem.eql(u8, k, "launcher") or
-            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets")) continue;
+            std.mem.eql(u8, k, "browser") or std.mem.eql(u8, k, "width_presets") or
+            std.mem.eql(u8, k, "font_menu_title") or std.mem.eql(u8, k, "font_menu") or
+            std.mem.eql(u8, k, "font_dock")) continue;
         if (!sameValue(&from_file, &plain, k)) {
             std.debug.print("default differs for `{s}`\n", .{k});
             return error.DefaultsDiverged;
@@ -1393,4 +1413,39 @@ test "Text: set puts the caret at the end; a full field takes no more in the mid
     t.append('y'); // full: refused, nothing shifted off the end
     try testing.expectEqual(Text.capacity, t.len);
     try testing.expectEqual(@as(u8, 'a'), t.get()[0]);
+}
+
+test "the switches and fonts that were added later: parse, render, read back" {
+    const gpa = testing.allocator;
+    var s = Settings.init();
+    try testing.expect(s.focus_new_windows and s.workspace_wrap and s.clip_scroll_workspaces and s.dock_save_state);
+    try testing.expect(!s.dock_auto_raise and !s.dock_single_click and !s.clip_auto_collapse and !s.clip_auto_raise);
+    try testing.expectEqualStrings("Sans Bold 10", s.font_menu_title.get());
+    try testing.expectEqualStrings("Sans 10", s.font_menu.get());
+    try testing.expectEqualStrings("Sans 8", s.font_dock.get());
+
+    const base = s;
+    s.focus_new_windows = false;
+    s.workspace_wrap = false;
+    s.clip_scroll_workspaces = false;
+    s.dock_auto_raise = true;
+    s.dock_single_click = true;
+    s.dock_save_state = false;
+    s.clip_auto_collapse = true;
+    s.clip_auto_raise = true;
+    s.font_menu.set("Serif 12");
+    try testing.expectEqual(@as(usize, 9), changedCount(&s, &base));
+
+    const out = try render(gpa, "", &s, &base);
+    defer gpa.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "focus_new_windows = false\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "dock_auto_raise = true\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "font_menu = \"Serif 12\"\n") != null);
+    var back = Settings.init();
+    parse(&back, out);
+    try testing.expectEqual(@as(usize, 0), changedCount(&s, &back));
+
+    // An invalid font is refused, like the compositor does.
+    parse(&back, "font_dock = \"\"\n");
+    try testing.expectEqualStrings("Sans 8", back.font_dock.get());
 }
