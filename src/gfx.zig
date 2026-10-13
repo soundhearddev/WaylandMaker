@@ -245,7 +245,7 @@ pub const Surface = struct {
     }
 };
 
-/// The fonts chosen in config.conf (`font_*`). They are copied here, not
+/// The fonts chosen in config.lua (`font_*`). They are copied here, not
 /// pointed to, so a config reload (which frees the old arena) can never
 /// leave a dangling font name behind; menu and Clip drawing read them
 /// through the getters below.

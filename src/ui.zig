@@ -508,7 +508,7 @@ pub const Ui = struct {
     drawer_bars: std.ArrayList(*Bar) = .empty,
     /// Where the tile being dragged would land (any bar).
     drop_target: ?DropTarget = null,
-    /// Run-time state, started from config.conf (or the saved state) and
+    /// Run-time state, started from config.lua (or the saved state) and
     /// changed by the menus.
     dock_level: dock_mod.Level = .top,
     clip_on_top: bool = true,
@@ -3788,7 +3788,7 @@ test "the Info panel names the version and the config file; Legal states the lic
     const gpa = std.testing.allocator;
     var wm: types.WindowManager = undefined;
     wm.gpa = gpa;
-    wm.cfg = .{ .arena = .init(gpa), .config_file = "/home/x/.config/wmaker-wl/config.conf" };
+    wm.cfg = .{ .arena = .init(gpa), .config_file = "/home/x/.config/wmaker-wl/config.lua" };
     defer wm.cfg.deinit();
     var ui = testUi(gpa, &wm);
     defer {
@@ -3803,7 +3803,7 @@ test "the Info panel names the version and the config file; Legal states the lic
     for (info.rows) |r| {
         try std.testing.expect(!r.enabled); // read-only text
         if (std.mem.indexOf(u8, r.label, version) != null) has_version = true;
-        if (std.mem.indexOf(u8, r.label, "config.conf") != null) has_config = true;
+        if (std.mem.indexOf(u8, r.label, "config.lua") != null) has_config = true;
     }
     try std.testing.expect(has_version and has_config);
 

@@ -9,8 +9,7 @@
       `SHORTCUT`-Anzeige. Zeiger-Cursor wechselt über Menü/Desktop korrekt zum Pfeil
       (`wp_cursor_shape_manager_v1`), und ein durch Hovern geschlossenes Untermenü verschwindet sofort statt
       erst im nächsten Zyklus (`reapGraveyard()`-Reihenfolge in `sync()` korrigiert).
-- [x] **wlprefs** (`wlprefs/`, siehe `docs/WMPREFS.md` „Stand“; **liest/schreibt noch das alte `config.conf`, das der
-      Compositor seit der Lua-Migration nicht mehr lädt, siehe „Offen“ unten**): lädt `config.conf` jetzt wirklich (der
+- [x] **wlprefs** (`wlprefs/`, siehe `docs/WMPREFS.md` „Stand“; liest/schreibt `config.lua`, dieselbe Datei wie der Compositor): lädt `config.lua` jetzt wirklich (der
       erste Entwurf las die Datei nie und ersetzte sie beim ersten Speichern durch die paar Zeilen, die
       von den Standardwerten abwichen), speichert nur geänderte Schlüssel in der Datei selbst,
       atomar mit Backup, sperrt sich bei unlesbarer Datei, deckt alle Dock-/Clip-/Workspace-Namen-/
@@ -37,14 +36,14 @@
         andere bleibt, siehe `settings.render`);
       - die Menü-Seite wird erst echt, wenn wmaker-wl diese Optionen hat.
 - [x] **Phase 4**: Dock und Clip (`dock.zig`, `ui.zig`; `WMState`, 64-px-Kacheln, `app_id`-Zuordnung).
-      *Dock:* Spalte aus 64-px-Kacheln am linken/rechten Rand (`dock_edge`, `dock_offset`), erste Kachel
+      *Dock:* Spalte aus Kacheln (`dock_size`, Standard 64 px) am linken/rechten Rand (`dock_edge`, `dock_offset`), erste Kachel
       ist die „WM“-Logo-Kachel, danach die Einträge mit `place = dock`. Linksklick startet das Programm
       oder fokussiert es, wenn schon ein Fenster davon läuft (Vergleich über `DockApp.matches`:
       expliziter `app_id`, `dockapp:<name>`, Teile von `instance.Class`, `--class dockapp:…` im Befehl,
       Programmname); Mittelklick startet immer eine neue Instanz; Rechtsklick öffnet ein Menü (Launch,
       „Lower Dock“/„Keep Dock on Top“). Anzeige „läuft nicht“ siehe Dock-Überarbeitung unten. PNG-Icons per
       cairo (Pfad oder Name in `hicolor`/`pixmaps`), sonst der erste Buchstabe des Namens.
-      Feste 64×64-DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`) werden direkt **in ihre
+      DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`, skaliert auf `dock_size`) werden direkt **in ihre
       Kachel gesetzt** (`ui.placeDocked`, über dem Dock gestapelt) und sind `omnipresent`.
       Der Arbeitsbereich schrumpft um das Dock (`Output.reserved`), egal auf welcher Ebene es liegt,
       außer `dock_reserve_space = false`. Getilte Fenster werden per `set_clip_box` an der Kante des
@@ -150,7 +149,6 @@
 - [x] Rewrite des config handling für lua. lua anstatt .conf (`config.zig`/`lua.zig`; `config.lua` gewinnt bei
       Dock-/Clip-Schaltern gegenüber dem gespeicherten `WMState`, `Config.explicit`; ein übrig gebliebenes
       `config.conf` wird beim Start mit einer Warnung gemeldet)
-- [ ] **wlprefs auf Lua umstellen**: `wlprefs/src/{settings,binds,prefs,configfile}.zig` parsen und schreiben noch
-      `key = value`/`bind = Mod+Key, cmd` in `config.conf` und lesen `default_config.lua` als INI. Muss `config.lua`
-      (Zuweisungen `key = wert`, `bind("..", "..")`) editieren, ohne die Datei neu zu erzeugen.
+- [x] **wlprefs auf Lua umgestellt**: `wlprefs/src/configfile.zig` und die Hilfstexte nutzen `config.lua` statt `config.conf`
+      (das Parsen/Schreiben von `key = wert` und `bind("..", "..")` war schon Lua).
 - [ ] Config allow own variables

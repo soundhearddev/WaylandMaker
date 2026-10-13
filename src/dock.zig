@@ -178,7 +178,7 @@ pub const Model = struct {
 
     pub const Error = error{ OutOfMemory, Full, NoDrawer };
 
-    /// Build from `list`. `cfg_names` (config.conf) win over the names the
+    /// Build from `list`. `cfg_names` (config.lua) win over the names the
     /// list carries (Window Maker's WMState). Icons are loaded here, so
     /// building is the only moment this touches the filesystem.
     pub fn init(
@@ -1176,7 +1176,7 @@ test "Model: Dock tiles keep their grid rows, gaps stay, clashes find a free row
     try std.testing.expectEqual(@as(?i32, 3), rowOf(&m, "e"));
 }
 
-test "Model: an empty list is just the logo; names: config.conf wins" {
+test "Model: an empty list is just the logo; names: config.lua wins" {
     var m = try Model.init(std.testing.allocator, .{ .workspace_names = &.{ "one", "two" } }, &.{"cfg"}, 2);
     defer m.deinit();
     try std.testing.expectEqual(@as(usize, 1), m.scr.dock.?.icon_count);

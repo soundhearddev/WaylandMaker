@@ -11,7 +11,7 @@
 //!     effect. Sections without a counterpart say why instead of showing
 //!     dead controls;
 //!   * it edits exactly the file wmaker-wl reads (`$XDG_CONFIG_HOME/
-//!     wmaker-wl/config.conf`), touching only the lines of the keys the user
+//!     wmaker-wl/config.lua`), touching only the lines of the keys the user
 //!     changed -- comments, binds and unknown keys stay (see prefs.zig and
 //!     settings.zig), and the compositor is told to reload afterwards.
 

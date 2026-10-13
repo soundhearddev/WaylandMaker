@@ -8,7 +8,7 @@
 // these options (scrolling speed, submenu alignment, wrap, vi keys), so
 // nothing is read from or written to any config and the controls do not
 // react. The page stays so that the section looks like WPrefs and the
-// moment an option gets a config.conf key, its control is already here.
+// moment an option gets a config.lua key, its control is already here.
 
 const gfx = @import("gfx.zig");
 

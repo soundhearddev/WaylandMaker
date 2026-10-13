@@ -123,7 +123,7 @@ pub const DockApp = struct {
     /// Start this app once when the session comes up.
     autolaunch: bool = false,
     /// Window Maker's "Lowered": docked below normal windows instead of
-    /// on top. Stored; the Dock/Clip level is a config.conf option
+    /// on top. Stored; the Dock/Clip level is a config.lua option
     /// (`dock_on_top`, `clip_on_top`), not a per-entry one.
     lowered: bool = false,
     /// The Dock (default) or the Clip.
@@ -200,7 +200,7 @@ pub const List = struct {
     /// Dock and Clip entries together; `DockApp.place` tells them apart.
     apps: []const DockApp = &.{},
     /// Workspace names from Window Maker's WMState (index = workspace).
-    /// config.conf's `workspace_names` wins over these.
+    /// config.lua's `workspace_names` wins over these.
     workspace_names: []const []const u8 = &.{},
     /// The Dock's Drawers, in order.
     drawers: []const DrawerInfo = &.{},
@@ -220,7 +220,7 @@ pub const List = struct {
 /// The part of the Dock's and Clip's look that the user changes with the
 /// mouse or the menus and that Window Maker saves in WMState: where the Dock
 /// sits and its stacking level, and the Clip's switches. null = "not in the
-/// file, config.conf decides".
+/// file, config.lua decides".
 pub const State = struct {
     edge: ?config.DockEdge = null,
     offset: ?i32 = null,

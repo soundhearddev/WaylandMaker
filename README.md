@@ -53,7 +53,7 @@ zig build test
 river -c ./zig-out/bin/wmaker-wl
 ```
 
-Window Maker's **Dock** (a column of 64 px tiles on a screen edge) and **Clip** (workspace tile with arrows,
+Window Maker's **Dock** (a column of tiles on a screen edge; `dock_size`, 64 px by default) and **Clip** (workspace tile with arrows,
 plus per-workspace launchers) are built in; configure them with the `dock_*` / `clip_*` options in
 `config.lua`; the tiles themselves live in the `WMState` property list (`$XDG_STATE_HOME/wmaker-wl/WMState`, or an
 existing Window Maker `~/GNUstep/Defaults/WMState`).
@@ -64,8 +64,7 @@ Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`),
 non-US keyboards. See `docs/TODO.md` for what is done and what is not.
 
 **wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`.
-**Not ported to Lua yet:** it still reads and writes the old `~/.config/wmaker-wl/config.conf`, which wmaker-wl no
-longer loads -- changes saved there have no effect until wlprefs is moved to `config.lua`. Edit `config.lua` by hand
-for now. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
+It reads and writes `~/.config/wmaker-wl/config.lua` (the same file wmaker-wl loads) and changes only the lines of the
+keys you change. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
 
 See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how DockApps, the Dock and the Clip work (`WMState`).

@@ -1,16 +1,13 @@
-> **Achtung, Stand nach der Lua-Migration:** wmaker-wl liest seine Einstellungen jetzt aus `config.lua`
-> (siehe README, „Configuration“). wlprefs (`wlprefs/src/`) arbeitet noch mit dem alten `config.conf`
-> (`key = value`, `bind = Mod+Key, cmd`) und ist **noch nicht** portiert: was es speichert, lädt der Compositor nicht.
-> Die Beschreibungen unten sprechen deshalb noch von `config.conf`; gemeint ist das künftige `config.lua`.
-> Offen: `docs/TODO.md`, „wlprefs auf Lua umstellen“.
+> **Stand:** wlprefs liest und schreibt `config.lua`, dieselbe Datei, die wmaker-wl lädt (Zuweisungen `key = wert`,
+> `bind("..", "..")`); ein übrig gebliebenes altes `config.conf` wird von keinem der beiden mehr gelesen.
 
 # WPrefs für wmaker-wl: Bestandsaufnahme & Plan
 
 Dieses Dokument beschreibt, was X11 Window Makers `WPrefs.app` konfiguriert, was davon in
-wmaker-wl (dieses Projekt) schon über `config.conf`/`attributes.conf`/`dockapps.conf` abgedeckt
+wmaker-wl (dieses Projekt) schon über `config.lua`/`attributes.conf`/`dockapps.conf` abgedeckt
 ist, und was für ein modernes Äquivalent noch fehlt. Ziel ist **kein** 1:1-Klon von WPrefs'
 GTK/WINGs-Oberfläche, sondern derselbe Funktionsumfang, zeitgemäß umgesetzt: eine
-GUI-Konfigurationsschicht über denselben `config.conf`/`attributes.conf`-Dateien, die auch von
+GUI-Konfigurationsschicht über denselben `config.lua`/`attributes.conf`-Dateien, die auch von
 Hand editierbar bleiben -- die GUI ist ein Komfort-Layer, keine neue Quelle der Wahrheit.
 
 Kontext: `docs/TODO.md` listet "Phase 6: Themes, `~/GNUstep/Defaults/WindowMaker`-Schlüssel" noch
@@ -25,7 +22,7 @@ anzeigt, die der Compositor noch gar nicht auswertet, wäre irreführend.
 `cd wlprefs && zig build` allein auch). Es bildet WPrefs.app geometrisch nach (gleiches Fenster, gleiche
 16 Abschnitts-Icons) und bearbeitet genau die Datei, die wmaker-wl liest.
 
-**Echte Seiten** (jede Einstellung ist ein `config.conf`-Schlüssel):
+**Echte Seiten** (jede Einstellung ist ein `config.lua`-Schlüssel):
 
 | Abschnitt | Schlüssel |
 |---|---|
@@ -35,7 +32,7 @@ anzeigt, die der Compositor noch gar nicht auswertet, wäre irreführend.
 | Appearance | `border_width`, `border_focused`, `border_unfocused`, `border_floating`, `theme` |
 | Mouse | `mouse_mod` (beliebige Kombination), `drag_threshold`, `floating_size` |
 | Ergonomic (Standardprogramme) | `terminal`, `launcher`, `browser` |
-| Docks | `dock_enabled`, `dock_edge`, `dock_offset`, `dock_on_top`, `dock_reserve_space`, `clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed` |
+| Docks | `dock_enabled`, `dock_size`, `dock_edge`, `dock_offset`, `dock_on_top`, `dock_reserve_space`, `clip_enabled`, `clip_corner`, `clip_on_top`, `clip_collapsed` |
 | Other Configurations | `enable_dockapps`, `enable_autostart`, `enable_wmaker_compat` |
 | Keyboard Shortcuts | die wirksamen Kürzel (Standard + eigene, `*` = aus der eigenen Datei) **bearbeiten**: Add / Edit / Remove, „Record“ nimmt die Tastenkombination auf; geprüft werden Taste (gegen xkbcommon) und Aktion (Liste in `wlprefs/src/actions.zig`, im Compositor-Test gegen `types.Command` abgeglichen). Dazu `bind_layout` (welches Tastaturlayout die Kürzel übersetzt). Geschrieben wird die kleinste Menge `bind`/`unbind`-Zeilen, die aus den Standardwerten die Liste macht; Gleiches bleibt ungeschrieben, der Rest der Datei unberührt |
 
@@ -51,7 +48,7 @@ auf ihrer Seite, warum und was man stattdessen tut.
 - Eine Datei, die existiert, aber nicht lesbar ist, **sperrt das Speichern** (statt sie durch den
   GUI-Zustand zu ersetzen). Fehlt sie, wird sie beim ersten Speichern angelegt.
 - Schreiben ist atomar (temporäre Datei, `fsync`, `rename`), behält die Rechte, folgt einem Symlink
-  (Dotfile-Manager) und legt beim ersten Überschreiben einer Sitzung `config.conf.bak` an.
+  (Dotfile-Manager) und legt beim ersten Überschreiben einer Sitzung `config.lua.bak` an.
 - Werte, die der Compositor ablehnen oder falsch lesen würde (leeres Terminal, Befehl mit führendem
   Anführungszeichen, Presets außerhalb (0,1], kein Maus-Modifier), werden **nicht geschrieben**, mit
   Meldung. Ein Wert, den das GUI nicht darstellen kann (`mouse_mod = Super+Mod5`), bleibt wie er ist.
@@ -73,14 +70,14 @@ Begründung stehen.
 
 ## 1. Was WPrefs.app bei X11 Window Maker konfiguriert
 
-WPrefs gliedert sich in Icons/Tabs, jede davon eine eigene `.conf`-Sektion in
+WPrefs gliedert sich in Icons/Tabs, jede davon eine eigene `.lua`-Sektion in
 `~/GNUstep/Defaults/WindowMaker`. Zur Orientierung, mit Zuordnung zum wmaker-wl-Äquivalent:
 
 | WPrefs-Icon | Beispielhafte Optionen | wmaker-wl-Äquivalent |
 |---|---|---|
 | **Window Handling** | Fokusmodus (click/sloppy/auto), Auto-Arrange-Icons, Fenster-Platzierung | `focus_follows_mouse`; Rest fehlt (siehe §3.1) |
 | **Icon and Image Preferences** | Icon-Größe, Icon-Positionierung, Pixmap-Pfade | fehlt komplett (kein Dateimanager-Icon-Konzept in einem scrollenden Tiling-WM) |
-| **Menu Preferences** | Menü-Stil, Scrollen, Transparenz | Root-Menü existiert (`RootMenu`-Datei), Styling teils über `config.conf`-Farben |
+| **Menu Preferences** | Menü-Stil, Scrollen, Transparenz | Root-Menü existiert (`RootMenu`-Datei), Styling teils über `config.lua`-Farben |
 | **Workspace Preferences** | Anzahl, Namen, "Advance to new workspace" | `workspace_count`; **Namen fehlen** (§3.2) |
 | **Appearance / Themes** | Theme-Paket laden (Texturen, Schriften, Farben je Widget) | fehlt komplett -- Phase 6 (§3.3) |
 | **Menu and Icon Fonts** | Schriftfamilie/-größe für Menü, Titelleiste, Icons | fehlt (`gfx.zig` nutzt aktuell feste Pango-Defaults) |
@@ -99,7 +96,7 @@ innerhalb von WPrefs, keine Tabs der Haupteinstellungen.
 
 Die Datenseite ist für einen großen Teil von WPrefs bereits da -- nur ohne grafische Oberfläche:
 
-- **`config.conf`** (`src/config.zig`): Layout, Look (Rahmenfarben), Workspaces (nur Anzahl),
+- **`config.lua`** (`src/config.zig`): Layout, Look (Rahmenfarben), Workspaces (nur Anzahl),
   Maus (`mouse_mod`, `drag_threshold`, `focus_follows_mouse`), Programme (`terminal`, `launcher`,
   `browser`), `bind =`/`unbind =` für Keybinds -- textuelles Äquivalent von "Window Handling",
   "Mouse Preferences", "Keyboard Shortcuts" (nur ohne Editor) und "Application Preferences".
@@ -119,7 +116,7 @@ interaktiv; alles wird von Hand editiert und per SIGHUP neu geladen.
 ### 3.1 Window-Handling-Optionen jenseits von `focus_follows_mouse`
 X11 Window Maker kennt weitere Fokus-Feinheiten (z.B. "focus new windows automatically",
 "raise window when focused"), die es in `types.Command`/`config.zig` noch nicht gibt. Vor einer
-GUI-Checkbox braucht jede Option zuerst ihr `config.conf`-Feld und ihre Auswirkung im Compositor.
+GUI-Checkbox braucht jede Option zuerst ihr `config.lua`-Feld und ihre Auswirkung im Compositor.
 
 ### 3.2 Workspace-Namen
 `workspace_count` existiert, benannte Workspaces (Window Makers `WorkspaceNames`) nicht. Für die
@@ -129,13 +126,13 @@ Web, Code, ...`-Schlüssel, Fallback auf "Workspace N").
 
 ### 3.3 Themes (Phase 6)
 Der größte fehlende Baustein. Ein Theme müsste mindestens definieren:
-- Titelleisten-/Rahmenfarben und -texturen (aktuell nur drei feste Hex-Farben in `config.conf`)
+- Titelleisten-/Rahmenfarben und -texturen (aktuell nur drei feste Hex-Farben in `config.lua`)
 - Schriftfamilie/-größe für Menü und Titelleiste (aktuell feste Pango-Defaults in `gfx.zig`)
 - Menü-Erscheinungsbild (Hintergrund, Hervorhebung)
 
 Ein pragmatischer erster Schritt, der nicht auf volle GNUstep-Theme-Pakete (Pixmap-Texturen,
 `.tiff`-Icons) wartet: ein reines Farben+Schriften-"Theme" als eigene kleine Plist-Datei, die
-`config.conf`s `border_*`-Schlüssel und eine neue `font_*`-Gruppe zusammenfasst. Volle
+`config.lua`s `border_*`-Schlüssel und eine neue `font_*`-Gruppe zusammenfasst. Volle
 Pixmap-Texturen sind ein separates, deutlich größeres Vorhaben (eigener Bildlader, Tiling/Scaling
 der Textur in `gfx.zig`) und sollten bewusst später kommen.
 
@@ -168,7 +165,7 @@ wirkungslose, ausgegraute Checkboxen mitzuschleppen.
 
 Kein GTK/WINGs-Klon, sondern konsistent mit dem Rest des Projekts:
 
-1. **Kein eigener Prozess mit eigenem State.** Die GUI liest `config.conf`/`attributes.conf`/
+1. **Kein eigener Prozess mit eigenem State.** Die GUI liest `config.lua`/`attributes.conf`/
    `dockapps.conf` beim Öffnen, schreibt beim Speichern dieselben Dateien zurück (mit erhaltenen
    Kommentaren, wo möglich -- oder zumindest ohne bestehende, von der GUI nicht verstandene Zeilen
    zu verwerfen) und stößt den laufenden Compositor per SIGHUP zum Neuladen an, exakt der bereits
@@ -202,10 +199,10 @@ Kein GTK/WINGs-Klon, sondern konsistent mit dem Rest des Projekts:
 
 In empfohlener Reihenfolge, jeder Schritt für sich klein und testbar:
 
-1. Workspace-Namen (`workspace_names` in `config.conf`, §3.2) -- kleinster Einstieg, kein neues
+1. Workspace-Namen (`workspace_names` in `config.lua`, §3.2) -- kleinster Einstieg, kein neues
    Konzept, nur ein weiteres `Config`-Feld nach bestehendem Muster.
 2. Minimales Theme-Datenmodell (§3.3, nur Farben+Schriften, keine Pixmap-Texturen) inklusive
-   `config.conf`-Schlüssel `theme = <pfad>` und Fallback auf die eingebauten Defaults.
+   `config.lua`-Schlüssel `theme = <pfad>` und Fallback auf die eingebauten Defaults.
 3. Erst danach: das eigentliche `wmaker-wl-prefs`-GUI-Projekt, aufbauend auf 1--3.
 
 Phase 5 (Dock/Clip) und Phase 3 (Titelleisten) aus `docs/TODO.md` bleiben Voraussetzung für die

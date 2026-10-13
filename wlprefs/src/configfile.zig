@@ -12,11 +12,11 @@
 //   2. Writing is atomic: a temporary file next to the target, flushed to
 //      disk, then rename(2) over it. A crash or a full disk leaves the old
 //      file untouched.
-//   3. A symlinked config.conf (a dotfile manager's) stays a symlink: the
+//   3. A symlinked config.lua (a dotfile manager's) stays a symlink: the
 //      file it points to is replaced, not the link.
 //   4. The permissions of the old file are kept (a 0600 config stays 0600).
 //   5. The first save of a session keeps the previous contents as
-//      `config.conf.bak`.
+//      `config.lua.bak`.
 //   6. After a save the compositor is told to reload (SIGHUP, which
 //      wmaker-wl already handles), by looking through /proc for its
 //      processes -- no `pkill` needed, so it works wherever /proc does.
@@ -105,9 +105,9 @@ pub fn read(gpa: std.mem.Allocator, path: []const u8) Read {
 /// Human text for the status line.
 pub fn readErrorText(e: ReadError) []const u8 {
     return switch (e) {
-        error.Unreadable => "config.conf exists but cannot be read -- saving is disabled",
-        error.TooBig => "config.conf is too big to be a config -- saving is disabled",
-        error.OutOfMemory => "out of memory while reading config.conf -- saving is disabled",
+        error.Unreadable => "config.lua exists but cannot be read -- saving is disabled",
+        error.TooBig => "config.lua is too big to be a config -- saving is disabled",
+        error.OutOfMemory => "out of memory while reading config.lua -- saving is disabled",
     };
 }
 
@@ -115,18 +115,18 @@ pub fn readErrorText(e: ReadError) []const u8 {
 // Paths
 // ----------------------------------------------------------------------------
 
-/// `$XDG_CONFIG_HOME/wmaker-wl/config.conf`, else
-/// `~/.config/wmaker-wl/config.conf` -- the rule of the compositor's
+/// `$XDG_CONFIG_HOME/wmaker-wl/config.lua`, else
+/// `~/.config/wmaker-wl/config.lua` -- the rule of the compositor's
 /// config.userConfigPath(), duplicated because wlprefs does not link
 /// against it. null if neither variable is set. Caller owns the result.
 pub fn defaultConfigPath(gpa: std.mem.Allocator) !?[]u8 {
     if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
         const dir = std.mem.span(x);
-        if (dir.len > 0) return try std.fmt.allocPrint(gpa, "{s}/wmaker-wl/config.conf", .{dir});
+        if (dir.len > 0) return try std.fmt.allocPrint(gpa, "{s}/wmaker-wl/config.lua", .{dir});
     }
     if (std.c.getenv("HOME")) |h| {
         const home = std.mem.span(h);
-        if (home.len > 0) return try std.fmt.allocPrint(gpa, "{s}/.config/wmaker-wl/config.conf", .{home});
+        if (home.len > 0) return try std.fmt.allocPrint(gpa, "{s}/.config/wmaker-wl/config.lua", .{home});
     }
     return null;
 }
@@ -348,7 +348,7 @@ test "read: text, missing, and 'exists but cannot be read' are three different t
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
 
-    const f = try d.file(gpa, "a.conf");
+    const f = try d.file(gpa, "a.lua");
     defer gpa.free(f);
     try std.testing.expect(read(gpa, f) == .missing);
 
@@ -371,7 +371,7 @@ test "read: refuses a file that is far too big" {
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const f = try d.file(gpa, "big.conf");
+    const f = try d.file(gpa, "big.lua");
     defer gpa.free(f);
 
     const big = try gpa.alloc(u8, max_size + 10);
@@ -388,7 +388,7 @@ test "writeAtomic: creates parent directories and the file" {
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const f = try std.fmt.allocPrintSentinel(gpa, "{s}/a/b/c/config.conf", .{d.path}, 0);
+    const f = try std.fmt.allocPrintSentinel(gpa, "{s}/a/b/c/config.lua", .{d.path}, 0);
     defer gpa.free(f);
 
     try writeAtomic(gpa, f, "x = 1\n", .{});
@@ -401,7 +401,7 @@ test "writeAtomic: keeps the permissions of the old file" {
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const f = try d.file(gpa, "config.conf");
+    const f = try d.file(gpa, "config.lua");
     defer gpa.free(f);
 
     try writeAtomic(gpa, f, "a\n", .{});
@@ -415,9 +415,9 @@ test "writeAtomic: a symlinked config stays a symlink and its target is updated"
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
 
-    const real = try d.file(gpa, "dotfiles-config.conf");
+    const real = try d.file(gpa, "dotfiles-config.lua");
     defer gpa.free(real);
-    const link = try d.file(gpa, "config.conf");
+    const link = try d.file(gpa, "config.lua");
     defer gpa.free(link);
 
     try std.testing.expect(writeAll(real, "old\n", false));
@@ -444,9 +444,9 @@ test "writeAtomic: backup holds the previous contents, and can be switched off" 
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const f = try d.file(gpa, "config.conf");
+    const f = try d.file(gpa, "config.lua");
     defer gpa.free(f);
-    const bak = try d.file(gpa, "config.conf.bak");
+    const bak = try d.file(gpa, "config.lua.bak");
     defer gpa.free(bak);
 
     // First ever write: nothing to back up.
@@ -472,9 +472,9 @@ test "writeAtomic: leaves no temporary file behind, and a failed write leaves th
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const f = try d.file(gpa, "config.conf");
+    const f = try d.file(gpa, "config.lua");
     defer gpa.free(f);
-    const tmp = try d.file(gpa, "config.conf.wlprefs-tmp");
+    const tmp = try d.file(gpa, "config.lua.wlprefs-tmp");
     defer gpa.free(tmp);
 
     try writeAtomic(gpa, f, "keep me\n", .{});
@@ -492,7 +492,7 @@ test "writeTarget: resolves links, passes through paths that do not exist" {
     const gpa = std.testing.allocator;
     const d = try TmpDir.make(gpa);
     defer d.cleanup(gpa);
-    const nope = try d.file(gpa, "nope.conf");
+    const nope = try d.file(gpa, "nope.lua");
     defer gpa.free(nope);
     const t = try writeTarget(gpa, nope);
     defer gpa.free(t);
@@ -560,9 +560,9 @@ test "signalByComm: finds a process by its name and signals exactly it" {
     // Reaped already; the deferred kill/waitpid is a harmless no-op.
 }
 
-test "defaultConfigPath ends in wmaker-wl/config.conf when it resolves" {
+test "defaultConfigPath ends in wmaker-wl/config.lua when it resolves" {
     const gpa = std.testing.allocator;
     const p = try defaultConfigPath(gpa);
     defer if (p) |v| gpa.free(v);
-    if (p) |v| try std.testing.expect(std.mem.endsWith(u8, v, "/wmaker-wl/config.conf"));
+    if (p) |v| try std.testing.expect(std.mem.endsWith(u8, v, "/wmaker-wl/config.lua"));
 }

@@ -18,8 +18,8 @@ const Window = wlprefs.window.Window;
 const usage =
     \\usage: wlprefs [--config FILE] [--shot DIR]
     \\
-    \\The settings window of wmaker-wl. It edits wmaker-wl's config.conf
-    \\($XDG_CONFIG_HOME/wmaker-wl/config.conf, else ~/.config/wmaker-wl/) and
+    \\The settings window of wmaker-wl. It edits wmaker-wl's config.lua
+    \\($XDG_CONFIG_HOME/wmaker-wl/config.lua, else ~/.config/wmaker-wl/) and
     \\changes only the keys you change.
     \\
     \\  --config FILE   edit FILE instead (to try wlprefs out)
