@@ -1,46 +1,18 @@
 {
-  description = "Development environment for wmaker-wl";
+  description = "wmaker-wl: scrollable tiling and a Window Maker Dock for river (development shell)";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
 
       forAllSystems = f:
-        nixpkgs.lib.genAttrs systems (system:
-          f {
-            pkgs = import nixpkgs {
-              inherit system;
-            };
-          });
+        nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      devShells = forAllSystems ({ pkgs }: {
-        default = pkgs.mkShell {
-          packages = with pkgs; [
-            zig
-            pkg-config
-
-            wayland
-            wayland-scanner
-            wayland-protocols
-            libxkbcommon
-
-            cairo
-            pango
-            glib
-
-            river
-          ];
-
-          shellHook = ''
-            echo "wmaker-wl dev shell"
-            echo "Zig: $(zig version)"
-          '';
-        };
+      devShells = forAllSystems (pkgs: {
+        default = import ./default.nix { inherit pkgs; };
       });
     };
 }
