@@ -675,7 +675,7 @@ pub const Window = struct {
             .mouse_settings => &.{ "mouse_mod", "drag_threshold", "floating_size" },
             .ergonomic => &.{ "terminal", "launcher", "browser" },
             .docks => &.{
-                "dock_enabled", "dock_edge",   "dock_offset", "dock_on_top",    "dock_reserve_space",
+                "dock_enabled", "dock_size",   "dock_edge",   "dock_offset",    "dock_on_top", "dock_reserve_space",
                 "clip_enabled", "clip_corner", "clip_on_top", "clip_collapsed",
             },
             .configurations => &.{

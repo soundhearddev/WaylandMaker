@@ -1223,6 +1223,22 @@ test "dock and clip options parse, bad values are rejected" {
     try std.testing.expectEqualStrings("Web", cfg.workspace_names[2]);
 }
 
+test "dock_size: 16..256 is accepted, anything else is a warning and changes nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(i32, 64), cfg.dock_size);
+
+    try parseText(arena.allocator(), &cfg, "dock_size = 96\n");
+    try std.testing.expectEqual(@as(i32, 96), cfg.dock_size);
+    try parseText(arena.allocator(), &cfg, "dock_size = 8\n");
+    try parseText(arena.allocator(), &cfg, "dock_size = 300\n");
+    try parseText(arena.allocator(), &cfg, "dock_size = \"big\"\n");
+    try std.testing.expectEqual(@as(i32, 96), cfg.dock_size);
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+}
+
 test "the built-in default config has the documented Dock and Clip defaults" {
     // Parse the built-in text itself: config.load() would also read the
     // developer's own config.lua and the test would depend on it.
@@ -1237,6 +1253,7 @@ test "the built-in default config has the documented Dock and Clip defaults" {
     try std.testing.expect(cfg.dock_enabled);
     try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
     try std.testing.expectEqual(@as(i32, 0), cfg.dock_offset);
+    try std.testing.expectEqual(@as(i32, 64), cfg.dock_size);
     try std.testing.expect(cfg.dock_on_top);
     try std.testing.expect(cfg.dock_reserve_space);
     try std.testing.expect(cfg.clip_enabled);

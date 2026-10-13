@@ -467,7 +467,7 @@ pub fn ergonomic(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
 /// Dock and Clip.
 pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     // ---- Dock ---------------------------------------------------------------
-    c.frame(ox + 12, oy + 6, 252, 216, "Dock");
+    c.frame(ox + 12, oy + 6, 252, 226, "Dock");
     c.checkbox(ox + 28, oy + 28, "Show the Dock", &s.dock_enabled);
     c.label(ox + 28, oy + 50, "Edge of the screen:");
     var e = s.dock_edge;
@@ -475,11 +475,12 @@ pub fn docks(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     if (c.iconRadio(ox + 136, oy + 70, .dock_right, e == .right)) e = .right;
     s.dock_edge = e;
     c.stepIntW(ox + 28, oy + 144, 130, "From the top (px):", &s.dock_offset, 0, 4000, 10);
-    c.checkbox(ox + 28, oy + 170, "Keep on top of windows", &s.dock_on_top);
-    c.checkbox(ox + 28, oy + 192, "Keep windows out from under it", &s.dock_reserve_space);
+    c.stepIntW(ox + 28, oy + 168, 130, "Tile size (px):", &s.dock_size, settings.min_dock_size, settings.max_dock_size, 8);
+    c.checkbox(ox + 28, oy + 194, "Keep on top of windows", &s.dock_on_top);
+    c.checkbox(ox + 28, oy + 214, "Keep windows out from under it", &s.dock_reserve_space);
 
     // ---- Clip ---------------------------------------------------------------
-    c.frame(ox + 272, oy + 6, 238, 216, "Clip");
+    c.frame(ox + 272, oy + 6, 238, 226, "Clip");
     c.checkbox(ox + 288, oy + 28, "Show the Clip", &s.clip_enabled);
     c.label(ox + 288, oy + 50, "Corner of the screen:");
     var k = s.clip_corner;

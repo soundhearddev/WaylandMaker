@@ -8,11 +8,13 @@
 // again.
 
 const std = @import("std");
+const scale = @import("scale.zig");
 
 pub const usage =
     \\usage: wl-battery [options]
     \\
-    \\A 64x64 battery monitor for the dock of wmaker-wl (a DockApp). It sets its
+    \\A battery monitor for the dock of wmaker-wl (a DockApp): drawn at 64x64 and
+    \\scaled to the dock's tile size (`dock_size`). It sets its
     \\app_id to "dockapp:<name>"; wmaker-wl docks it by itself, no entry or config
     \\needed. Shows status, AC, power, time left, percent, voltage and health.
     \\
@@ -24,6 +26,7 @@ pub const usage =
     \\  -v, --verbose        print every redraw to stderr (to see what it does)
     \\      --snapshot FILE  draw one frame into FILE (PPM image) and exit; no
     \\                       Wayland connection needed
+    \\      --size PX        with --snapshot: scale the picture to PX x PX (16..256, default 64)
     \\  -h, --help           show this text
     \\
     \\A click on the tile reads the battery again right away.
@@ -36,6 +39,8 @@ pub const Options = struct {
     interval: u32 = 5,
     verbose: bool = false,
     snapshot: ?[:0]const u8 = null,
+    /// With --snapshot: the picture is scaled to this many pixels a side.
+    size: u16 = 64,
 };
 
 pub const Error = error{
@@ -70,6 +75,10 @@ pub fn parse(it: anytype) Error!Options {
             const n = std.fmt.parseInt(u32, v, 10) catch return error.InvalidValue;
             if (n < 1 or n > 3600) return error.InvalidValue;
             o.interval = n;
+        } else if (try value(arg, "", "--size", it)) |v| {
+            const n = std.fmt.parseInt(u16, v, 10) catch return error.InvalidValue;
+            if (n < scale.min_side or n > scale.max_side) return error.InvalidValue;
+            o.size = n;
         } else if (try value(arg, "", "--snapshot", it)) |v| {
             if (v.len == 0) return error.InvalidValue;
             o.snapshot = v;
@@ -194,4 +203,14 @@ test "validSupply" {
     try std.testing.expect(!validSupply("a/b"));
     try std.testing.expect(!validSupply(".."));
     try std.testing.expect(!validSupply(""));
+}
+
+test "--size: default 64, 16..256" {
+    try std.testing.expectEqual(@as(u16, 64), (try run(&.{})).size);
+    try std.testing.expectEqual(@as(u16, 96), (try run(&.{ "--size", "96" })).size);
+    try std.testing.expectEqual(@as(u16, 128), (try run(&.{"--size=128"})).size);
+    try std.testing.expectError(error.InvalidValue, run(&.{ "--size", "8" }));
+    try std.testing.expectError(error.InvalidValue, run(&.{ "--size", "300" }));
+    try std.testing.expectError(error.InvalidValue, run(&.{"--size=x"}));
+    try std.testing.expectError(error.MissingValue, run(&.{"--size"}));
 }

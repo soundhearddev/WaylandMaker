@@ -10,11 +10,13 @@
 // its command is not `<name>`.
 
 const std = @import("std");
+const scale = @import("scale.zig");
 
 pub const usage =
     \\usage: wl-clock [options]
     \\
-    \\A 64x64 clock for the dock of wmaker-wl (a DockApp). It sets its app_id to
+    \\A clock for the dock of wmaker-wl (a DockApp): drawn at 64x64 and scaled to
+    \\the dock's tile size (`dock_size`). It sets its app_id to
     \\"dockapp:<name>"; wmaker-wl docks it by itself, no entry or config needed.
     \\
     \\options:
@@ -26,6 +28,7 @@ pub const usage =
     \\      --no-seconds    no seconds bar and no blinking colon: one redraw a minute
     \\      --snapshot FILE draw one frame into FILE (PPM image) and exit; no
     \\                      Wayland connection needed
+    \\      --size PX       with --snapshot: scale the picture to PX x PX (16..256, default 64)
     \\  -h, --help          show this text
     \\
 ;
@@ -37,6 +40,8 @@ pub const Options = struct {
     hour12: bool = false,
     seconds: bool = true,
     snapshot: ?[:0]const u8 = null,
+    /// With --snapshot: the picture is scaled to this many pixels a side.
+    size: u16 = 64,
 };
 
 pub const Error = error{
@@ -75,6 +80,10 @@ pub fn parse(it: anytype) Error!Options {
         } else if (try value(arg, "-l", "--label", it)) |v| {
             if (v.len > max_label) return error.InvalidValue;
             o.label = v;
+        } else if (try value(arg, "", "--size", it)) |v| {
+            const n = std.fmt.parseInt(u16, v, 10) catch return error.InvalidValue;
+            if (n < scale.min_side or n > scale.max_side) return error.InvalidValue;
+            o.size = n;
         } else if (try value(arg, "", "--snapshot", it)) |v| {
             if (v.len == 0) return error.InvalidValue;
             o.snapshot = v;
@@ -186,4 +195,14 @@ test "validName" {
     try std.testing.expect(!validName("ä"));
     try std.testing.expect(!validName("x" ** (max_name + 1)));
     try std.testing.expect(validName("x" ** max_name));
+}
+
+test "--size: default 64, 16..256" {
+    try std.testing.expectEqual(@as(u16, 64), (try run(&.{})).size);
+    try std.testing.expectEqual(@as(u16, 96), (try run(&.{ "--size", "96" })).size);
+    try std.testing.expectEqual(@as(u16, 128), (try run(&.{"--size=128"})).size);
+    try std.testing.expectError(error.InvalidValue, run(&.{ "--size", "8" }));
+    try std.testing.expectError(error.InvalidValue, run(&.{ "--size", "300" }));
+    try std.testing.expectError(error.InvalidValue, run(&.{"--size=x"}));
+    try std.testing.expectError(error.MissingValue, run(&.{"--size"}));
 }

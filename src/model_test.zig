@@ -1014,6 +1014,7 @@ test "everything wlprefs writes is read back by the compositor with the same val
     s.dock_enabled = false;
     s.dock_edge = .left;
     s.dock_offset = 120;
+    s.dock_size = 96;
     s.dock_on_top = false;
     s.dock_reserve_space = false;
     s.clip_enabled = false;
@@ -1022,6 +1023,17 @@ test "everything wlprefs writes is read back by the compositor with the same val
     s.clip_collapsed = true;
     s.bind_layout = 1;
     s.theme.set("nord");
+    s.focus_new_windows = !base.focus_new_windows;
+    s.workspace_wrap = !base.workspace_wrap;
+    s.clip_scroll_workspaces = !base.clip_scroll_workspaces;
+    s.dock_auto_raise = !base.dock_auto_raise;
+    s.dock_single_click = !base.dock_single_click;
+    s.dock_save_state = !base.dock_save_state;
+    s.clip_auto_collapse = !base.clip_auto_collapse;
+    s.clip_auto_raise = !base.clip_auto_raise;
+    s.font_menu_title.set("Sans Bold 11");
+    s.font_menu.set("Sans 11");
+    s.font_dock.set("Sans 9");
 
     // Every key is covered by this test: if a key is added to wlprefs, it
     // must be given a different value above.
@@ -1066,6 +1078,7 @@ test "everything wlprefs writes is read back by the compositor with the same val
     try std.testing.expect(!cfg.dock_enabled);
     try std.testing.expectEqual(config.DockEdge.left, cfg.dock_edge);
     try std.testing.expectEqual(@as(i32, 120), cfg.dock_offset);
+    try std.testing.expectEqual(@as(i32, 96), cfg.dock_size);
     try std.testing.expect(!cfg.dock_on_top);
     try std.testing.expect(!cfg.dock_reserve_space);
     try std.testing.expect(!cfg.clip_enabled);

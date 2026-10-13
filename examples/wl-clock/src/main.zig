@@ -7,7 +7,9 @@
 //
 //   1. The xdg_toplevel's app_id is "dockapp:<name>", <name> being the
 //      program's own name (wl-clock): "Keep Icon" saves `<name>` as command.
-//   2. The size it wants: min == max == one 64x64 tile.
+//   2. No size hint: it is proposed one whole Dock tile (wmaker-wl's
+//      `dock_size`, 64 px by default) and scales its 64x64 face to it
+//      (scale.zig). A fixed min == max == 64 would be centred in a bigger tile.
 //
 // From the tag on wmaker-wl treats the window as an icon, not a window, and
 // decides everything about it itself: it is out of the window list, the
@@ -19,7 +21,7 @@
 // keyboard, and has exactly one way to end: the compositor's close (the
 // tile menu's "Kill"), or a signal.
 //
-// Like every Window Maker dockapp this one draws its whole 64x64 tile itself,
+// Like every Window Maker dockapp this one draws its whole tile itself,
 // frame included (face.zig), in the look of wmaker-wl's own Dock tiles, so a
 // docked clock and the launcher tiles next to it are indistinguishable.
 //
@@ -43,6 +45,7 @@ const wp = wayland.client.wp;
 
 const face = @import("face.zig");
 const options = @import("options.zig");
+const scale = @import("scale.zig");
 
 const c = @cImport({
     @cInclude("time.h");
@@ -54,6 +57,7 @@ const c = @cImport({
 test {
     _ = face;
     _ = options;
+    _ = scale;
 }
 
 /// linux/input-event-codes.h BTN_LEFT.
@@ -82,6 +86,13 @@ const State = struct {
     bufs: [2]Buf = undefined,
     /// Both buffers' pixels, one after the other.
     pixels: []u32 = &.{},
+    /// The mapping behind `pixels`, and the side the buffers were made for.
+    map: ?[]align(std.heap.page_size_min) u8 = null,
+    buf_side: i32 = 0,
+    /// The side the compositor proposed (xdg_toplevel.configure).
+    side: i32 = face.tile,
+    /// The 64x64 picture, before it is scaled into a buffer of `side`.
+    frame: face.Pixels = undefined,
 
     view: face.View = .{},
 
@@ -129,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     if (opts.snapshot) |path| {
         var px: face.Pixels = undefined;
         face.render(&px, localNow(), state.view);
-        writePpm(path, &px) catch |err| {
+        writeSnapshot(path, &px, opts.size) catch |err| {
             std.debug.print("wl-clock: cannot write {s}: {t}\n", .{ path, err });
             std.process.exit(1);
         };
@@ -154,16 +165,15 @@ pub fn main(init: std.process.Init) !void {
     registry.setListener(*State, registryListener, &state);
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    const shm = state.shm orelse return error.NoWlShm;
+    _ = state.shm orelse return error.NoWlShm;
     const compositor = state.compositor orelse return error.NoWlCompositor;
     const wm_base = state.wm_base orelse return error.NoXdgWmBase;
     wm_base.setListener(*State, wmBaseListener, &state);
     if (state.seat) |seat| seat.setListener(*State, seatListener, &state);
 
-    // Buffers first, so the very first frame after `configure` is ready.
-    const map = try createBuffers(&state, shm);
-    defer posix.munmap(map);
-    defer for (&state.bufs) |b| b.buffer.destroy();
+    // The buffers are made (and made again) in redrawIfNeeded, for the side
+    // the compositor proposes.
+    defer freeBuffers(&state);
 
     // ---- the window ---------------------------------------------------------
 
@@ -181,14 +191,14 @@ pub fn main(init: std.process.Init) !void {
     state.toplevel = toplevel;
     toplevel.setListener(*State, toplevelListener, &state);
 
-    // ---- the tag and the size that make this a DockApp -----------------------
+    // ---- the tag that makes this a DockApp -----------------------
 
     const app_id = try std.fmt.allocPrintSentinel(gpa, "dockapp:{s}", .{opts.name}, 0);
     defer gpa.free(app_id);
     toplevel.setAppId(app_id.ptr);
     toplevel.setTitle("Clock");
-    toplevel.setMinSize(face.tile, face.tile);
-    toplevel.setMaxSize(face.tile, face.tile);
+    // No min/max size: a DockApp without a size hint is proposed one whole
+    // Dock tile, whatever wmaker-wl's `dock_size` is (xdg_toplevel.configure).
 
     surface.commit();
 
@@ -263,6 +273,10 @@ fn redrawIfNeeded(state: *State) void {
 
     // Both buffers with the compositor: wait for a `release` (the loop wakes
     // up for it) instead of drawing into memory it is still reading.
+    ensureBuffers(state) catch |err| {
+        std.log.err("cannot make the {d}x{d} buffers: {t}", .{ state.side, state.side, err });
+        return;
+    };
     const idx: usize = if (!state.bufs[0].busy) 0 else if (!state.bufs[1].busy) 1 else return;
 
     // The antialiased digits are drawn once a minute; every other frame is
@@ -272,12 +286,13 @@ fn redrawIfNeeded(state: *State) void {
         face.renderBase(&state.base, now, state.view);
         state.base_key = bkey;
     }
-    const px = state.pixels[idx * face.pixel_count ..][0..face.pixel_count];
-    @memcpy(px, &state.base);
-    face.renderSeconds(px, now, state.view);
+    @memcpy(&state.frame, &state.base);
+    face.renderSeconds(&state.frame, now, state.view);
+    const side: usize = @intCast(state.side);
+    scale.resize(state.pixels[idx * side * side ..][0 .. side * side], side, &state.frame, face.side);
 
     state.surface.attach(state.bufs[idx].buffer, 0, 0);
-    state.surface.damageBuffer(0, 0, face.tile, face.tile);
+    state.surface.damageBuffer(0, 0, state.side, state.side);
     state.surface.commit();
     state.bufs[idx].busy = true;
     state.shown = key;
@@ -308,12 +323,27 @@ fn localNow() face.Clock {
 }
 
 // ----------------------------------------------------------------------------
-// Buffers: one memfd, one pool, two wl_buffers, mapped for the whole run.
+// Buffers: one memfd, one pool, two wl_buffers. They are `side` x `side`, the
+// side wmaker-wl proposes (its `dock_size`), and are made again when it changes.
 // ----------------------------------------------------------------------------
 
-fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u8 {
-    const stride: i32 = face.tile * 4;
-    const one: usize = face.pixel_count * 4;
+fn freeBuffers(state: *State) void {
+    const map = state.map orelse return;
+    for (&state.bufs) |b| b.buffer.destroy();
+    posix.munmap(map);
+    state.map = null;
+    state.pixels = &.{};
+    state.buf_side = 0;
+}
+
+fn ensureBuffers(state: *State) !void {
+    if (state.map != null and state.buf_side == state.side) return;
+    const shm = state.shm orelse return error.NoWlShm;
+    freeBuffers(state);
+
+    const side: usize = @intCast(state.side);
+    const stride: i32 = state.side * 4;
+    const one: usize = side * side * 4;
     const size: usize = one * 2;
 
     const rc = linux.memfd_create("wl-clock", linux.MFD.CLOEXEC);
@@ -324,7 +354,6 @@ fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u
 
     const map = try posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     errdefer posix.munmap(map);
-    state.pixels = std.mem.bytesAsSlice(u32, map);
 
     // The pool can go as soon as the buffers exist; they keep the memory.
     const pool = try shm.createPool(fd, @intCast(size));
@@ -334,12 +363,14 @@ fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u
     errdefer for (state.bufs[0..made]) |b| b.buffer.destroy();
     for (&state.bufs, 0..) |*b, i| {
         b.* = .{
-            .buffer = try pool.createBuffer(@intCast(i * one), face.tile, face.tile, stride, .argb8888),
+            .buffer = try pool.createBuffer(@intCast(i * one), state.side, state.side, stride, .argb8888),
         };
         made += 1;
         b.buffer.setListener(*Buf, bufferListener, b);
     }
-    return map;
+    state.map = map;
+    state.pixels = std.mem.bytesAsSlice(u32, map);
+    state.buf_side = state.side;
 }
 
 // ----------------------------------------------------------------------------
@@ -348,11 +379,11 @@ fn createBuffers(state: *State, shm: *wl.Shm) ![]align(std.heap.page_size_min) u
 
 /// Binary PPM (P6), no alpha: the face is opaque. libc stdio on purpose, so
 /// this stays free of the std.Io plumbing.
-fn writePpm(path: [:0]const u8, px: *const face.Pixels) !void {
+fn writePpm(path: [:0]const u8, px: []const u32, side: usize) !void {
     const f = c.fopen(path.ptr, "wb") orelse return error.OpenFailed;
     defer _ = c.fclose(f);
-    if (c.fprintf(f, "P6\n%d %d\n255\n", @as(c_int, face.tile), @as(c_int, face.tile)) < 0) return error.WriteFailed;
-    for (px) |p| {
+    if (c.fprintf(f, "P6\n%d %d\n255\n", @as(c_int, @intCast(side)), @as(c_int, @intCast(side))) < 0) return error.WriteFailed;
+    for (px[0 .. side * side]) |p| {
         const rgb = [3]u8{
             @truncate(p >> 16),
             @truncate(p >> 8),
@@ -360,6 +391,14 @@ fn writePpm(path: [:0]const u8, px: *const face.Pixels) !void {
         };
         if (c.fwrite(&rgb, 1, 3, f) != 3) return error.WriteFailed;
     }
+}
+
+/// --snapshot: the 64x64 picture scaled to `--size` (the way a DockApp
+/// shows it in a bigger or smaller Dock).
+fn writeSnapshot(path: [:0]const u8, px: *const face.Pixels, side: u16) !void {
+    var out: [scale.max_side * scale.max_side]u32 = undefined;
+    scale.resize(&out, side, px, face.side);
+    try writePpm(path, &out, side);
 }
 
 // ----------------------------------------------------------------------------
@@ -444,9 +483,16 @@ fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, state
 
 fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, state: *State) void {
     switch (event) {
-        // The compositor proposes the tile we asked for. We only ever draw
-        // 64x64, whatever is proposed; it centres what we really have.
-        .configure => {},
+        // We set no size hint, so the compositor proposes one whole Dock
+        // tile (wmaker-wl's dock_size, 64 by default). The 64x64 picture is
+        // scaled to it.
+        .configure => |cfg| {
+            const side = scale.proposedSide(cfg.width, cfg.height, face.tile);
+            if (side != state.side) {
+                state.side = side;
+                state.dirty = true;
+            }
+        },
         .close => state.running = false,
     }
 }

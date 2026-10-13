@@ -37,6 +37,10 @@ pub const default_config_text = @embedFile("default_config.lua");
 
 pub const CenterMode = enum { on_overflow, always, never };
 pub const NewWindowMode = enum { new_column, stack };
+/// Allowed `dock_size` (the same range as config.zig).
+pub const min_dock_size: i32 = 16;
+pub const max_dock_size: i32 = 256;
+
 pub const DockEdge = enum { left, right };
 pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
 pub const SubmenuAlign = enum { right, left };
@@ -233,6 +237,8 @@ pub const Settings = struct {
 
     // ---- Dock and Clip
     dock_enabled: bool = true,
+    /// Edge length of a Dock/Clip tile in px (config.zig: dock_size, 16..256).
+    dock_size: i32 = 64,
     dock_edge: DockEdge = .right,
     dock_offset: i32 = 0,
     dock_on_top: bool = true,
@@ -396,6 +402,11 @@ fn tablePlain(a: std.mem.Allocator, key: []const u8, v: []const u8) ?[]const u8 
 pub fn apply(s: *Settings, key: []const u8, value: []const u8) void {
     const eql = std.mem.eql;
 
+    if (eql(u8, key, "dock_size")) {
+        const v = std.fmt.parseInt(i32, value, 10) catch return;
+        if (v >= min_dock_size and v <= max_dock_size) s.dock_size = v;
+        return;
+    }
     inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
             const v = std.fmt.parseInt(i32, value, 10) catch return;
@@ -482,8 +493,8 @@ const bool_keys = .{
 };
 
 const number_keys = .{
-    "gap",                  "outer_gap",  "border_width",  "min_window_size", "drag_threshold", "dock_offset",
-    "default_column_width", "width_step", "floating_size", "workspace_count",
+    "gap",       "outer_gap",            "border_width", "min_window_size", "drag_threshold",  "dock_offset",
+    "dock_size", "default_column_width", "width_step",   "floating_size",   "workspace_count",
 };
 
 /// One line of the file that carries a setting.
@@ -581,7 +592,7 @@ pub fn problem(s: *const Settings, storage: *[96]u8) ?Problem {
 pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
     const eql = std.mem.eql;
 
-    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
+    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset", "dock_size" }) |name| {
         if (eql(u8, key, name)) return std.fmt.bufPrint(out, "{d}", .{@field(s, name)}) catch null;
     }
     inline for (.{ "default_column_width", "width_step", "floating_size" }) |name| {
@@ -618,18 +629,18 @@ pub fn format(s: *const Settings, key: []const u8, out: []u8) ?[]const u8 {
 
 /// All keys written by the GUI (the order is the order of appending).
 pub const keys = [_][]const u8{
-    "gap",                 "outer_gap",              "default_column_width",  "width_presets",
-    "width_step",          "min_window_size",        "center_focused_column", "new_window",
-    "border_width",        "border_focused",         "border_unfocused",      "border_floating",
-    "workspace_count",     "workspace_names",        "drag_threshold",        "floating_size",
-    "focus_follows_mouse", "mouse_mod",              "terminal",              "launcher",
-    "browser",             "enable_wmaker_compat",   "enable_autostart",      "enable_dockapps",
-    "bind_layout",         "theme",                  "dock_enabled",          "dock_edge",
-    "dock_offset",         "dock_on_top",            "dock_reserve_space",    "clip_enabled",
-    "clip_corner",         "clip_on_top",            "clip_collapsed",        "focus_new_windows",
-    "workspace_wrap",      "clip_scroll_workspaces", "dock_auto_raise",       "dock_single_click",
-    "dock_save_state",     "clip_auto_collapse",     "clip_auto_raise",       "font_menu_title",
-    "font_menu",           "font_dock",
+    "gap",                 "outer_gap",            "default_column_width",   "width_presets",
+    "width_step",          "min_window_size",      "center_focused_column",  "new_window",
+    "border_width",        "border_focused",       "border_unfocused",       "border_floating",
+    "workspace_count",     "workspace_names",      "drag_threshold",         "floating_size",
+    "focus_follows_mouse", "mouse_mod",            "terminal",               "launcher",
+    "browser",             "enable_wmaker_compat", "enable_autostart",       "enable_dockapps",
+    "bind_layout",         "theme",                "dock_enabled",           "dock_size",
+    "dock_edge",           "dock_offset",          "dock_on_top",            "dock_reserve_space",
+    "clip_enabled",        "clip_corner",          "clip_on_top",            "clip_collapsed",
+    "focus_new_windows",   "workspace_wrap",       "clip_scroll_workspaces", "dock_auto_raise",
+    "dock_single_click",   "dock_save_state",      "clip_auto_collapse",     "clip_auto_raise",
+    "font_menu_title",     "font_menu",            "font_dock",
 };
 
 fn keyIndex(key: []const u8) ?usize {
@@ -909,6 +920,7 @@ test "parse follows config.zig, including what it ignores" {
         \\dock_edge = "left"
         \\clip_corner = "bottom_right"
         \\dock_offset = -4
+        \\dock_size = 8
         \\clip_corner = "middle"
         \\
     );
@@ -921,6 +933,7 @@ test "parse follows config.zig, including what it ignores" {
     try testing.expectEqual(@as(u32, 4), s.workspace_count); // 99: ignored
     try testing.expectEqual(DockEdge.left, s.dock_edge);
     try testing.expectEqual(@as(i32, 0), s.dock_offset); // -4: ignored
+    try testing.expectEqual(@as(i32, 64), s.dock_size); // 8: below 16, ignored
     try testing.expectEqual(ClipCorner.bottom_right, s.clip_corner); // "middle": ignored
 }
 
@@ -1169,6 +1182,7 @@ test "render round-trip: the written file parses back to the GUI values" {
     s.workspace_names.set("Main, , Web");
     s.width_presets.set("0.25, 0.5, 1");
     s.dock_offset = 120;
+    s.dock_size = 96;
     s.dock_on_top = false;
     s.clip_corner = .bottom_left;
     s.clip_collapsed = true;
