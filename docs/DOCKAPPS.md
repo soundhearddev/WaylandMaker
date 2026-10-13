@@ -18,7 +18,7 @@ Was der Compositor (nicht der Client) dann festlegt, ausschließlich in `dockhos
 
 | Thema | Verhalten |
 |---|---|
-| Größe | was das DockApp angefragt hat, höchstens eine Kachel (64×64); ohne Hint eine ganze Kachel |
+| Größe | was das DockApp angefragt hat, höchstens eine Kachel (`dock_size`, 64×64 ist der Standard); ohne Hint eine ganze Kachel |
 | Position | zentriert in der Kachel seines Namens, über dem Dock, auf allen Workspaces |
 | Dekoration | keine (CSD, keine Ränder, keine Titelleiste) |
 | Fokus, Tastatur | nie; Mod+Q und andere Fenster-Aktionen erreichen es nicht |
@@ -31,6 +31,28 @@ Was der Compositor (nicht der Client) dann festlegt, ausschließlich in `dockhos
 
 Das Framework für DockApp-Autoren ist damit: Tag setzen, Fenstergröße angeben, zeichnen. Alles
 andere übernimmt der Compositor.
+
+## Größen und das Skalierungssystem (`scale.zig`)
+
+Window Maker skaliert nie ein fertiges Bild: die Kachel ist `IconSize` Pixel groß (64), und was darin
+sitzt, wird in dieser Größe gezeichnet oder (kleineres DockApp) einfach zentriert. wmaker-wl hat dazu
+`dock_size` (16..256), und `src/scale.zig` ist die eine Stelle, die das für jede Größe regelt:
+
+- **Designraster:** alles wird auf einer 64×64-Kachel entworfen („Design-Einheiten“). `scale.Metrics`
+  macht daraus ganze Pixel der echten Kachel: `edge(v)` rundet eine *Kante* (0 bleibt 0, 64 ist immer
+  die Kachelseite), `len(at, size)` ist der Abstand zweier gerundeter Kanten (Nachbarn lassen keine Lücke
+  und überlappen nicht), `stroke(v)` ist nie dünner als 1 px, `whole(v)` ist eine ganzzahlige
+  Vergrößerung (Pixelfont), `f(v)` die exakte Größe für antialiaste Polygone, `fontDesc` skaliert eine
+  Pango-Schrift.
+- **Host (`dock.zig`):** Kachelrahmen, Bevel, „läuft nicht“-Punkte, Pfeile, Schriften und der
+  Icon-Rand laufen durch `dock.metrics`; PNG-Icons werden auf ganze Pixel gesetzt (`gfx.Canvas.drawIcon`).
+  Bei 64 px ist das Ergebnis pixelgleich zum alten Bild.
+- **DockApps:** ein DockApp ohne Größenhint bekommt eine ganze Kachel (`scale.proposedSide`) und zeichnet
+  *in dieser Größe* (`examples/wl-clock/src/face.zig`, `examples/wl-battery/src/face.zig`: Layout aus
+  `Metrics`, Pixelfont-Vergrößerung wird verkleinert, bis der Text passt, Icons sind Pixelkacheln).
+  Ein Bild, das sich nicht neu zeichnen lässt, kann mit `scale.centre` (wie Window Maker: unverändert in
+  die Mitte) oder `scale.resize` (bilinear/Box) angepasst werden – das ist der Notbehelf, nicht der
+  Normalfall. `scale.zig` hängt als identische Kopie in jedem Beispiel (`diff src/scale.zig examples/*/src/scale.zig`).
 
 ## Normale Programme
 

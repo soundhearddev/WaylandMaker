@@ -56,6 +56,7 @@
 const std = @import("std");
 const wayland = @import("wayland");
 const xkb = @import("xkbcommon");
+const scale = @import("scale.zig");
 const river = wayland.client.river;
 
 pub const Modifiers = river.SeatV1.Modifiers;
@@ -105,8 +106,8 @@ pub const max_workspaces = 16;
 /// window manager, so it is refused when the file is read instead.
 pub const max_pixels: i32 = 10_000;
 /// Allowed range of `dock_size` (px per tile).
-pub const min_dock_size: i32 = 16;
-pub const max_dock_size: i32 = 256;
+pub const min_dock_size: i32 = scale.min_side;
+pub const max_dock_size: i32 = scale.max_side;
 
 /// xkbcommon allows at most four layouts per keymap.
 pub const max_bind_layouts = 4;

@@ -15,8 +15,8 @@ const scale = @import("scale.zig");
 pub const usage =
     \\usage: wl-clock [options]
     \\
-    \\A clock for the dock of wmaker-wl (a DockApp): drawn at 64x64 and scaled to
-    \\the dock's tile size (`dock_size`). It sets its app_id to
+    \\A clock for the dock of wmaker-wl (a DockApp): drawn at the
+    \\dock's tile size (`dock_size`), pixel for pixel, not stretched. It sets its app_id to
     \\"dockapp:<name>"; wmaker-wl docks it by itself, no entry or config needed.
     \\
     \\options:
@@ -28,7 +28,7 @@ pub const usage =
     \\      --no-seconds    no seconds bar and no blinking colon: one redraw a minute
     \\      --snapshot FILE draw one frame into FILE (PPM image) and exit; no
     \\                      Wayland connection needed
-    \\      --size PX       with --snapshot: scale the picture to PX x PX (16..256, default 64)
+    \\      --size PX       with --snapshot: draw the picture at PX x PX (16..256, default 64)
     \\  -h, --help          show this text
     \\
 ;
@@ -40,7 +40,7 @@ pub const Options = struct {
     hour12: bool = false,
     seconds: bool = true,
     snapshot: ?[:0]const u8 = null,
-    /// With --snapshot: the picture is scaled to this many pixels a side.
+    /// With --snapshot: the picture is drawn at this many pixels a side.
     size: u16 = 64,
 };
 

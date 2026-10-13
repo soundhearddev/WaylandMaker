@@ -1,6 +1,6 @@
 # wl-battery
 
-Kleiner 64x64 Batterie-Monitor als DockApp für wmaker-wl (Zig 0.16.0), gebaut auf wl-clock.
+Kleiner Batterie-Monitor als DockApp (zeichnet in der Größe der Dock-Kachel, Standard 64 px) für wmaker-wl (Zig 0.16.0), gebaut auf wl-clock.
 
 ```
 [Symbol] [Stecker]  12W    Status-Symbol, Stecker (am Netz), Leistung

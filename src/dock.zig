@@ -34,6 +34,7 @@ const dockapp = @import("dockapp.zig");
 const xpm = @import("xpm.zig");
 const types = @import("types.zig");
 const wdock = @import("wm_dock.zig");
+const scale = @import("scale.zig");
 
 const Rect = types.Rect;
 
@@ -41,30 +42,46 @@ const Rect = types.Rect;
 // Look (Window Maker / NeXT, same palette as the menu in ui.zig)
 // ----------------------------------------------------------------------------
 
-/// Default tile size (Window Maker's default icon size).
-pub const default_tile: i32 = 64;
+/// Default tile size (Window Maker's default icon size): the side of the
+/// design grid every tile is drawn on (see scale.zig).
+pub const default_tile: i32 = scale.native;
 /// Edge length of a tile in px. Set from `dock_size` in config.lua (see
 /// `setSize`); a plain variable because the whole Dock geometry is derived
 /// from it and the compositor is single-threaded.
 pub var tile: i32 = default_tile;
-/// Side of the (square) icon inside a tile: 3/4 of the tile (48 of 64).
+/// The design grid (64x64, Window Maker's tile) laid over `tile`. Every
+/// offset, line width, polygon and font size below is written in design
+/// units and goes through this, so a tile of any `dock_size` is drawn at its
+/// own pixel size (on whole pixels), not drawn at 64 and stretched.
+pub var metrics: scale.Metrics = .{};
+/// Side of the (square) icon inside a tile: the tile minus a margin of 8
+/// design units on each side (48 of 64), so the icon is centred on whole
+/// pixels at every tile size.
 pub var icon_size: i32 = 48;
+/// Edge length of the workspace arrow buttons in the Clip's corners.
+pub var arrow: i32 = 16;
 
 /// Apply the configured tile size. Everything is recomputed from `tile`
 /// on the next layout pass (ui.prepareBar re-creates surfaces whose size changed).
 pub fn setSize(size: i32) void {
     tile = size;
-    icon_size = @divTrunc(size * 3, 4);
+    metrics = .{ .side = size };
+    icon_size = size - 2 * metrics.edge(8);
+    arrow = metrics.edge(16);
     // The Dock grid in wm_dock.zig must use the same cell size as the drawing.
     wdock.icon_size = size;
     std.log.info("dock: tile size {d} px (icon {d} px)", .{ tile, icon_size });
 }
-/// Edge length of the workspace arrow buttons in the Clip's corners.
-pub const arrow: i32 = 16;
 
+// Fonts in design units (points at a 64 px tile); `sized` scales them.
 const font_logo: [:0]const u8 = "Sans Bold 22";
 const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
+
+/// `base` (a Pango description) with its point size scaled to the tile.
+fn sized(buf: *[96]u8, base: [:0]const u8) [:0]const u8 {
+    return metrics.fontDesc(buf, base);
+}
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 const col_light = gfx.Color.rgb(0xffffff);
@@ -924,29 +941,38 @@ fn drawFrame(cv: *gfx.Canvas, x: i32, y: i32, hot: bool, from: ?gfx.Color, to: ?
     const f = from orelse if (hot) col_hot_from else col_tile_from;
     const t = to orelse if (hot) col_hot_to else col_tile_to;
     cv.dGradient(x, y, tile, tile, f, t);
-    cv.bevel(x, y, tile, tile, col_light, col_dark);
-    cv.bevel(x + 1, y + 1, tile - 2, tile - 2, col_light, col_dark);
+    // Two bevel steps of one design unit each (>= 1 px per step).
+    const steps = 2 * metrics.stroke(1);
+    var k: i32 = 0;
+    while (k < steps) : (k += 1) cv.bevel(x + k, y + k, tile - 2 * k, tile - 2 * k, col_light, col_dark);
 }
 
 /// Window Maker's mark for "docked, but not running": three small dots in
 /// the lower left corner (appicon.c's `dock_dots`, drawn at x = 4, 9, 14 and
 /// `tile - 6`, each 3 x 2 px). A running application's tile is left plain.
 fn drawNotRunning(cv: *gfx.Canvas, x: i32, y: i32) void {
-    const dy = y + tile - 6;
-    var dx: i32 = 4;
-    while (dx <= 14) : (dx += 5) {
-        cv.fillRect(x + dx + 1, dy + 1, 3, 2, col_dot_shadow);
-        cv.fillRect(x + dx, dy, 3, 2, col_light);
+    const m = metrics;
+    const dy = y + tile - m.edge(6);
+    const w = m.stroke(3);
+    const h = m.stroke(2);
+    const sh = m.stroke(1);
+    for ([_]i32{ 4, 9, 14 }) |d| {
+        const dx = m.edge(d);
+        cv.fillRect(x + dx + sh, dy + sh, w, h, col_dot_shadow);
+        cv.fillRect(x + dx, dy, w, h, col_light);
     }
 }
 
 /// The raster Window Maker lays over an icon while its application starts
 /// (`stipple_gc`): every second pixel darkened.
 fn drawLaunching(cv: *gfx.Canvas, x: i32, y: i32) void {
-    var py: i32 = 2;
-    while (py < tile - 2) : (py += 1) {
-        var sx: i32 = 2 + @mod(py, 2);
-        while (sx < tile - 2) : (sx += 2) cv.fillRect(x + sx, y + py, 1, 1, col_stipple);
+    // The raster itself stays one device pixel (as Window Maker's stipple);
+    // only the margin around it follows the tile.
+    const lo = metrics.stroke(2);
+    var py: i32 = lo;
+    while (py < tile - lo) : (py += 1) {
+        var sx: i32 = lo + @mod(py, 2);
+        while (sx < tile - lo) : (sx += 2) cv.fillRect(x + sx, y + py, 1, 1, col_stipple);
     }
 }
 
@@ -954,10 +980,14 @@ fn drawLaunching(cv: *gfx.Canvas, x: i32, y: i32) void {
 /// folded corner at the upper right of a Clip tile that is on every
 /// workspace.
 fn drawOmnipresent(cv: *gfx.Canvas, x: i32, y: i32) void {
-    const fx: f64 = @floatFromInt(x + tile - 2);
-    const fy: f64 = @floatFromInt(y + 2);
-    cv.fillPolygon(&.{ .{ fx - 10, fy }, .{ fx, fy }, .{ fx, fy + 10 } }, col_dark);
-    cv.fillPolygon(&.{ .{ fx - 8, fy + 1 }, .{ fx - 1, fy + 1 }, .{ fx - 1, fy + 8 } }, col_light);
+    const m = metrics;
+    const fx: f64 = @floatFromInt(x + tile - m.edge(2));
+    const fy: f64 = @floatFromInt(y + m.edge(2));
+    const a: f64 = m.f(10);
+    const b: f64 = m.f(8);
+    const o: f64 = m.f(1);
+    cv.fillPolygon(&.{ .{ fx - a, fy }, .{ fx, fy }, .{ fx, fy + a } }, col_dark);
+    cv.fillPolygon(&.{ .{ fx - b, fy + o }, .{ fx - o, fy + o }, .{ fx - o, fy + b } }, col_light);
 }
 
 fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, font: [:0]const u8, col: gfx.Color) void {
@@ -984,7 +1014,8 @@ fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool) vo
             @memcpy(letter[0..n], name[0..n]);
         }
         const s: [:0]const u8 = letter[0..n :0];
-        drawCentered(cv, s, x, y + 14, tile, font_letter, col_text);
+        var fb: [96]u8 = undefined;
+        drawCentered(cv, s, x, y + metrics.edge(14), tile, sized(&fb, font_letter), col_text);
     }
     // Only an entry that can be started says "not running" (a hand-made
     // entry without a command has nothing to show).
@@ -1048,37 +1079,41 @@ fn drawMainTile(cv: *gfx.Canvas, v: View, x: i32, y: i32, hot: bool) void {
     switch (v.dock.kind) {
         .dock => {
             drawFrame(cv, x, y, hot, col_logo_from, col_logo_to);
-            drawCentered(cv, "WM", x, y + 16, tile, font_logo, col_light);
+            var fb: [96]u8 = undefined;
+            drawCentered(cv, "WM", x, y + metrics.edge(16), tile, sized(&fb, font_logo), col_light);
         },
         .clip => {
             const hot0 = hot and v.hover_arrow == .none;
             drawFrame(cv, x, y, hot0, null, null);
             var num_buf: [12:0]u8 = undefined;
             const num = std.fmt.bufPrintZ(&num_buf, "{d}", .{v.workspace + 1}) catch "?";
+            var fb: [96]u8 = undefined;
             if (v.name) |name| {
-                drawCentered(cv, num, x, y + 10, tile, font_number, col_text);
+                drawCentered(cv, num, x, y + metrics.edge(10), tile, sized(&fb, font_number), col_text);
                 var name_buf: [24:0]u8 = undefined;
                 const clipped = clipName(&name_buf, name);
-                drawCentered(cv, clipped, x, y + 41, tile, gfx.fonts.dockLabel(), col_text);
+                var lb: [96]u8 = undefined;
+                drawCentered(cv, clipped, x, y + metrics.edge(41), tile, sized(&lb, gfx.fonts.dockLabel()), col_text);
             } else {
-                drawCentered(cv, num, x, y + 20, tile, font_number, col_text);
+                drawCentered(cv, num, x, y + metrics.edge(20), tile, sized(&fb, font_number), col_text);
             }
             // The two arrows (Window Maker: upper right = next, lower left = prev).
             const fa: f64 = @floatFromInt(arrow);
             const fx: f64 = @floatFromInt(x);
             const fy: f64 = @floatFromInt(y);
             const ft: f64 = @floatFromInt(tile);
+            const mg: f64 = @floatFromInt(metrics.edge(3));
             const next_col = if (hot and v.hover_arrow == .next) col_arrow_hot else col_arrow;
             const prev_col = if (hot and v.hover_arrow == .prev) col_arrow_hot else col_arrow;
             cv.fillPolygon(&.{
-                .{ fx + ft - 3 - fa, fy + 3 },
-                .{ fx + ft - 3, fy + 3 },
-                .{ fx + ft - 3, fy + 3 + fa },
+                .{ fx + ft - mg - fa, fy + mg },
+                .{ fx + ft - mg, fy + mg },
+                .{ fx + ft - mg, fy + mg + fa },
             }, next_col);
             cv.fillPolygon(&.{
-                .{ fx + 3, fy + ft - 3 - fa },
-                .{ fx + 3, fy + ft - 3 },
-                .{ fx + 3 + fa, fy + ft - 3 },
+                .{ fx + mg, fy + ft - mg - fa },
+                .{ fx + mg, fy + ft - mg },
+                .{ fx + mg + fa, fy + ft - mg },
             }, prev_col);
         },
         .drawer => {
@@ -1088,7 +1123,7 @@ fn drawMainTile(cv: *gfx.Canvas, v: View, x: i32, y: i32, hot: bool) void {
             const points_left = if (v.only_main) left_open else !left_open;
             const cx: f64 = @floatFromInt(x + @divTrunc(tile, 2));
             const cy: f64 = @floatFromInt(y + @divTrunc(tile, 2));
-            const s: f64 = 10;
+            const s: f64 = metrics.f(10);
             if (points_left) {
                 cv.fillPolygon(&.{ .{ cx - s, cy }, .{ cx + s, cy - s }, .{ cx + s, cy + s } }, col_arrow);
             } else {
@@ -1378,6 +1413,50 @@ test "cellsOf and cellAt: the surface of a Dock, with and without the margin" {
     const cc = cellsOf(m.currentClip(), true, true);
     try std.testing.expectEqual(@as(i32, 1), cc.cols());
 }
+test "setSize: the icon is centred on whole pixels at every tile size" {
+    defer setSize(default_tile);
+    var side: i32 = scale.min_side;
+    while (side <= scale.max_side) : (side += 1) {
+        setSize(side);
+        try std.testing.expect(icon_size > 0 and icon_size < tile);
+        // The margin is the same on both sides: no half pixel anywhere.
+        try std.testing.expectEqual(tile, icon_size + 2 * @divTrunc(tile - icon_size, 2));
+        try std.testing.expect(arrow >= 1 and 2 * arrow <= tile);
+    }
+    setSize(64);
+    try std.testing.expectEqual(@as(i32, 48), icon_size);
+    try std.testing.expectEqual(@as(i32, 16), arrow);
+    setSize(128);
+    try std.testing.expectEqual(@as(i32, 96), icon_size);
+    try std.testing.expectEqual(@as(i32, 32), arrow);
+}
+
+test "drawBar at 128 px: the not-running dots and the bevel scale with the tile" {
+    defer setSize(default_tile);
+    setSize(128);
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "web", .command = &.{"definitely-no-such-icon-abc"}, .y = 1 },
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+    defer m.deinit();
+
+    const w = tile;
+    const h = tile * 2;
+    const data = try std.testing.allocator.alloc(u8, @intCast(w * h * 4));
+    defer std.testing.allocator.free(data);
+    @memset(data, 0xff);
+    var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
+    defer cv.deinit();
+    drawBar(&cv, &m, .{ .dock = m.scr.dock.?, .cells = cellsOf(m.scr.dock.?, false, false) });
+    cv.flush();
+
+    // Two bevel steps of two pixels each: the 4th line is still light on top.
+    try std.testing.expectEqual(@as(u32, 0xffffffff), px(data, w * 4, 64, tile + 3));
+    // The first dot starts at design x = 4 -> 8 px, 6 px wide, at tile - 12.
+    try std.testing.expectEqual(@as(u32, 0xffffffff), px(data, w * 4, 8 + 5, tile + tile - 12));
+    try std.testing.expect(px(data, w * 4, 8 + 7, tile + tile - 12) != 0xffffffff);
+}
+
 test "drawBar paints tiles; only a NOT running tile gets Window Maker's three dots" {
     const apps = [_]dockapp.DockApp{
         .{ .name = "term", .command = &.{"definitely-no-such-icon-xyz"}, .y = 1 },

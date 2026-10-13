@@ -43,7 +43,7 @@
       Programmname); Mittelklick startet immer eine neue Instanz; Rechtsklick öffnet ein Menü (Launch,
       „Lower Dock“/„Keep Dock on Top“). Anzeige „läuft nicht“ siehe Dock-Überarbeitung unten. PNG-Icons per
       cairo (Pfad oder Name in `hicolor`/`pixmaps`), sonst der erste Buchstabe des Namens.
-      DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`, skaliert auf `dock_size`) werden direkt **in ihre
+      DockApp-Fenster (`dockapp:<name>`, z. B. `examples/wl-clock`, zeichnet in der Größe von `dock_size`, siehe `src/scale.zig`) werden direkt **in ihre
       Kachel gesetzt** (`ui.placeDocked`, über dem Dock gestapelt) und sind `omnipresent`.
       Der Arbeitsbereich schrumpft um das Dock (`Output.reserved`), egal auf welcher Ebene es liegt,
       außer `dock_reserve_space = false`. Getilte Fenster werden per `set_clip_box` an der Kante des
@@ -121,6 +121,8 @@
 - [ ] Docks Platz belegung fix und überlappung fix
 - [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
       `process.spawnShell`)
+- [ ] Fenster Minimierung wird verkleinert auf zum dock.
+- [ ] Fenster Selection möglich multiple fenster managen gleichzeitig
 - [ ] **Session speichern** (`SAVE_SESSION`, Fenster + Workspaces + Spalten): nur sinnvoll, wenn Programme
       wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
 - [ ] **Mehrere Seats**: Menü und Dock gehören zurzeit dem ersten Seat.

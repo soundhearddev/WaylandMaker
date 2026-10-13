@@ -6,6 +6,7 @@ pub const dockhost = @import("dockhost.zig");
 pub const dock = @import("dock.zig");
 pub const config = @import("config.zig");
 pub const gfx = @import("gfx.zig");
+pub const scale = @import("scale.zig");
 pub const main = @import("main.zig");
 pub const output = @import("output.zig");
 pub const types = @import("types.zig");

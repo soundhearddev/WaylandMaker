@@ -8,8 +8,10 @@
 //   1. The xdg_toplevel's app_id is "dockapp:<name>", <name> being the
 //      program's own name (wl-clock): "Keep Icon" saves `<name>` as command.
 //   2. No size hint: it is proposed one whole Dock tile (wmaker-wl's
-//      `dock_size`, 64 px by default) and scales its 64x64 face to it
-//      (scale.zig). A fixed min == max == 64 would be centred in a bigger tile.
+//      `dock_size`, 64 px by default) and draws its face at exactly that size
+//      (face.zig on scale.zig's design grid: nothing is stretched). A fixed
+//      min == max == 64 would be centred in a bigger tile, at 64 px, which
+//      is what Window Maker does with a dockapp of its own size.
 //
 // From the tag on wmaker-wl treats the window as an icon, not a window, and
 // decides everything about it itself: it is out of the window list, the
@@ -91,15 +93,13 @@ const State = struct {
     buf_side: i32 = 0,
     /// The side the compositor proposed (xdg_toplevel.configure).
     side: i32 = face.tile,
-    /// The 64x64 picture, before it is scaled into a buffer of `side`.
-    frame: face.Pixels = undefined,
-
     view: face.View = .{},
 
     /// renderBase's picture (everything but colon and seconds bar), kept
-    /// until the minute, the mode or the label changes.
+    /// until the minute, the mode, the label or the side changes.
     base: face.Pixels = undefined,
     base_key: ?face.Clock = null,
+    base_side: i32 = 0,
 
     running: bool = true,
     /// The first xdg_surface.configure has arrived: only now may we attach.
@@ -139,8 +139,9 @@ pub fn main(init: std.process.Init) !void {
     // and for the screenshot in the README.
     if (opts.snapshot) |path| {
         var px: face.Pixels = undefined;
-        face.render(&px, localNow(), state.view);
-        writeSnapshot(path, &px, opts.size) catch |err| {
+        const cv = face.Canvas.init(&px, opts.size);
+        face.render(cv, localNow(), state.view);
+        writePpm(path, cv.px, @intCast(cv.m.side)) catch |err| {
             std.debug.print("wl-clock: cannot write {s}: {t}\n", .{ path, err });
             std.process.exit(1);
         };
@@ -281,15 +282,18 @@ fn redrawIfNeeded(state: *State) void {
 
     // The antialiased digits are drawn once a minute; every other frame is
     // a copy of that picture plus colon and bar.
-    const bkey = face.baseKey(now);
-    if (state.base_key == null or !std.meta.eql(state.base_key.?, bkey)) {
-        face.renderBase(&state.base, now, state.view);
-        state.base_key = bkey;
-    }
-    @memcpy(&state.frame, &state.base);
-    face.renderSeconds(&state.frame, now, state.view);
+    // The face is drawn at the real side of the tile, never stretched.
     const side: usize = @intCast(state.side);
-    scale.resize(state.pixels[idx * side * side ..][0 .. side * side], side, &state.frame, face.side);
+    const bkey = face.baseKey(now);
+    const base = face.Canvas.init(&state.base, state.side);
+    if (state.base_key == null or state.base_side != state.side or !std.meta.eql(state.base_key.?, bkey)) {
+        face.renderBase(base, now, state.view);
+        state.base_key = bkey;
+        state.base_side = state.side;
+    }
+    const out = face.Canvas.init(state.pixels[idx * side * side ..][0 .. side * side], state.side);
+    @memcpy(out.px, base.px);
+    face.renderSeconds(out, now, state.view);
 
     state.surface.attach(state.bufs[idx].buffer, 0, 0);
     state.surface.damageBuffer(0, 0, state.side, state.side);
@@ -393,14 +397,6 @@ fn writePpm(path: [:0]const u8, px: []const u32, side: usize) !void {
     }
 }
 
-/// --snapshot: the 64x64 picture scaled to `--size` (the way a DockApp
-/// shows it in a bigger or smaller Dock).
-fn writeSnapshot(path: [:0]const u8, px: *const face.Pixels, side: u16) !void {
-    var out: [scale.max_side * scale.max_side]u32 = undefined;
-    scale.resize(&out, side, px, face.side);
-    try writePpm(path, &out, side);
-}
-
 // ----------------------------------------------------------------------------
 // SIGINT/SIGTERM: leave the loop cleanly. poll() returns EINTR, the loop
 // re-checks the flag. Same "only set a flag in the handler" rule as
@@ -484,10 +480,10 @@ fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, state
 fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, state: *State) void {
     switch (event) {
         // We set no size hint, so the compositor proposes one whole Dock
-        // tile (wmaker-wl's dock_size, 64 by default). The 64x64 picture is
-        // scaled to it.
+        // tile (wmaker-wl's dock_size, 64 by default). The face is drawn at
+        // that size (face.zig), not scaled to it.
         .configure => |cfg| {
-            const side = scale.proposedSide(cfg.width, cfg.height, face.tile);
+            const side = scale.proposedSide(cfg.width, cfg.height, face.native);
             if (side != state.side) {
                 state.side = side;
                 state.dirty = true;

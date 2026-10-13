@@ -5,7 +5,8 @@
 // Same DockApp recipe as wl-clock:
 //   1. app_id "dockapp:<name>", <name> being the program's own name.
 //   2. No size hint: it is proposed one whole Dock tile (wmaker-wl's `dock_size`,
-//      64 px by default); the 64x64 face is scaled to it (scale.zig).
+//      64 px by default); the face is drawn at exactly that size (face.zig on
+//      scale.zig's design grid), not stretched.
 // wmaker-wl does the rest (Dock tile, no frame, every workspace).
 //
 // Draws into two wl_shm buffers, sleeps in poll(2) until the next battery
@@ -75,8 +76,6 @@ const State = struct {
     buf_side: i32 = 0,
     /// The side the compositor proposed (xdg_toplevel.configure).
     side: i32 = face.tile,
-    /// The 64x64 picture, before it is scaled into a buffer of `side`.
-    frame: face.Pixels = undefined,
 
     /// Cached sysfs file descriptors: a read is a few pread() calls.
     reader: sysfs.Reader = .{},
@@ -124,8 +123,9 @@ pub fn main(init: std.process.Init) !void {
     if (opts.snapshot) |path| {
         var px: face.Pixels = undefined;
         var reader: sysfs.Reader = .{ .wanted = opts.battery };
-        face.render(&px, reader.read());
-        writeSnapshot(path, &px, opts.size) catch |err| {
+        const cv = face.Canvas.init(&px, opts.size);
+        face.render(cv, reader.read());
+        writePpm(path, cv.px, @intCast(cv.m.side)) catch |err| {
             std.debug.print("wl-battery: cannot write {s}: {t}\n", .{ path, err });
             std.process.exit(1);
         };
@@ -289,9 +289,10 @@ fn redrawIfNeeded(state: *State) void {
     };
     const idx: usize = if (!state.bufs[0].busy) 0 else if (!state.bufs[1].busy) 1 else return;
 
-    face.render(&state.frame, state.bat);
+    // Drawn straight into the buffer at the real side of the tile: the face
+    // is laid out for that size, nothing is stretched afterwards.
     const side: usize = @intCast(state.side);
-    scale.resize(state.pixels[idx * side * side ..][0 .. side * side], side, &state.frame, face.side);
+    face.render(face.Canvas.init(state.pixels[idx * side * side ..][0 .. side * side], state.side), state.bat);
 
     state.surface.attach(state.bufs[idx].buffer, 0, 0);
     state.surface.damageBuffer(0, 0, state.side, state.side);
@@ -374,14 +375,6 @@ fn writePpm(path: [:0]const u8, px: []const u32, side: usize) !void {
         };
         if (c.fwrite(&rgb, 1, 3, f) != 3) return error.WriteFailed;
     }
-}
-
-/// --snapshot: the 64x64 picture scaled to `--size` (the way a DockApp
-/// shows it in a bigger or smaller Dock).
-fn writeSnapshot(path: [:0]const u8, px: *const face.Pixels, side: u16) !void {
-    var out: [scale.max_side * scale.max_side]u32 = undefined;
-    scale.resize(&out, side, px, face.side);
-    try writePpm(path, &out, side);
 }
 
 // ----------------------------------------------------------------------------
@@ -467,10 +460,10 @@ fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, state
 fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, state: *State) void {
     switch (event) {
         // We set no size hint, so the compositor proposes one whole Dock
-        // tile (wmaker-wl's dock_size, 64 by default). The 64x64 picture is
-        // scaled to it.
+        // tile (wmaker-wl's dock_size, 64 by default). The face is drawn at
+        // that size (face.zig), not scaled to it.
         .configure => |cfg| {
-            const side = scale.proposedSide(cfg.width, cfg.height, face.tile);
+            const side = scale.proposedSide(cfg.width, cfg.height, face.native);
             if (side != state.side) {
                 state.side = side;
                 state.dirty = true;
