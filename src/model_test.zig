@@ -423,6 +423,23 @@ test "every default key binding parses to a real command" {
     try std.testing.expectEqual(@as(usize, 0), bad);
 }
 
+test "toggle_minibar is a command, and the shipped config binds it" {
+    var cfg = try config.load(std.testing.io, std.testing.allocator);
+    defer cfg.deinit();
+
+    const action = @import("action.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expect((try action.parse(arena.allocator(), &cfg, "toggle_minibar")) == .toggle_minibar);
+    try std.testing.expect(cfg.mini_enabled);
+    var bound = false;
+    for (cfg.binds) |b| {
+        if (std.mem.eql(u8, b.command, "toggle_minibar")) bound = true;
+    }
+    try std.testing.expect(bound);
+}
+
 test "shell command keeps shell syntax verbatim, unlike spawn" {
     var cfg = try config.load(std.testing.io, std.testing.allocator);
     defer cfg.deinit();

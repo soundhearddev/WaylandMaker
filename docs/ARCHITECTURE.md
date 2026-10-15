@@ -24,6 +24,8 @@
 | `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
 | `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling; owns the Dock and Clip surfaces, their clicks, and puts DockApp windows into their tile | yes |
 | `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
+| `appicon.zig` | The system icon of an application window, for the strip of minimized windows: an icon named like the app_id in the installed icon themes (PNG/XPM), else the `Icon=` of its `.desktop` file, else the theme's own placeholder (`application-x-executable`, ...); nothing is drawn by wmaker-wl. Cached per app_id | no |
+| `miniwin.zig` | Strip of minimized windows (one tile per window, bottom edge of the first output): list rebuilt from `wm.windows` on every sync, geometry, hit testing, drawing. `ui.zig` owns its surface and the click (`UiAction.focus` restores the window); `main.onManage` syncs it after the actions that minimize | no |
 | `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |
 | `compatibility.zig` | Unused legacy stub, not imported anywhere except `root.zig` | no |
 | `root.zig` | Re-exports the core modules so `main.zig` and tests can reach them by name (not all: `dock`, `shm`, `fsmenu`, `xpm`, `wm_menu`, `wm_attr` are tested via `main.zig` instead) | no |

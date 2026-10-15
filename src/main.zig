@@ -64,6 +64,8 @@ test {
     _ = @import("dockhost.zig");
     _ = @import("wm_dock.zig");
     _ = @import("dock.zig");
+    _ = @import("miniwin.zig");
+    _ = @import("appicon.zig");
     _ = @import("xpm.zig");
     _ = @import("fsmenu.zig");
     _ = wm_files;
@@ -612,6 +614,10 @@ fn onManage(wm: *WindowManager) void {
         }
     }
 
+    // 6b. The strip of minimized windows: after the actions above, which are
+    //     what minimize and restore windows (ui.sync() ran before them).
+    if (wm.ui) |u| u.syncMini();
+
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
 
@@ -841,6 +847,20 @@ test "onManage reaps closed windows before syncing the menu, in the same sequenc
     const reap_pos = at(body, "window_mod.reap(wm)");
     const sync_pos = at(body, "u.sync()");
     try std.testing.expect(sync_pos > reap_pos);
+}
+
+test "onManage updates the minimized-windows strip after the actions that minimize" {
+    // ui.sync() runs before the key-binding actions (runPending) and the menu
+    // actions (runUiAction), which are what minimize and restore windows. The
+    // strip is therefore synced by its own call after them; before them its
+    // icon would only appear with the next input event.
+    const src = @embedFile("main.zig");
+    const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
+    const body = src[body_start..body_end];
+    const mini = std.mem.indexOf(u8, body, "u.syncMini()").?;
+    try std.testing.expect(mini > std.mem.indexOf(u8, body, "runPending(wm)").?);
+    try std.testing.expect(mini > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
 }
 
 test "applyDockState: the saved state does not override what config.lua names itself" {

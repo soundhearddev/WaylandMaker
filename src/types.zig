@@ -540,6 +540,8 @@ pub const Command = union(enum) {
     hide_others,
     /// Window Maker's HIDE: minimize every window of the focused application.
     hide_app,
+    /// Show / hide the strip of minimized windows (`mini_enabled`).
+    toggle_minibar,
 
     /// Make the next / previous output the one the user works on (focus goes
     /// to the window that was active there; an empty output is fine).

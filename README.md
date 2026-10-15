@@ -16,6 +16,7 @@ Scrollable tiling with floating windows for [river](https://codeberg.org/river/r
 | `Super+1…4` (+Shift) | Switch workspace / Move window |
 | `Super` + Left/Right mouse | Move / Resize window |
 | `Super+q` / `Super+Shift+e` | Close window / Exit |
+| `Super+n` / `Super+Shift+n` / `Super+Shift+m` | Minimize / Restore last / Show-hide the strip of minimized windows |
 
 Keybindings can be changed in `~/.config/wmaker-wl/config.lua` (template: `src/share/default_config.lua`).
 
@@ -58,13 +59,11 @@ plus per-workspace launchers) are built in; configure them with the `dock_*` / `
 `config.lua`; the tiles themselves live in the `WMState` property list (`$XDG_STATE_HOME/wmaker-wl/WMState`, or an
 existing Window Maker `~/GNUstep/Defaults/WMState`).
 
-Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`), several monitors
+Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`; a minimized window shows up as a tile
+at the bottom edge, a click brings it back), several monitors
 (`focus_output_*`, `move_to_output_*`), themes (`theme = NAME`, `include = FILE`), XPM icons for Dock tiles,
 `OPEN_MENU` for directories and menu files, scrolling menus, and `bind_layout` / umlaut key names for
 non-US keyboards. See `docs/TODO.md` for what is done and what is not.
 
 **wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`.
 It reads and writes `~/.config/wmaker-wl/config.lua` (the same file wmaker-wl loads) and changes only the lines of the
-keys you change. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
-
-See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how DockApps, the Dock and the Clip work (`WMState`).

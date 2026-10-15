@@ -56,7 +56,6 @@
 const std = @import("std");
 const wayland = @import("wayland");
 const xkb = @import("xkbcommon");
-const scale = @import("scale.zig");
 const river = wayland.client.river;
 
 pub const Modifiers = river.SeatV1.Modifiers;
@@ -106,8 +105,8 @@ pub const max_workspaces = 16;
 /// window manager, so it is refused when the file is read instead.
 pub const max_pixels: i32 = 10_000;
 /// Allowed range of `dock_size` (px per tile).
-pub const min_dock_size: i32 = scale.min_side;
-pub const max_dock_size: i32 = scale.max_side;
+pub const min_dock_size: i32 = 16;
+pub const max_dock_size: i32 = 256;
 
 /// xkbcommon allows at most four layouts per keymap.
 pub const max_bind_layouts = 4;
@@ -255,6 +254,10 @@ pub const Config = struct {
     clip_on_top: bool = true,
     /// Start with only the Clip tile shown, without its workspace icons.
     clip_collapsed: bool = false,
+    /// Show the strip of minimized windows (miniwin.zig): one tile per
+    /// minimized window at the bottom edge. The `toggle_minibar` command
+    /// flips it at run time (a config reload sets it back to this value).
+    mini_enabled: bool = true,
     /// Window Maker's "Autocollapse": the Clip folds up when the pointer
     /// leaves it and unfolds when it comes back. (No delay: wmaker-wl has no
     /// timers.)
@@ -798,6 +801,7 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         "dock_save_state",
         "dock_reserve_space",
         "clip_enabled",
+        "mini_enabled",
         "clip_on_top",
         "clip_collapsed",
         "clip_auto_collapse",
@@ -1203,6 +1207,7 @@ test "dock and clip options parse, bad values are rejected" {
         \\clip_corner = "bottom_right"
         \\clip_collapsed = true
         \\clip_enabled = false
+        \\mini_enabled = false
         \\workspace_names = { "Main", "", "Web" }
     );
     try parseText(arena.allocator(), &cfg,
@@ -1217,6 +1222,7 @@ test "dock and clip options parse, bad values are rejected" {
     try std.testing.expectEqual(ClipCorner.bottom_right, cfg.clip_corner);
     try std.testing.expect(cfg.clip_collapsed);
     try std.testing.expect(!cfg.clip_enabled);
+    try std.testing.expect(!cfg.mini_enabled);
     try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
     try std.testing.expectEqual(@as(usize, 3), cfg.workspace_names.len);
     try std.testing.expectEqualStrings("Main", cfg.workspace_names[0]);
