@@ -16,7 +16,7 @@ Scrollable tiling with floating windows for [river](https://codeberg.org/river/r
 | `Super+1…4` (+Shift) | Switch workspace / Move window |
 | `Super` + Left/Right mouse | Move / Resize window |
 | `Super+q` / `Super+Shift+e` | Close window / Exit |
-| `Super+n` / `Super+Shift+n` / `Super+Shift+m` | Minimize / Restore last / Show-hide the strip of minimized windows |
+| `Super+n` / `Super+Shift+n` / `Super+Shift+m` | Minimize / Restore last / Dock tiles of minimized windows on-off |
 
 Keybindings can be changed in `~/.config/wmaker-wl/config.lua` (template: `src/share/default_config.lua`).
 
@@ -59,11 +59,12 @@ plus per-workspace launchers) are built in; configure them with the `dock_*` / `
 `config.lua`; the tiles themselves live in the `WMState` property list (`$XDG_STATE_HOME/wmaker-wl/WMState`, or an
 existing Window Maker `~/GNUstep/Defaults/WMState`).
 
-Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`; a minimized window shows up as a tile
-at the bottom edge, a click brings it back), several monitors
+Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`; every minimized window gets a tile
+with its program's icon in the Dock, one click brings it back; `mini_dock`, `toggle_mini_dock`), several monitors
 (`focus_output_*`, `move_to_output_*`), themes (`theme = NAME`, `include = FILE`), XPM icons for Dock tiles,
 `OPEN_MENU` for directories and menu files, scrolling menus, and `bind_layout` / umlaut key names for
 non-US keyboards. See `docs/TODO.md` for what is done and what is not.
 
 **wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`.
 It reads and writes `~/.config/wmaker-wl/config.lua` (the same file wmaker-wl loads) and changes only the lines of the
+keys you change.

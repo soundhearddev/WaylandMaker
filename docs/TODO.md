@@ -96,13 +96,13 @@
       verlässt den Streifen (`workspace == null`, wird dadurch von der Render-Runde versteckt), merkt sich
       Spalte, Breite bzw. Rechteck und kommt auf den **aktuellen** Workspace zurück. Im Fenster-Menü steht es
       als `(Titel)`; Auswählen oder ein Klick auf seine Dock-/Clip-Kachel holt es zurück. DockApps werden nie
-      versteckt. Zusätzlich zeigt eine Leiste am unteren Rand des ersten Ausgangs (`miniwin.zig`) für jedes
-      minimierte Fenster eine Kachel (Icon der passenden Dock-Kachel, sonst das System-Icon des Programms
-      (`appicon.zig`: Icon-Theme, `Icon=` der `.desktop`-Datei, sonst der Platzhalter des Themes; nur PNG/XPM,
-      nichts Selbstgezeichnetes; nur ohne jedes Theme der Anfangsbuchstabe), darunter der Titel);
-      ein Linksklick holt das Fenster zurück. `mini_enabled` und der Befehl `toggle_minibar` (Standard:
-      `Super+Shift+m`) schalten die Leiste ein/aus. Älteste links, höchstens so viele, wie neben Dock und Clip passen
-      (sonst die neuesten). Workspace-Namen: `workspace_names` / `WMState`, im Clip und im Workspace-Menü.
+      versteckt. Jedes minimierte Fenster bekommt eine eigene temporäre Kachel im Dock (`dockhost.syncModel`,
+      `Model.attachWindow`; nie gespeichert, kein Menü, ein Klick holt genau dieses Fenster zurück, ein kleiner
+      „Minimieren“-Balken unten links unterscheidet sie von Programm-Kacheln). Das Icon ist das System-Icon des
+      Programms (`appicon.zig`: Icon-Theme, `Icon=` der `.desktop`-Datei, sonst der Platzhalter des Themes; nur
+      PNG/XPM, nichts Selbstgezeichnetes; nur ohne jedes Theme der Anfangsbuchstabe). `mini_dock` und der Befehl
+      `toggle_mini_dock` (Standard: `Super+Shift+m`) schalten das ein/aus. Ist das Dock voll oder
+      `dock_enabled = false`, gibt es keine Kachel (Fenstermenü / `restore` gehen weiter). Workspace-Namen: `workspace_names` / `WMState`, im Clip und im Workspace-Menü.
 
 - [x] **Menüpunkte `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU`** (`fsmenu.zig`, `ui.zig`):
       SHUTDOWN bittet alle Fenster zu schließen und beendet wmaker-wl; Info/Legal sind Untermenüs mit
@@ -124,6 +124,7 @@
 ### Sonstiges
 - [ ] Drag-Reordering von Spalten
 - [ ] Animationen beim Scrollen
+- [ ] Modular Workspaces
 - [ ] Docks Platz belegung fix und überlappung fix
 - [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
       `process.spawnShell`)

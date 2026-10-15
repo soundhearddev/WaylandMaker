@@ -64,7 +64,6 @@ test {
     _ = @import("dockhost.zig");
     _ = @import("wm_dock.zig");
     _ = @import("dock.zig");
-    _ = @import("miniwin.zig");
     _ = @import("appicon.zig");
     _ = @import("xpm.zig");
     _ = @import("fsmenu.zig");
@@ -614,9 +613,9 @@ fn onManage(wm: *WindowManager) void {
         }
     }
 
-    // 6b. The strip of minimized windows: after the actions above, which are
-    //     what minimize and restore windows (ui.sync() ran before them).
-    if (wm.ui) |u| u.syncMini();
+    // 6b. The Dock tiles of minimized windows: after the actions above, which
+    //     are what minimize and restore windows (ui.sync() ran before them).
+    if (wm.ui) |u| u.syncBars();
 
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
@@ -849,18 +848,18 @@ test "onManage reaps closed windows before syncing the menu, in the same sequenc
     try std.testing.expect(sync_pos > reap_pos);
 }
 
-test "onManage updates the minimized-windows strip after the actions that minimize" {
+test "onManage syncs the Dock tiles of minimized windows after the actions that minimize" {
     // ui.sync() runs before the key-binding actions (runPending) and the menu
     // actions (runUiAction), which are what minimize and restore windows. The
-    // strip is therefore synced by its own call after them; before them its
-    // icon would only appear with the next input event.
+    // Dock is therefore synced once more after them; before them the tile
+    // would only appear with the next input event.
     const src = @embedFile("main.zig");
     const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
     const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
     const body = src[body_start..body_end];
-    const mini = std.mem.indexOf(u8, body, "u.syncMini()").?;
-    try std.testing.expect(mini > std.mem.indexOf(u8, body, "runPending(wm)").?);
-    try std.testing.expect(mini > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
+    const again = std.mem.lastIndexOf(u8, body, "u.syncBars()").?;
+    try std.testing.expect(again > std.mem.indexOf(u8, body, "runPending(wm)").?);
+    try std.testing.expect(again > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
 }
 
 test "applyDockState: the saved state does not override what config.lua names itself" {

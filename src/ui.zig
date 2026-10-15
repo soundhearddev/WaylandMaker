@@ -33,10 +33,7 @@
 //     clicks on the free desktop;
 //   * one surface for the Dock and one for the Clip, on the first output.
 //     On top of the windows, or just above the desktop ("lowered");
-//   * one surface per open menu level (cascading submenus), on top of all;
-//   * one surface with a tile per minimized window (miniwin.zig), at the
-//     bottom edge of the first output, on top of the windows. A click on a
-//     tile brings the window back.
+//   * one surface per open menu level (cascading submenus), on top of all.
 //
 // Buffers are double-buffered: a wl_buffer river still reads (no `release`
 // yet) is never drawn into.
@@ -61,8 +58,6 @@ const dockapp = @import("dockapp.zig");
 const workspace = @import("workspace.zig");
 const config_mod = @import("config.zig");
 const wm_files = @import("wm_files.zig");
-const miniwin = @import("miniwin.zig");
-const appicon = @import("appicon.zig");
 
 const WindowManager = types.WindowManager;
 const Allocator = std.mem.Allocator;
@@ -369,24 +364,6 @@ const Bar = struct {
     unfold_at: ?u32 = null,
 };
 
-/// The strip of minimized windows (miniwin.zig): one surface with one tile
-/// per minimized window. `wins` is rebuilt by every sync, so it is never
-/// older than the last manage sequence; forgetWindow() removes a window that
-/// dies in between.
-const MiniBar = struct {
-    panel: ?*Panel = null,
-    output: ?*types.Output = null,
-    /// Global rectangle of the surface as of the last sync.
-    rect: types.Rect = .{},
-    wins: [miniwin.max_tiles]*types.Window = undefined,
-    n: usize = 0,
-    hover: ?usize = null,
-    dirty: bool = true,
-    /// miniwin.signature() of what was drawn last.
-    sig: u64 = 0,
-    model_gen: u32 = std.math.maxInt(u32),
-};
-
 /// Autocollapse waits a moment, like Window Maker: a pointer that only
 /// passes over the Clip does not unfold it, and one that slips off for an
 /// instant does not fold it up.
@@ -552,11 +529,6 @@ pub const Ui = struct {
     /// Mouse wheel movement not yet turned into a workspace step.
     scroll_acc: f64 = 0,
 
-    // ---- minimized windows ------------------------------------------------
-    mini: MiniBar = .{},
-    /// The system icons of the applications on the strip (appicon.zig).
-    icons: appicon.Cache = .{},
-
     // ---- menu state -------------------------------------------------------
     arena: std.heap.ArenaAllocator,
     levels: std.ArrayList(Level) = .empty,
@@ -602,8 +574,6 @@ pub const Ui = struct {
         for (ui.desktops.items) |d| d.panel.destroy();
         ui.desktops.deinit(ui.gpa());
         for ([_]*Bar{ &ui.dock, &ui.clip }) |b| if (b.panel) |p| p.destroy();
-        if (ui.mini.panel) |p| p.destroy();
-        ui.icons.deinit(ui.gpa());
         if (ui.model) |*m| m.deinit();
         ui.graveyard.deinit(ui.gpa());
         ui.levels.deinit(ui.gpa());
@@ -663,7 +633,6 @@ pub const Ui = struct {
                 ui.pointer_surface = null;
                 ui.scroll_acc = 0;
                 ui.clearBarHover();
-                if (ui.clearMiniHover()) ui.wm.obj.manageDirty();
                 if (left) |sf| if (ui.barAt(sf)) |b| ui.onBarLeave(b);
             },
             .axis => |e| if (e.axis == .vertical_scroll) ui.onScroll(e.value.toDouble()),
@@ -686,7 +655,6 @@ pub const Ui = struct {
         const surf = s orelse return "nothing";
         if (ui.desktopAt(surf) != null) return "desktop";
         if (ui.barAt(surf)) |b| return if (b.kind == .dock) "dock" else "clip";
-        if (ui.miniAt(surf)) return "minimized windows";
         if (ui.levelFor(surf) != null) return "menu";
         return "unknown surface";
     }
@@ -723,10 +691,6 @@ pub const Ui = struct {
             ui.clickBar(b, button, time);
             return;
         }
-        if (ui.miniAt(s)) {
-            if (ui.miniPress(button)) ui.wm.obj.manageDirty();
-            return;
-        }
         if (ui.desktopAt(s)) |d| {
             switch (button) {
                 BTN_RIGHT => ui.request = .{ .open_root = .{ .output = d.output, .x = ui.px, .y = ui.py } },
@@ -745,10 +709,6 @@ pub const Ui = struct {
         if (ui.barAt(s)) |b| {
             ui.hoverBar(b);
             ui.dragMotion(b);
-            return;
-        }
-        if (ui.miniAt(s)) {
-            if (ui.miniHover()) ui.wm.obj.manageDirty();
             return;
         }
         const li = ui.levelFor(s) orelse return;
@@ -1041,9 +1001,12 @@ pub const Ui = struct {
                 },
             }
         } else if (slot) |ref| {
+            // The tile of a minimized window restores it with ONE click (a
+            // double click is only for starting programs) and has no menu.
+            const mini_tile = if (ui.slotApp(ref)) |sa| sa.mini_window != 0 else false;
             switch (button) {
                 BTN_LEFT => {
-                    const single = wm.cfg.dock_single_click;
+                    const single = wm.cfg.dock_single_click or mini_tile;
                     if (!single and dbl) {
                         ui.activateSlot(ref, false);
                     } else {
@@ -1055,17 +1018,19 @@ pub const Ui = struct {
                     }
                 },
                 BTN_MIDDLE => ui.activateSlot(ref, true),
-                BTN_RIGHT => ui.request = .{ .open_bar_menu = .{
-                    .kind = switch (b.kind) {
-                        .dock => .dock,
-                        .clip => .clip,
-                        .drawer => .dock,
-                    },
-                    .output = out,
-                    .x = mx,
-                    .y = my,
-                    .slot = ref,
-                } },
+                BTN_RIGHT => if (!mini_tile) {
+                    ui.request = .{ .open_bar_menu = .{
+                        .kind = switch (b.kind) {
+                            .dock => .dock,
+                            .clip => .clip,
+                            .drawer => .dock,
+                        },
+                        .output = out,
+                        .x = mx,
+                        .y = my,
+                        .slot = ref,
+                    } };
+                },
                 else => {},
             }
         }
@@ -1206,7 +1171,6 @@ pub const Ui = struct {
     fn clearPointers(ui: *Ui) void {
         ui.press = null;
         ui.drop_target = null;
-        _ = ui.clearMiniHover();
         var buf: [2 + dock_mod.max_drawers]*Bar = undefined;
         for (ui.allBars(&buf)) |b| {
             b.hover = null;
@@ -1226,6 +1190,16 @@ pub const Ui = struct {
     /// else start it. `force_new` always starts it (middle click, menu).
     fn activateSlot(ui: *Ui, ref: SlotRef, force_new: bool) void {
         const app = ui.slotApp(ref) orelse return;
+        // The tile of a minimized window: bring exactly that window back.
+        if (app.mini_window != 0) {
+            var wit = ui.wm.windows.first();
+            while (wit) |w| : (wit = types.nextWindow(w, ui.wm)) {
+                if (w.closed or !w.minimized or w.min_order != app.mini_window) continue;
+                ui.wm.pending_ui = .{ .focus = w };
+                return;
+            }
+            return;
+        }
         if (!force_new) {
             var it = ui.wm.windows.first();
             while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
@@ -1848,9 +1822,6 @@ pub const Ui = struct {
         for (ui.drawer_bars.items) |b| {
             if (ui.raisedBar(b)) if (b.panel) |p| p.node.placeTop();
         }
-        // The minimized windows always stay on top, except under a
-        // fullscreen window.
-        if (ui.mini.panel) |p| if (ui.fullscreenWindow() == null) p.node.placeTop();
     }
 
     /// Menus are above everything else.
@@ -2081,7 +2052,10 @@ pub const Ui = struct {
         ui.clearDrawerBars();
     }
 
-    fn syncBars(ui: *Ui) void {
+    /// Public: main.onManage() runs it a second time after the actions, so
+    /// the Dock tile of a window minimized by a key binding (or the loss of
+    /// one that was restored) shows up in the same sequence.
+    pub fn syncBars(ui: *Ui) void {
         const wm = ui.wm;
         if (ui.model_gen != wm.dock_gen) ui.rebuildModel();
 
@@ -2104,6 +2078,9 @@ pub const Ui = struct {
         // The tiles follow the programs: every DockApp has one (a temporary
         // one if it has no entry), `running` is up to date, a temporary tile
         // goes with its program. (dockhost.zig owns all of that.)
+        // The rows of the screen must be known before tiles are added to the
+        // Dock (a new tile has to lie on the screen); layout() sets them.
+        m.layout(primary.rect.w, primary.rect.h, wm.cfg.dock_edge == .right, wm.cfg.dock_offset, wm.cfg.clip_corner);
         const synced = dockhost.syncModel(wm, m);
         const expired = m.expireLaunching(ui.nowMs(), launch_timeout_ms);
         if (synced) ui.clearPointers();
@@ -2177,155 +2154,6 @@ pub const Ui = struct {
         ui.presentBar(&ui.dock, m);
         ui.presentBar(&ui.clip, m);
         for (ui.drawer_bars.items) |b| ui.presentBar(b, m);
-    }
-
-    // ---- minimized windows -------------------------------------------------------
-
-    fn miniAt(ui: *const Ui, s: *wl.Surface) bool {
-        const p = ui.mini.panel orelse return false;
-        return p.surface == s;
-    }
-
-    /// A button went down on the strip. A click while a menu is open only
-    /// dismisses the menu, like on the Dock; otherwise a left click on a
-    /// tile brings that window back (the same request as the Windows menu).
-    /// True if something was requested (the caller wakes the manage loop).
-    fn miniPress(ui: *Ui, button: u32) bool {
-        if (ui.panels.items.len > 0) {
-            ui.request = .close;
-            return true;
-        }
-        if (button != BTN_LEFT) return false;
-        const i = miniwin.tileAt(ui.mini.n, ui.px, ui.py) orelse return false;
-        ui.wm.pending_ui = .{ .focus = ui.mini.wins[i] };
-        return true;
-    }
-
-    /// The pointer moved on the strip. True if the highlighted tile changed.
-    fn miniHover(ui: *Ui) bool {
-        const h = miniwin.tileAt(ui.mini.n, ui.px, ui.py);
-        if (h == ui.mini.hover) return false;
-        ui.mini.hover = h;
-        ui.mini.dirty = true;
-        return true;
-    }
-
-    fn clearMiniHover(ui: *Ui) bool {
-        if (ui.mini.hover == null) return false;
-        ui.mini.hover = null;
-        ui.mini.dirty = true;
-        return true;
-    }
-
-    /// A window is going away: its tile must not be clickable any more.
-    fn forgetMini(ui: *Ui, w: *types.Window) void {
-        const mb = &ui.mini;
-        var k: usize = 0;
-        while (k < mb.n) {
-            if (mb.wins[k] != w) {
-                k += 1;
-                continue;
-            }
-            var j = k + 1;
-            while (j < mb.n) : (j += 1) mb.wins[j - 1] = mb.wins[j];
-            mb.n -= 1;
-            mb.hover = null;
-            mb.dirty = true;
-        }
-    }
-
-    fn dropMini(ui: *Ui) void {
-        if (ui.mini.panel) |p| ui.graveyard.append(ui.gpa(), p) catch p.destroy();
-        ui.mini = .{};
-    }
-
-    /// The icon of the Dock tile whose application `w` belongs to, if any.
-    fn dockIcon(m: *const dock_mod.Model, w: *const types.Window) ?gfx.Icon {
-        const id = w.app_id orelse return null;
-        for (m.slots.items) |*sl| {
-            if (!sl.alive) continue;
-            const ic = sl.icon orelse continue;
-            if (sl.app.matches(id)) return ic;
-        }
-        return null;
-    }
-
-    /// The icon of a minimized window: the one of its Dock/Clip tile (that is
-    /// what the user chose), else the application's own icon from the system
-    /// icon theme, else the theme's placeholder. null only if the system has
-    /// no icon theme at all (the tile then shows the first letter).
-    fn miniIcon(ui: *Ui, w: *const types.Window) ?gfx.Icon {
-        if (ui.model) |*m| if (dockIcon(m, w)) |ic| return ic;
-        return ui.icons.get(ui.gpa(), w.app_id);
-    }
-
-    /// Rebuild the strip of minimized windows from `wm.windows`, make the
-    /// surface and draw it when something changed. No minimized window, no
-    /// surface.
-    ///
-    /// Not part of sync(): main.onManage() calls it AFTER the key-binding
-    /// and menu actions, because those are what minimize and restore
-    /// windows. In sync() (which runs before them) the icon would only
-    /// appear in the next sequence, i.e. at the next input event.
-    pub fn syncMini(ui: *Ui) void {
-        const mb = &ui.mini;
-        if (!ui.wm.cfg.mini_enabled) {
-            ui.dropMini();
-            return;
-        }
-        const out = ui.primaryOutput() orelse {
-            ui.dropMini();
-            return;
-        };
-        var buf: [miniwin.max_tiles]*types.Window = undefined;
-        const n = miniwin.collect(ui.wm, miniwin.limitFor(out.rect.w), &buf);
-        if (n == 0) {
-            ui.dropMini();
-            return;
-        }
-        if (mb.output != out) ui.dropMini();
-
-        const rect = miniwin.rectFor(out.rect, n);
-        if (mb.panel) |p| {
-            if (p.w != rect.w or p.h != rect.h) {
-                ui.graveyard.append(ui.gpa(), p) catch p.destroy();
-                mb.panel = null;
-            }
-        }
-        const sig = miniwin.signature(buf[0..n]);
-        if (sig != mb.sig or !std.meta.eql(rect, mb.rect) or mb.model_gen != ui.model_gen) mb.dirty = true;
-        mb.sig = sig;
-        mb.output = out;
-        mb.rect = rect;
-        mb.model_gen = ui.model_gen;
-        mb.n = n;
-        @memcpy(mb.wins[0..n], buf[0..n]);
-        if (mb.hover) |h| if (h >= n) {
-            mb.hover = null;
-        };
-
-        if (mb.panel == null) {
-            mb.panel = Panel.create(ui, rect.w, rect.h) catch |err| {
-                std.log.err("minimized windows surface: {t}", .{err});
-                return;
-            };
-            mb.dirty = true;
-        }
-        const panel = mb.panel.?;
-        if (mb.dirty or !panel.committed) {
-            const slot = panel.freeSlot() catch {
-                // river has not released a buffer yet; retry next sequence.
-                ui.wm.obj.manageDirty();
-                return;
-            };
-            var icons: [miniwin.max_tiles]?gfx.Icon = @splat(null);
-            for (0..n) |i| icons[i] = ui.miniIcon(mb.wins[i]);
-            miniwin.draw(&slot.canvas, mb.wins[0..n], icons[0..n], mb.hover);
-            panel.present(slot);
-            mb.dirty = false;
-        }
-        place(panel, rect.x, rect.y);
-        if (ui.fullscreenWindow() != null) panel.node.placeBottom();
     }
 
     // ---- Dock and Clip menus ---------------------------------------------------
@@ -2731,7 +2559,6 @@ pub const Ui = struct {
     /// can no longer be activated.
     pub fn forgetWindow(ui: *Ui, w: *types.Window) void {
         if (ui.return_focus == w) ui.return_focus = null;
-        ui.forgetMini(w);
         for (ui.levels.items) |*lvl| {
             for (lvl.rows) |*row| switch (row.kind) {
                 .focus_window => |rw| if (rw == w) {
@@ -3785,94 +3612,38 @@ test "slotApp refuses indices past the end" {
     try std.testing.expect(ui.slotApp(.{ .index = 3 }) == null);
 }
 
-test "minimized windows: listed oldest first, a click on a tile asks for that window" {
+test "the Dock tile of a minimized window asks for exactly that window" {
     const apps = dockTestApps();
     const f = try Fx.create(&apps);
     defer f.destroy();
-    const a = try f.addWindow("a");
-    const b = try f.addWindow("b");
-    _ = try f.addWindow("open");
-    a.minimized = true;
-    a.min_order = 2;
-    b.minimized = true;
-    b.min_order = 1;
+    const first = try f.addWindow("foot");
+    const second = try f.addWindow("foot"); // same program, minimized later
+    first.minimized = true;
+    first.min_order = 3;
+    second.minimized = true;
+    second.min_order = 4;
+    const m = &f.ui.model.?;
+    const t1 = try m.attachWindow("foot", "foot", 3);
+    const t2 = try m.attachWindow("foot", "foot", 4);
 
-    var buf: [miniwin.max_tiles]*types.Window = undefined;
-    const n = miniwin.collect(&f.wm, 16, &buf);
-    try std.testing.expectEqual(@as(usize, 2), n);
-    try std.testing.expect(buf[0] == b and buf[1] == a);
-    try std.testing.expect(miniwin.signature(buf[0..n]) != miniwin.signature(&.{ a, b }));
-
-    // The strip as syncMini() leaves it.
-    f.ui.mini.n = n;
-    @memcpy(f.ui.mini.wins[0..n], buf[0..n]);
-
-    // Left click on the second tile: that window is asked for.
-    f.ui.px = dock_mod.tile + 3;
-    f.ui.py = 5;
-    try std.testing.expect(f.ui.miniPress(BTN_LEFT));
+    f.ui.activateSlot(.{ .index = t2 }, false);
     switch (f.wm.pending_ui.?) {
-        .focus => |w| try std.testing.expect(w == a),
+        .focus => |w| try std.testing.expect(w == second),
+        else => return error.TestUnexpectedResult,
+    }
+    f.wm.pending_ui = null;
+    f.ui.activateSlot(.{ .index = t1 }, true); // the middle button does the same
+    switch (f.wm.pending_ui.?) {
+        .focus => |w| try std.testing.expect(w == first),
         else => return error.TestUnexpectedResult,
     }
     f.wm.pending_ui = null;
 
-    // Other buttons and clicks beside the tiles ask for nothing.
-    try std.testing.expect(!f.ui.miniPress(BTN_RIGHT));
-    f.ui.px = 2 * dock_mod.tile + 1;
-    try std.testing.expect(!f.ui.miniPress(BTN_LEFT));
+    // The window came back by another way (key, menu): its tile does nothing
+    // (and is removed by the next sync).
+    first.minimized = false;
+    f.ui.activateSlot(.{ .index = t1 }, false);
     try std.testing.expect(f.wm.pending_ui == null);
-}
-
-test "minimized windows: the strip paints its tiles and nothing beside them" {
-    const apps = dockTestApps();
-    const f = try Fx.create(&apps);
-    defer f.destroy();
-    const w = try f.addWindow("firefox");
-    w.minimized = true;
-
-    const tile: usize = @intCast(dock_mod.tile);
-    const width = 2 * tile;
-    // Aligned like a real wl_shm buffer (cairo wants it).
-    const data = try std.testing.allocator.alignedAlloc(u32, .@"16", width * tile);
-    defer std.testing.allocator.free(data);
-    @memset(data, 0);
-    var cv = try gfx.Canvas.initForData(std.mem.sliceAsBytes(data).ptr, @intCast(width), @intCast(tile), @intCast(width * 4));
-    defer cv.deinit();
-
-    miniwin.draw(&cv, &.{w}, &.{null}, null);
-    cv.flush();
-    // The first tile starts with the light bevel (opaque white); the space
-    // right of it stays transparent.
-    try std.testing.expectEqual(@as(u32, 0xffffffff), data[0]);
-    try std.testing.expectEqual(@as(u32, 0), data[tile + 5 * width + 5]);
-}
-
-test "minimized windows: hover follows the pointer; a window that dies loses its tile" {
-    const apps = dockTestApps();
-    const f = try Fx.create(&apps);
-    defer f.destroy();
-    const a = try f.addWindow("a");
-    const b = try f.addWindow("b");
-    f.ui.mini.n = 2;
-    f.ui.mini.wins[0] = a;
-    f.ui.mini.wins[1] = b;
-
-    f.ui.px = 3;
-    f.ui.py = 3;
-    try std.testing.expect(f.ui.miniHover());
-    try std.testing.expectEqual(@as(?usize, 0), f.ui.mini.hover);
-    try std.testing.expect(!f.ui.miniHover()); // same tile: nothing to redraw
-    try std.testing.expect(f.ui.clearMiniHover());
-    try std.testing.expect(!f.ui.clearMiniHover());
-
-    f.ui.forgetWindow(a);
-    try std.testing.expectEqual(@as(usize, 1), f.ui.mini.n);
-    try std.testing.expect(f.ui.mini.wins[0] == b);
-    f.ui.forgetWindow(b);
-    try std.testing.expectEqual(@as(usize, 0), f.ui.mini.n);
-    f.ui.px = 3;
-    try std.testing.expect(!f.ui.miniPress(BTN_LEFT)); // no tile left to click
 }
 
 test "sync() builds the Dock before the desktops and the bars are restacked after the windows" {

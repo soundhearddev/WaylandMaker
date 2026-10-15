@@ -48,7 +48,7 @@ pub const simple = [_][]const u8{
     "show_all",
     "hide_others",
     "hide_app",
-    "toggle_minibar",
+    "toggle_mini_dock",
     "focus_output_next",
     "focus_output_prev",
     "move_to_output_next",

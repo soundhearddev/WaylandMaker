@@ -423,7 +423,7 @@ test "every default key binding parses to a real command" {
     try std.testing.expectEqual(@as(usize, 0), bad);
 }
 
-test "toggle_minibar is a command, and the shipped config binds it" {
+test "toggle_mini_dock is a command, and the shipped config binds it" {
     var cfg = try config.load(std.testing.io, std.testing.allocator);
     defer cfg.deinit();
 
@@ -431,11 +431,11 @@ test "toggle_minibar is a command, and the shipped config binds it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expect((try action.parse(arena.allocator(), &cfg, "toggle_minibar")) == .toggle_minibar);
-    try std.testing.expect(cfg.mini_enabled);
+    try std.testing.expect((try action.parse(arena.allocator(), &cfg, "toggle_mini_dock")) == .toggle_mini_dock);
+    try std.testing.expect(cfg.mini_dock);
     var bound = false;
     for (cfg.binds) |b| {
-        if (std.mem.eql(u8, b.command, "toggle_minibar")) bound = true;
+        if (std.mem.eql(u8, b.command, "toggle_mini_dock")) bound = true;
     }
     try std.testing.expect(bound);
 }
@@ -968,6 +968,46 @@ test "syncModel: a DockApp gets a temporary tile while it runs and loses it with
     try std.testing.expect(m.dockSlotFor("dockapp:tokyo") == null);
     try std.testing.expect(m.slot(0) != null and !m.slots.items[0].running);
     try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == null);
+}
+
+test "syncModel: every minimized window gets a Dock tile of its own, gone when it is restored" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var m = try dock_mod.Model.init(std.testing.allocator, .{}, &.{}, 1);
+    defer m.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    for ([_]*Window{ a, b }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+
+    // Nothing minimized: no tile.
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
+
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) != null);
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m)); // nothing new: no change
+
+    workspace.minimize(&f.wm, b);
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) != null and m.miniSlotFor(b.min_order) != null);
+    try std.testing.expect(m.miniSlotFor(a.min_order) != m.miniSlotFor(b.min_order));
+
+    // `a` is restored: only its tile goes.
+    const order_a = a.min_order;
+    try workspace.restore(&f.wm, a, f.cur());
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(order_a) == null);
+    try std.testing.expect(m.miniSlotFor(b.min_order) != null);
+
+    // mini_dock = false: no tiles at all, and the existing one goes.
+    f.wm.cfg.mini_dock = false;
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(b.min_order) == null);
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
+    try check(f);
 }
 
 test "wlprefs defaults are the compositor's defaults" {

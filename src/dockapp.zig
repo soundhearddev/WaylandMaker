@@ -141,6 +141,11 @@ pub const DockApp = struct {
     /// A DockApp that is running without an entry of its own: its tile exists
     /// only while it runs and is never saved (see dock.zig `Model.attach`).
     attached: bool = false,
+    /// Not 0: the temporary tile of ONE minimized window, the value of its
+    /// `Window.min_order` (unique per minimize). Such a tile is `attached`
+    /// too (never saved), is not an application (`matches` is not used for
+    /// it) and goes when the window is restored (dock.zig `Model.attachWindow`).
+    mini_window: u64 = 0,
 
     /// Does a window with this app_id belong to this entry (is the entry
     /// "running", and which window does a click on it focus)? Compared

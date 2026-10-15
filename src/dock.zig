@@ -32,6 +32,7 @@ const gfx = @import("gfx.zig");
 const config = @import("config.zig");
 const dockapp = @import("dockapp.zig");
 const xpm = @import("xpm.zig");
+const appicon = @import("appicon.zig");
 const types = @import("types.zig");
 const wdock = @import("wm_dock.zig");
 
@@ -331,7 +332,9 @@ pub const Model = struct {
         if (omnipresent) _ = wdock.makeIconOmnipresent(&m.scr, gi, true);
 
         var new: Slot = .{ .app = copy, .gi = gi };
-        new.icon = loadIcon(gpa, copy);
+        // A minimized window's tile shows its program's system icon (or the
+        // theme's placeholder); a normal tile the icon of its entry.
+        new.icon = if (copy.mini_window != 0) appicon.loadOwned(gpa, copy.app_id) else loadIcon(gpa, copy);
         errdefer if (new.icon) |*i| i.deinit();
         try m.slots.append(gpa, new);
         return m.slots.items.len - 1;
@@ -372,7 +375,7 @@ pub const Model = struct {
     /// The Dock tile whose entry matches a window with this app_id.
     pub fn dockSlotFor(m: *const Model, app_id: []const u8) ?usize {
         for (m.slots.items, 0..) |s, i| {
-            if (!s.alive) continue;
+            if (!s.alive or s.app.mini_window != 0) continue;
             const d = s.gi.dock orelse continue;
             if (d.kind != .dock) continue;
             if (s.app.matches(app_id)) return i;
@@ -382,7 +385,7 @@ pub const Model = struct {
 
     pub fn hasApp(m: *const Model, app_id: []const u8) bool {
         for (m.slots.items) |s| {
-            if (s.alive and s.app.matches(app_id)) return true;
+            if (s.alive and s.app.mini_window == 0 and s.app.matches(app_id)) return true;
         }
         return false;
     }
@@ -466,6 +469,9 @@ pub const Model = struct {
     pub fn dropSlot(m: *Model, index: usize, dest: *wdock.Dock, xy: [2]i32) bool {
         const s = m.slot(index) orelse return false;
         const src = s.gi.dock orelse return false;
+        // A minimized window's tile can be put in another row, not in the
+        // Clip or a Drawer (it is not an application).
+        if (s.app.mini_window != 0 and src != dest) return false;
         if (src == dest) {
             wdock.reattachIcon(dest, s.gi, xy[0], xy[1]);
             return true;
@@ -495,10 +501,63 @@ pub const Model = struct {
     pub fn pruneAttached(m: *Model) bool {
         var changed = false;
         for (m.slots.items, 0..) |*s, i| {
-            if (s.alive and s.app.attached and !s.running and !s.launching) {
+            if (s.alive and s.app.attached and s.app.mini_window == 0 and !s.running and !s.launching) {
                 s.app.locked = false;
                 if (m.removeSlot(i)) changed = true;
             }
+        }
+        return changed;
+    }
+
+    // ---- temporary tiles for minimized windows ------------------------------------
+
+    /// The tile of the minimized window with this `Window.min_order`.
+    pub fn miniSlotFor(m: *const Model, order: u64) ?usize {
+        if (order == 0) return null;
+        for (m.slots.items, 0..) |s, i| {
+            if (s.alive and s.app.mini_window == order) return i;
+        }
+        return null;
+    }
+
+    /// A window was minimized: give it a temporary tile in the Dock, showing
+    /// the icon of its program. `name` is what the menus call it, `app_id`
+    /// (may be null) what the icon is looked up by. Not saved; it goes with
+    /// `pruneMinimized`. Returns the slot index.
+    ///
+    /// The tile goes at the END of the Dock column, under the last tile (and
+    /// Drawer): never above the logo and not into a gap. Only if that row is
+    /// not on the screen does it take the first free row (`freeRow`);
+    /// error.Full if there is none.
+    pub fn attachWindow(m: *Model, name: []const u8, app_id: ?[]const u8, order: u64) !usize {
+        if (order == 0) return error.NoWindow;
+        var row: i32 = 0; // 0: let `insert` search
+        if (m.scr.dock) |dock| {
+            const below = m.rowRange()[1] + 1;
+            if (below >= 1 and dock.icon_count < dock.icons.len and
+                !occupied(dock, 0, below) and wdock.getDrawer(&m.scr, below) == null and
+                m.scr.onScreen(dock.x_pos, dock.y_pos + below * tile)) row = below;
+        }
+        return m.insert(.{
+            .name = name,
+            .app_id = app_id,
+            .command = &.{},
+            .attached = true,
+            .mini_window = order,
+            .y = row,
+        });
+    }
+
+    /// Remove the tiles of windows that are not minimized any more:
+    /// `live` holds the `min_order` of every window that still is. True if
+    /// any tile went.
+    pub fn pruneMinimized(m: *Model, live: []const u64) bool {
+        var changed = false;
+        for (m.slots.items, 0..) |*s, i| {
+            if (!s.alive or s.app.mini_window == 0) continue;
+            if (std.mem.indexOfScalar(u64, live, s.app.mini_window) != null) continue;
+            s.app.locked = false;
+            if (m.removeSlot(i)) changed = true;
         }
         return changed;
     }
@@ -507,7 +566,7 @@ pub const Model = struct {
     /// DockApp's name (name the app_id after the program).
     pub fn keepAttached(m: *Model, index: usize) bool {
         const s = m.slot(index) orelse return false;
-        if (!s.app.attached) return false;
+        if (!s.app.attached or s.app.mini_window != 0) return false;
         const a = m.arena.allocator();
         const argv = a.alloc([]const u8, 1) catch return false;
         argv[0] = s.app.name;
@@ -920,7 +979,7 @@ pub fn clipArrowAt(x: i32, y: i32) Arrow {
     return .none;
 }
 
-pub fn drawFrame(cv: *gfx.Canvas, x: i32, y: i32, hot: bool, from: ?gfx.Color, to: ?gfx.Color) void {
+fn drawFrame(cv: *gfx.Canvas, x: i32, y: i32, hot: bool, from: ?gfx.Color, to: ?gfx.Color) void {
     const f = from orelse if (hot) col_hot_from else col_tile_from;
     const t = to orelse if (hot) col_hot_to else col_tile_to;
     cv.dGradient(x, y, tile, tile, f, t);
@@ -960,7 +1019,7 @@ fn drawOmnipresent(cv: *gfx.Canvas, x: i32, y: i32) void {
     cv.fillPolygon(&.{ .{ fx - 8, fy + 1 }, .{ fx - 1, fy + 1 }, .{ fx - 1, fy + 8 } }, col_light);
 }
 
-pub fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, font: [:0]const u8, col: gfx.Color) void {
+fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, font: [:0]const u8, col: gfx.Color) void {
     const tw = gfx.measureText(text, font).w;
     cv.drawText(text, x + @divTrunc(w - tw, 2), y, font, col);
 }
@@ -991,6 +1050,16 @@ fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool) vo
     if (!slot.running and slot.app.command.len > 0) drawNotRunning(cv, x, y);
     if (slot.gi.omnipresent) drawOmnipresent(cv, x, y);
     if (slot.launching) drawLaunching(cv, x, y);
+    if (slot.app.mini_window != 0) drawMinimizedMark(cv, x, y);
+}
+
+/// What tells a minimized window's tile from an application's: the flat bar
+/// of a minimize button in the lower left corner (the place of the "not
+/// running" dots, which such a tile never has).
+fn drawMinimizedMark(cv: *gfx.Canvas, x: i32, y: i32) void {
+    cv.fillRect(x + 6, y + tile - 10, 16, 5, col_dark);
+    cv.fillRect(x + 5, y + tile - 11, 16, 5, col_light);
+    cv.fillRect(x + 6, y + tile - 10, 14, 3, col_tile_to);
 }
 
 /// The empty slot a dragged tile will drop into: a recessed tile.
@@ -1005,7 +1074,7 @@ fn drawFade(cv: *gfx.Canvas, x: i32, y: i32) void {
 }
 
 /// `name` cut so it still fits the tile; never splits a UTF-8 sequence.
-pub fn clipName(buf: *[24:0]u8, name: []const u8) [:0]const u8 {
+fn clipName(buf: *[24:0]u8, name: []const u8) [:0]const u8 {
     var end: usize = @min(name.len, buf.len);
     if (std.mem.indexOfScalar(u8, name[0..end], 0)) |nul| end = nul;
     while (end > 0 and end < name.len and (name[end] & 0xC0) == 0x80) end -= 1;
@@ -1291,6 +1360,70 @@ test "Model: temporary DockApp tiles are attached, pruned with the program, kept
     _ = m.setRunning(&.{});
     try std.testing.expect(!m.pruneAttached());
     try std.testing.expect(m.slot(j) != null);
+}
+
+test "Model: a minimized window gets a tile of its own, which goes when it is restored" {
+    var m = try Model.init(std.testing.allocator, .{}, &.{}, 1);
+    defer m.deinit();
+    const a = try m.attachWindow("foot", "foot", 7);
+    const b = try m.attachWindow("foot", "foot", 9); // same program: its own tile
+    try std.testing.expect(a != b);
+    try std.testing.expectEqual(@as(?usize, a), m.miniSlotFor(7));
+    try std.testing.expectEqual(@as(?usize, b), m.miniSlotFor(9));
+    try std.testing.expect(m.miniSlotFor(0) == null and m.miniSlotFor(8) == null);
+    try std.testing.expectError(error.NoWindow, m.attachWindow("x", null, 0));
+    // The first one sits right under the logo, the next one under it.
+    try std.testing.expectEqual(@as(i32, 1), m.slot(a).?.gi.yindex);
+    try std.testing.expectEqual(@as(i32, 2), m.slot(b).?.gi.yindex);
+
+    // Not an application: it is no Dock entry for "foot", cannot be kept,
+    // is not saved, and the rule for DockApps' tiles does not touch it.
+    try std.testing.expect(!m.hasApp("foot"));
+    try std.testing.expect(m.dockSlotFor("foot") == null);
+    try std.testing.expect(!m.keepAttached(a));
+    {
+        const list = try m.exportList(std.testing.allocator);
+        defer std.testing.allocator.free(list.apps);
+        defer std.testing.allocator.free(list.drawers);
+        try std.testing.expectEqual(@as(usize, 0), list.apps.len);
+    }
+    _ = m.setRunning(&.{});
+    try std.testing.expect(!m.pruneAttached());
+    // It may change its row in the Dock, but not move into the Clip.
+    try std.testing.expect(!m.dropSlot(a, m.scr.clips.items[0], .{ 0, 0 }));
+
+    // Window 7 was restored: its tile goes, the other stays.
+    try std.testing.expect(m.pruneMinimized(&.{9}));
+    try std.testing.expect(m.slot(a) == null and m.slot(b) != null);
+    try std.testing.expect(!m.pruneMinimized(&.{9}));
+    try std.testing.expect(m.pruneMinimized(&.{}));
+    try std.testing.expect(m.slot(b) == null);
+}
+
+test "Model: a minimized window's tile goes under the LAST Dock tile, not into a gap or above the logo" {
+    const apps = [_]dockapp.DockApp{
+        .{ .name = "a", .command = &.{"a"}, .y = 1 },
+        .{ .name = "b", .command = &.{"b"}, .y = 4 }, // a gap of two rows: stays
+    };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer m.deinit();
+    m.layout(1920, 1080, true, 300, .top_left); // the Dock is not at the top: rows above fit too
+    const t1 = try m.attachWindow("kate", "kate", 5);
+    const t2 = try m.attachWindow("gimp", "gimp", 6);
+    try std.testing.expectEqual(@as(i32, 5), m.slot(t1).?.gi.yindex);
+    try std.testing.expectEqual(@as(i32, 6), m.slot(t2).?.gi.yindex);
+    // A screen with room for only 6 rows: the end of the column is used up
+    // after one tile, the next one takes the first free row (the gap).
+    var small = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 1);
+    defer small.deinit();
+    small.layout(800, 6 * tile, true, 0, .top_left);
+    const s1 = try small.attachWindow("one", "one", 1);
+    const s2 = try small.attachWindow("two", "two", 2);
+    try std.testing.expectEqual(@as(i32, 5), small.slot(s1).?.gi.yindex);
+    try std.testing.expectEqual(@as(i32, 2), small.slot(s2).?.gi.yindex);
+    // Rows 3 is the last gap; after that the screen is full.
+    _ = try small.attachWindow("three", "three", 3);
+    try std.testing.expectError(error.Full, small.attachWindow("four", "four", 4));
 }
 
 test "Model.removeSlot: a locked tile stays, a Drawer closes its gap" {

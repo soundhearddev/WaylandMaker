@@ -132,8 +132,21 @@ pub const Host = struct {
     raised: bool = false,
 };
 
+/// The last minimized window whose tile could not be made, so the warning
+/// comes once per window and not with every sync.
+var warned_order: u64 = 0;
+
+/// `s` cut to at most `max` bytes, never inside a UTF-8 character.
+fn cutUtf8(s: []const u8, max: usize) []const u8 {
+    var end = @min(s.len, max);
+    while (end > 0 and end < s.len and (s[end] & 0xC0) == 0x80) end -= 1;
+    return s[0..end];
+}
+
 /// Give every DockApp a tile and keep the tiles in step with the programs:
 ///   * a DockApp without an entry gets a temporary tile;
+///   * every minimized window gets a temporary tile of its own (`mini_dock`),
+///     showing its program's icon, and loses it when it is restored;
 ///   * a tile is `running` while a window of its application exists (a
 ///     DockApp's too: the tile shows no "not running" dots then);
 ///   * a temporary tile goes with its program.
@@ -152,6 +165,30 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
             changed = true;
         } else |err| std.log.warn("dockapp `{s}` gets no tile: {t}", .{ name, err });
     }
+
+    // Minimized windows: one tile each, in the order they were minimized.
+    var live: std.ArrayList(u64) = .empty;
+    defer live.deinit(wm.gpa);
+    if (wm.cfg.mini_dock) {
+        var mit = wm.windows.first();
+        while (mit) |w| : (mit = types.nextWindow(w, wm)) {
+            if (!w.minimized or w.closed or w.min_order == 0) continue;
+            live.append(wm.gpa, w.min_order) catch break;
+            if (m.miniSlotFor(w.min_order) != null) continue;
+            const raw: []const u8 = w.app_id orelse w.title orelse "window";
+            const name = cutUtf8(raw, 64);
+            if (m.attachWindow(name, w.app_id, w.min_order)) |idx| {
+                changed = true;
+                std.log.info("dockhost: Dock tile for the minimized window `{s}` (row {d})", .{ name, m.slots.items[idx].gi.yindex });
+            } else |err| {
+                if (warned_order != w.min_order) {
+                    warned_order = w.min_order;
+                    std.log.warn("dockhost: the minimized window `{s}` gets no Dock tile: {t} (is the Dock full for this screen height?)", .{ name, err });
+                }
+            }
+        }
+    }
+    if (m.pruneMinimized(live.items)) changed = true;
 
     var ids: std.ArrayList([]const u8) = .empty;
     defer ids.deinit(wm.gpa);
@@ -316,4 +353,12 @@ test "tileRect centres the window in the tile of the output" {
     // Larger than the tile: it overflows evenly.
     const big = tileRect(out, 100, 100, 100, 64);
     try std.testing.expectEqual(@as(i32, 1920 + 100 - 18), big.x);
+}
+
+test "cutUtf8 never cuts inside a character" {
+    try std.testing.expectEqualStrings("abc", cutUtf8("abcdef", 3));
+    try std.testing.expectEqualStrings("abc", cutUtf8("abc", 10));
+    try std.testing.expectEqualStrings("a", cutUtf8("aä", 2)); // ä is two bytes
+    try std.testing.expectEqualStrings("aä", cutUtf8("aä", 3));
+    try std.testing.expectEqualStrings("", cutUtf8("", 4));
 }

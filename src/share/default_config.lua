@@ -124,7 +124,7 @@ clip_on_top = true
 clip_collapsed = false           -- only the workspace tile, without its launchers
 clip_auto_collapse = false       -- fold up when the pointer leaves, unfold when it returns
 clip_auto_raise = false          -- with clip_on_top = false: up while the pointer is on it
-mini_enabled = true              -- strip of minimized windows at the bottom edge (a click brings a window back)
+mini_dock = true                 -- every minimized window gets a tile in the Dock (a click brings it back)
 -- Names shown in the Clip and in the workspace menu, one per workspace, in
 -- order. An empty entry means "no name". Without this line the names stored
 -- in Window Maker's WMState are used (if enable_wmaker_compat is on).
@@ -206,14 +206,14 @@ bind("Super+equal", "widen_column")
 
 -- floating: nudge / resize with the keyboard
 -- Minimize (Window Maker's miniaturize / hide). A minimized window leaves the
--- strip of columns, gets a tile (its application's icon) in the strip at the
--- bottom edge and shows in the Windows menu as (title); click the tile, choose
--- it in the menu, or press Super+Shift+n, to bring it back.
+-- strip of columns, gets a tile (its application's icon) in the Dock and shows
+-- in the Windows menu as (title); click the tile, choose it in the menu, or
+-- press Super+Shift+n, to bring it back.
 bind("Super+n", "minimize")
 bind("Super+Shift+n", "restore")
 bind("Super+Ctrl+n", "show_all")
 bind("Super+o", "hide_others")
-bind("Super+Shift+m", "toggle_minibar")    -- show / hide the strip of minimized windows
+bind("Super+Shift+m", "toggle_mini_dock")    -- Dock tiles of minimized windows on / off
 
 -- Several monitors: Super+Alt+Left/Right works on the previous/next output,
 -- with Shift it takes the focused window along.

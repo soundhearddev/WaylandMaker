@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: 0BSD
 //
-// The icon of an application window (for the strip of minimized windows,
-// miniwin.zig). Nothing is drawn here: every icon is a file of the system's
-// own icon themes, in the order
+// The icon of an application window (for the Dock tile of a minimized
+// window, dock.zig). Nothing is drawn here: every icon is a file of the
+// system's own icon themes, in the order
 //
 //   1. an icon named like the window's app_id   (hicolor, Adwaita, ...)
 //   2. the `Icon=` of the program's `<app_id>.desktop` file
@@ -10,7 +10,7 @@
 //
 // Only PNG and XPM can be loaded (what gfx.Icon and xpm.zig read); an SVG-only
 // theme just means "not found". If even the placeholder is missing, `get`
-// returns null and the caller shows the application's first letter.
+// returns null and the tile shows the application's first letter.
 //
 // The app_id comes from the client, so it only ever becomes part of a path
 // when it is a plain identifier (no '/', no leading '.', see `validName`).
@@ -20,9 +20,6 @@
 const std = @import("std");
 const gfx = @import("gfx.zig");
 const xpm = @import("xpm.zig");
-
-/// Most applications whose icon is remembered; more get the placeholder.
-pub const max_cached: usize = 256;
 
 /// A name that is safe to put into a file name: letters, digits and . - _ +,
 /// not starting with '.' or '-' (same rule as dockapp.validAppId).
@@ -144,104 +141,67 @@ fn fromDesktopFile(gpa: std.mem.Allocator, dirs: Dirs, dir: []const u8, id: []co
     return loadValue(gpa, dirs, value);
 }
 
+/// Where to look: the system's icon themes and `.desktop` directories, and
+/// the user's own `.desktop` directory (searched first).
+pub const Search = struct {
+    dirs: Dirs = .{},
+    user_desktop: ?[]const u8 = null,
+};
+
 /// The icon of one application, or null. `id` must be a `validName`.
-fn findForApp(gpa: std.mem.Allocator, c: *Cache, id: []const u8) ?gfx.Icon {
+fn findForApp(gpa: std.mem.Allocator, s: Search, id: []const u8) ?gfx.Icon {
     var lower_buf: [100]u8 = undefined;
     const lower = std.ascii.lowerString(&lower_buf, id);
+    const differs = !std.mem.eql(u8, lower, id);
 
-    if (findIcon(gpa, c.dirs, id, &app_contexts)) |ic| return ic;
-    if (!std.mem.eql(u8, lower, id)) {
-        if (findIcon(gpa, c.dirs, lower, &app_contexts)) |ic| return ic;
-    }
+    if (findIcon(gpa, s.dirs, id, &app_contexts)) |ic| return ic;
+    if (differs) if (findIcon(gpa, s.dirs, lower, &app_contexts)) |ic| return ic;
 
-    c.loadUserDir(gpa);
-    if (c.user_desktop) |dir| {
-        if (fromDesktopFile(gpa, c.dirs, dir, id)) |ic| return ic;
-        if (!std.mem.eql(u8, lower, id)) if (fromDesktopFile(gpa, c.dirs, dir, lower)) |ic| return ic;
+    if (s.user_desktop) |dir| {
+        if (fromDesktopFile(gpa, s.dirs, dir, id)) |ic| return ic;
+        if (differs) if (fromDesktopFile(gpa, s.dirs, dir, lower)) |ic| return ic;
     }
-    for (c.dirs.desktop) |dir| {
-        if (fromDesktopFile(gpa, c.dirs, dir, id)) |ic| return ic;
-        if (!std.mem.eql(u8, lower, id)) if (fromDesktopFile(gpa, c.dirs, dir, lower)) |ic| return ic;
+    for (s.dirs.desktop) |dir| {
+        if (fromDesktopFile(gpa, s.dirs, dir, id)) |ic| return ic;
+        if (differs) if (fromDesktopFile(gpa, s.dirs, dir, lower)) |ic| return ic;
     }
     return null;
 }
 
-/// What was found so far, per app_id. Owns its icons: the ones `get`
-/// returns are valid until `deinit`.
-pub const Cache = struct {
-    /// null = looked for, nothing found (the placeholder is shown).
-    map: std.StringHashMapUnmanaged(?gfx.Icon) = .empty,
-    placeholder: ?gfx.Icon = null,
-    placeholder_tried: bool = false,
-    dirs: Dirs = .{},
-    /// `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`).
-    user_desktop: ?[]u8 = null,
-    user_tried: bool = false,
-
-    pub fn deinit(c: *Cache, gpa: std.mem.Allocator) void {
-        var it = c.map.iterator();
-        while (it.next()) |e| {
-            if (e.value_ptr.*) |*ic| ic.deinit();
-            gpa.free(e.key_ptr.*);
-        }
-        c.map.deinit(gpa);
-        if (c.placeholder) |*ic| ic.deinit();
-        if (c.user_desktop) |d| gpa.free(d);
-        c.* = .{};
+/// The theme's placeholder icon, or null if the system has none.
+fn findPlaceholder(gpa: std.mem.Allocator, dirs: Dirs) ?gfx.Icon {
+    for (placeholder_names) |name| {
+        if (findIcon(gpa, dirs, name, &placeholder_contexts)) |ic| return ic;
     }
+    return null;
+}
 
-    fn loadUserDir(c: *Cache, gpa: std.mem.Allocator) void {
-        if (c.user_tried) return;
-        c.user_tried = true;
-        if (std.c.getenv("XDG_DATA_HOME")) |x| {
-            const s = std.mem.span(x);
-            if (s.len > 0 and s[0] == '/') {
-                c.user_desktop = std.fmt.allocPrint(gpa, "{s}/applications", .{s}) catch null;
-                return;
-            }
-        }
+/// The icon of the application `app_id`, else the theme's placeholder, else
+/// null (no icon theme installed at all). The caller owns it (`deinit`).
+pub fn load(gpa: std.mem.Allocator, s: Search, app_id: ?[]const u8) ?gfx.Icon {
+    if (app_id) |id| if (validName(id)) {
+        if (findForApp(gpa, s, id)) |ic| return ic;
+    };
+    return findPlaceholder(gpa, s.dirs);
+}
+
+/// `load` with the system's default places and the user's own
+/// `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`).
+pub fn loadOwned(gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var s: Search = .{};
+    if (std.c.getenv("XDG_DATA_HOME")) |x| {
+        const v = std.mem.span(x);
+        if (v.len > 0 and v[0] == '/') s.user_desktop = std.fmt.bufPrint(&buf, "{s}/applications", .{v}) catch null;
+    }
+    if (s.user_desktop == null) {
         if (std.c.getenv("HOME")) |h| {
-            const s = std.mem.span(h);
-            if (s.len > 0) c.user_desktop = std.fmt.allocPrint(gpa, "{s}/.local/share/applications", .{s}) catch null;
+            const v = std.mem.span(h);
+            if (v.len > 0) s.user_desktop = std.fmt.bufPrint(&buf, "{s}/.local/share/applications", .{v}) catch null;
         }
     }
-
-    fn getPlaceholder(c: *Cache, gpa: std.mem.Allocator) ?gfx.Icon {
-        if (!c.placeholder_tried) {
-            c.placeholder_tried = true;
-            for (placeholder_names) |name| {
-                if (findIcon(gpa, c.dirs, name, &placeholder_contexts)) |ic| {
-                    c.placeholder = ic;
-                    break;
-                }
-            }
-            if (c.placeholder == null) std.log.warn("appicon: no placeholder icon found in {s}", .{c.dirs.icons});
-        }
-        return c.placeholder;
-    }
-
-    /// The icon of the application `app_id`, else the theme's placeholder,
-    /// else null (no icon theme installed at all).
-    pub fn get(c: *Cache, gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
-        if (app_id) |id| if (validName(id)) {
-            if (c.map.get(id)) |hit| return hit orelse c.getPlaceholder(gpa);
-            if (c.map.count() < max_cached) {
-                var found = findForApp(gpa, c, id);
-                const key = gpa.dupe(u8, id) catch {
-                    if (found) |*ic| ic.deinit();
-                    return c.getPlaceholder(gpa);
-                };
-                c.map.put(gpa, key, found) catch {
-                    gpa.free(key);
-                    if (found) |*ic| ic.deinit();
-                    return c.getPlaceholder(gpa);
-                };
-                return found orelse c.getPlaceholder(gpa);
-            }
-        };
-        return c.getPlaceholder(gpa);
-    }
-};
+    return load(gpa, s, app_id);
+}
 
 // ----------------------------------------------------------------------------
 // Tests
@@ -285,7 +245,14 @@ fn testPng(path: [:0]const u8, side: c_int) !void {
     if (gfx.c.cairo_surface_write_to_png(s, path.ptr) != gfx.c.CAIRO_STATUS_SUCCESS) return error.Cairo;
 }
 
-test "Cache: app icon by name, by .desktop Icon=, then the theme's placeholder" {
+/// Width of the icon `load` finds (0: none), freeing it again.
+fn widthOf(gpa: std.mem.Allocator, s: Search, id: ?[]const u8) i32 {
+    var ic = load(gpa, s, id) orelse return 0;
+    defer ic.deinit();
+    return ic.w;
+}
+
+test "load: app icon by name, by .desktop Icon=, then the theme's placeholder" {
     const gpa = std.testing.allocator;
 
     // A little icon theme and application directory under /tmp.
@@ -339,31 +306,26 @@ test "Cache: app icon by name, by .desktop Icon=, then the theme's placeholder" 
     var pix_dir: [128]u8 = undefined;
     var app_dir: [128]u8 = undefined;
     const apps = [_][]const u8{try std.fmt.bufPrint(&app_dir, "{s}/applications", .{root})};
-    var cache: Cache = .{ .dirs = .{
+    const s: Search = .{ .dirs = .{
         .icons = try std.fmt.bufPrint(&icons_dir, "{s}/icons", .{root}),
         .pixmaps = try std.fmt.bufPrint(&pix_dir, "{s}/pixmaps", .{root}),
         .desktop = &apps,
     } };
-    defer cache.deinit(gpa);
 
     // 1. named like the app_id (and case-insensitive: "Foo" finds foo.png)
-    try std.testing.expectEqual(@as(i32, 4), cache.get(gpa, "foo").?.w);
-    try std.testing.expectEqual(@as(i32, 4), cache.get(gpa, "Foo").?.w);
+    try std.testing.expectEqual(@as(i32, 4), widthOf(gpa, s, "foo"));
+    try std.testing.expectEqual(@as(i32, 4), widthOf(gpa, s, "Foo"));
     // 2. no icon of that name, but baz.desktop says Icon=real-baz
-    try std.testing.expectEqual(@as(i32, 6), cache.get(gpa, "baz").?.w);
+    try std.testing.expectEqual(@as(i32, 6), widthOf(gpa, s, "baz"));
     // 3. unknown program, no app_id, invalid app_id: the placeholder
-    try std.testing.expectEqual(@as(i32, 8), cache.get(gpa, "nothing-like-it").?.w);
-    try std.testing.expectEqual(@as(i32, 8), cache.get(gpa, null).?.w);
-    try std.testing.expectEqual(@as(i32, 8), cache.get(gpa, "../../etc/passwd").?.w);
-    // asking again gives the same icon without searching again
-    try std.testing.expectEqual(@as(i32, 4), cache.get(gpa, "foo").?.w);
-    try std.testing.expectEqual(@as(usize, 4), cache.map.count());
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "nothing-like-it"));
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, null));
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "../../etc/passwd"));
 }
 
-test "Cache: no icon theme at all gives null, never a made-up icon" {
+test "load: no icon theme at all gives null, never a made-up icon" {
     const gpa = std.testing.allocator;
-    var cache: Cache = .{ .dirs = .{ .icons = "/nonexistent/icons", .pixmaps = "/nonexistent/pixmaps", .desktop = &.{} } };
-    defer cache.deinit(gpa);
-    try std.testing.expect(cache.get(gpa, "foo") == null);
-    try std.testing.expect(cache.get(gpa, null) == null);
+    const s: Search = .{ .dirs = .{ .icons = "/nonexistent/icons", .pixmaps = "/nonexistent/pixmaps", .desktop = &.{} } };
+    try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, "foo"));
+    try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, null));
 }

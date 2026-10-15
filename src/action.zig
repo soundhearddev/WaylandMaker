@@ -178,8 +178,8 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
             hideMatching(wm, w, .other_apps);
             wm.follow_request = true;
         },
-        // The strip itself follows in the same sequence (main.onManage 6b).
-        .toggle_minibar => wm.cfg.mini_enabled = !wm.cfg.mini_enabled,
+        // The Dock follows in the same sequence (main.onManage 6b).
+        .toggle_mini_dock => wm.cfg.mini_dock = !wm.cfg.mini_dock,
         // ---- several monitors -----------------------------------------------------
         .focus_output_next => focusOutput(wm, out, true),
         .focus_output_prev => focusOutput(wm, out, false),
