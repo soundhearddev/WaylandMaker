@@ -66,6 +66,7 @@ test {
     _ = @import("dock.zig");
     _ = @import("appicon.zig");
     _ = @import("xpm.zig");
+    _ = @import("fileutil.zig");
     _ = @import("fsmenu.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
@@ -74,9 +75,28 @@ test {
     _ = ui_mod;
 }
 
+/// `wmaker-wl --check`: load config.lua like the session would, report what
+/// was wrong with it, and exit with 0 (clean) or 1 (warnings), without
+/// touching Wayland. For dotfile pipelines and a quick look after editing.
+fn checkConfig(io: std.Io, gpa: std.mem.Allocator) !void {
+    var cfg = try config.load(io, gpa);
+    defer cfg.deinit();
+    if (cfg.parse_warnings > 0) {
+        std.debug.print("{s}: {d} problem(s), see the warnings above\n", .{ cfg.config_file, cfg.parse_warnings });
+        std.process.exit(1);
+    }
+    std.debug.print("{s}: OK\n", .{cfg.config_file});
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
+
+    var args = init.minimal.args.iterate();
+    _ = args.skip(); // argv[0]
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--check")) return checkConfig(io, gpa);
+    }
 
     ignoreSigchld();
 

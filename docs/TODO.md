@@ -122,6 +122,14 @@
       in `onManage()`, mit Reihenfolge-Regressionstest abgesichert). War bereits so, nur nicht verifiziert.
 
 ### Sonstiges
+- [x] **Clip ohne Platzhalter-Namen**: Der Name unter der Workspace-Nummer erscheint nur noch, wenn er gewählt
+      wurde (`workspace_names` in `config.lua` oder von Hand in `WMState`). Window Makers Platzhalter
+      („Workspace 1“ …) aus einer alten `WMState` werden ignoriert, damit nicht Workspace 1–3 einen Untertext
+      haben und 4 keinen.
+- [ ] **`focus_up`/`focus_down` bei Floating-Fenstern** laufen scheinbar verkehrt herum (`focus_up` geht in der
+      Z-Reihenfolge nach unten, siehe `action.focusFloatingStep`); erst klären, was gewollt ist.
+- [ ] `compatibility.zig`: Stubs (`libwmaker` per `dlopen`, WMakerrc-Parser, Zwischenablage). `registerHook` speichert
+      jetzt wirklich (Test), `loadAttributes` liest höchstens 1 MiB und gibt bei Fehlern keinen Speicher mehr verloren.
 - [ ] Drag-Reordering von Spalten
 - [ ] Animationen beim Scrollen
 - [ ] Modular Workspaces
@@ -132,8 +140,9 @@
       wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
 - [ ] **Mehrere Seats**: Menü und Dock gehören zurzeit dem ersten Seat.
 - [ ] **Dock/Clip auf jedem Output** (oder pro Output wählbar).
-- [ ] **`--check` für wlprefs/wmaker-wl**: Config laden, `parse_warnings` und unlesbare Dateien melden, mit
-      Exit-Code (für Dotfile-Pipelines).
+- [x] **`wmaker-wl --check`**: lädt `config.lua` wie die Sitzung, meldet die Warnungen und beendet sich mit
+      Exit-Code 0 (sauber) bzw. 1 (Warnungen), ohne Wayland. *Noch offen:* dasselbe für `wlprefs` und für
+      Root-Menü/Attribute/DockApps (`loadStartup`).
 - [ ] **Fuzzing** der Parser (`plist`, `xpm`, `wm_menu`, `config`): die Schleifen sind begrenzt und getestet,
       ein Fuzz-Lauf fehlt.
 - [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).

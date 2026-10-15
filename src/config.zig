@@ -161,7 +161,6 @@ pub const Config = struct {
     // ---- menus ----------------------------------------------------------
     /// Which side of its parent a submenu opens on first. It flips to the
     /// other side when it would leave the screen.
-    // TODO: parsed and editable in wlprefs, but ui.zig does not read it yet.
     menu_submenu_align: SubmenuAlign = .right,
 
     // ---- windows / focus --------------------------------------------------

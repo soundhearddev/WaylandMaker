@@ -228,7 +228,7 @@ fn loadAttributes(io: std.Io, allocator: std.mem.Allocator) ![]AttributeRule {
     const path = try std.fmt.allocPrint(allocator, "{s}/.config/wmaker-wl/attributes.conf", .{home});
     defer allocator.free(path);
 
-    const content = try std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, path, allocator, .unlimited);
+    const content = try std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, path, allocator, .limited(1 << 20));
     defer allocator.free(content);
 
     var rules = std.ArrayList(AttributeRule).empty;
@@ -238,6 +238,8 @@ fn loadAttributes(io: std.Io, allocator: std.mem.Allocator) ![]AttributeRule {
     }
 
     var current_id: ?[]const u8 = null;
+    // A header whose rule is not in `rules` yet owns its id string.
+    errdefer if (current_id) |id| allocator.free(id);
     var current_attrs: WindowAttributes = .{};
 
     var lines = std.mem.splitSequence(u8, content, "\n");
@@ -248,6 +250,7 @@ fn loadAttributes(io: std.Io, allocator: std.mem.Allocator) ![]AttributeRule {
         if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
             if (current_id) |id| {
                 try rules.append(allocator, .{ .app_id = id, .attrs = current_attrs });
+                current_id = null; // now owned by `rules`
             }
             current_id = try allocator.dupe(u8, trimmed[1 .. trimmed.len - 1]);
             current_attrs = .{};
@@ -278,6 +281,7 @@ fn loadAttributes(io: std.Io, allocator: std.mem.Allocator) ![]AttributeRule {
 
     if (current_id) |id| {
         try rules.append(allocator, .{ .app_id = id, .attrs = current_attrs });
+        current_id = null;
     }
 
     std.log.info("loaded {d} WMaker attribute rule(s) from: {s}", .{ rules.items.len, path });
@@ -317,7 +321,25 @@ pub const Hooks = struct {
 pub var hooks: Hooks = .{};
 
 pub fn registerHook(hook_fn: anytype, comptime hook_field: []const u8) !void {
-    // TODO: Register C function as hook
-    std.log.debug("Registering hook: {s}", .{hook_field});
-    _ = hook_fn;
+    if (!@hasField(Hooks, hook_field)) {
+        @compileError("unknown hook `" ++ hook_field ++ "`; see `Hooks` for the available ones");
+    }
+    @field(hooks, hook_field) = hook_fn;
+    std.log.debug("Registered hook: {s}", .{hook_field});
+}
+
+test "registerHook stores the function in the matching field" {
+    const S = struct {
+        var called: u32 = 0;
+        fn mapped(_: *anyopaque, id: u32) void {
+            called = id;
+        }
+    };
+    const saved = hooks;
+    defer hooks = saved;
+    try registerHook(&S.mapped, "onWindowMapped");
+    var dummy: u8 = 0;
+    hooks.onWindowMapped.?(&dummy, 7);
+    try std.testing.expectEqual(@as(u32, 7), S.called);
+    try std.testing.expect(hooks.onWindowUnmapped == null);
 }

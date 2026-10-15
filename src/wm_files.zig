@@ -206,7 +206,7 @@ fn loadMenu(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config, own: ?[
     }
 
     std.log.info("root menu: no file found, using the built-in one", .{});
-    return wm_menu.builtinDefault(a, join(a, cfg.terminal), join(a, cfg.launcher), join(a, cfg.browser));
+    return wm_menu.builtinDefault(a, try join(a, cfg.terminal), try join(a, cfg.launcher), try join(a, cfg.browser));
 }
 
 fn loadAttributes(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !wm_attr.Table {
@@ -277,11 +277,22 @@ fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]con
     return .{};
 }
 
-/// argv -> one command line, for the menu's `exec` entries.
-// TODO: on out-of-memory this silently yields "" (an empty menu command);
-// `loadMenu` could return the error instead.
-fn join(a: std.mem.Allocator, argv: []const []const u8) []const u8 {
-    return std.mem.join(a, " ", argv) catch "";
+/// argv -> one command line, for the menu's `exec` entries. `EXEC` lines are
+/// split with `config.parseCommand` (blanks separate, "double quotes" group),
+/// so a word that contains a blank is put back in quotes here.
+fn join(a: std.mem.Allocator, argv: []const []const u8) std.mem.Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (argv, 0..) |word, i| {
+        if (i > 0) try out.append(a, ' ');
+        const needs_quotes = word.len == 0 or std.mem.indexOfAny(u8, word, " \t") != null;
+        // parseCommand has no escapes: a word with a `"` in it cannot be quoted.
+        if (needs_quotes and std.mem.indexOfScalar(u8, word, '"') == null) {
+            try out.append(a, '"');
+            try out.appendSlice(a, word);
+            try out.append(a, '"');
+        } else try out.appendSlice(a, word);
+    }
+    return out.toOwnedSlice(a);
 }
 
 // ----------------------------------------------------------------------------
@@ -336,7 +347,9 @@ test "candidates without a home directory" {
 test "join makes one command line" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectEqualStrings("foot -e htop", join(arena.allocator(), &.{ "foot", "-e", "htop" }));
+    try std.testing.expectEqualStrings("foot -e htop", try join(arena.allocator(), &.{ "foot", "-e", "htop" }));
+    // A word with blanks goes back in quotes, so parseCommand gives the same argv.
+    try std.testing.expectEqualStrings("foot -e \"htop -d 5\"", try join(arena.allocator(), &.{ "foot", "-e", "htop -d 5" }));
 }
 
 test "saveDockState writes atomically and loadDockApps prefers it" {

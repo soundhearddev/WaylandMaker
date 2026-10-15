@@ -337,44 +337,17 @@ fn pack(code: []const u8) u32 {
 // Files
 // ----------------------------------------------------------------------------
 
+const fileutil = @import("fileutil.zig");
+
 const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("stdlib.h");
 });
 
-/// No icon is anywhere near this; a bigger file is not one.
-pub const max_file: usize = 1 << 20;
+pub const max_file: usize = fileutil.max_file;
 
-// TODO: `fsmenu.zig` also uses this to read menu files, which has nothing to do
-// with XPM; a shared "read a small file" helper would be the better home.
-/// Read `path` completely (at most `max_file` bytes). null if it is missing,
-/// unreadable, or too big. Caller frees.
-pub fn readFile(gpa: std.mem.Allocator, path: [:0]const u8) ?[]u8 {
-    const f = c.fopen(path.ptr, "rb") orelse return null;
-    defer _ = c.fclose(f);
-
-    var list: std.ArrayList(u8) = .empty;
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = c.fread(&buf, 1, buf.len, f);
-        if (n > 0) {
-            if (list.items.len + n > max_file) {
-                list.deinit(gpa);
-                return null;
-            }
-            list.appendSlice(gpa, buf[0..n]) catch {
-                list.deinit(gpa);
-                return null;
-            };
-        }
-        if (n < buf.len) break;
-    }
-    if (c.ferror(f) != 0) {
-        list.deinit(gpa);
-        return null;
-    }
-    return list.toOwnedSlice(gpa) catch null;
-}
+/// Kept for the callers that already use it; see `fileutil.readSmallFile`.
+pub const readFile = fileutil.readSmallFile;
 
 /// Load and parse an .xpm file. null on any problem (a bad icon must never
 /// stop the Dock from coming up).

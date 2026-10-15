@@ -25,7 +25,7 @@
 
 const std = @import("std");
 const wm_menu = @import("wm_menu.zig");
-const xpm = @import("xpm.zig");
+const fileutil = @import("fileutil.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -49,24 +49,42 @@ pub const Spec = struct {
     pipe: bool,
 };
 
-/// Split `arg` ("~/a ~/b WITH cmd args") into its parts.
-// TODO: paths are split at blanks, so a directory name with a space cannot be
-// used here (quoting is not understood).
+/// Split `arg` (`~/a ~/b WITH cmd args`) into its parts. A path may be
+/// quoted ("my docs" or 'my docs') to contain blanks; `WITH` is only
+/// recognised outside quotes. The strings live in `a`.
 pub fn parseSpec(a: std.mem.Allocator, arg: []const u8) !Spec {
     const text = std.mem.trim(u8, arg, " \t");
     if (text.len > 0 and text[0] == '|') return .{ .paths = &.{}, .with = null, .pipe = true };
 
-    var with: ?[]const u8 = null;
-    var path_part = text;
-    if (std.mem.indexOf(u8, text, " WITH ")) |i| {
-        path_part = std.mem.trim(u8, text[0..i], " \t");
-        const w = std.mem.trim(u8, text[i + " WITH ".len ..], " \t");
-        if (w.len > 0) with = w;
-    }
-
     var paths: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, path_part, " \t");
-    while (it.next()) |tok| try paths.append(a, tok);
+    var with: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < text.len) {
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
+        if (i >= text.len) break;
+
+        // The word WITH (unquoted, alone) ends the paths: the rest is the command.
+        if (std.mem.startsWith(u8, text[i..], "WITH") and
+            (i + 4 == text.len or text[i + 4] == ' ' or text[i + 4] == '\t'))
+        {
+            const w = std.mem.trim(u8, text[@min(i + 4, text.len)..], " \t");
+            if (w.len > 0) with = w;
+            break;
+        }
+
+        const q = text[i];
+        if (q == '"' or q == '\'') {
+            i += 1;
+            const start = i;
+            while (i < text.len and text[i] != q) i += 1;
+            if (i > start) try paths.append(a, text[start..i]);
+            if (i < text.len) i += 1;
+        } else {
+            const start = i;
+            while (i < text.len and text[i] != ' ' and text[i] != '\t') i += 1;
+            try paths.append(a, text[start..i]);
+        }
+    }
     return .{ .paths = try paths.toOwnedSlice(a), .with = with, .pipe = false };
 }
 
@@ -110,29 +128,45 @@ fn lessEntry(_: void, x: Entry, y: Entry) bool {
     return std.ascii.lessThanIgnoreCase(x.name, y.name);
 }
 
+/// Never look at more raw entries than this, however big the directory is:
+/// the names are all held in memory at once so that they can be sorted.
+const max_scan: usize = 20_000;
+
 /// The entries of `path`: no dot files, directories first, then by name.
-/// null if it cannot be read. Never more than `max_entries_per_dir`.
-// TODO: the cap is applied in readdir order, before sorting, so in a huge
-// directory the entries that are shown are arbitrary, not the first
-// alphabetically.
+/// null if it cannot be read. Never more than `max_entries_per_dir`, and in a
+/// huge directory those are the first ones in sort order (the list is cut
+/// after sorting, not in readdir order).
+///
+/// `d_type` saves a stat() for every plain file and directory; only symlinks
+/// (and file systems that do not fill `d_type`) are resolved with stat().
 fn listDir(a: std.mem.Allocator, path: [:0]const u8) ?[]Entry {
     const d = c.opendir(path.ptr) orelse return null;
     defer _ = c.closedir(d);
 
     var list: std.ArrayList(Entry) = .empty;
+    var scanned: usize = 0;
     while (c.readdir(d)) |ent| {
         const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.*.d_name)), 0);
         if (name.len == 0 or name[0] == '.') continue;
-        if (list.items.len >= max_entries_per_dir) break;
+        scanned += 1;
+        if (scanned > max_scan) break;
 
-        const full = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ path, name }, 0) catch return null;
-        const k = kindOf(full); // follows symlinks, like a file manager
-        if (k != .dir and k != .file) continue;
-        list.append(a, .{ .name = a.dupe(u8, name) catch return null, .is_dir = k == .dir }) catch return null;
+        const kind: Kind = switch (ent.*.d_type) {
+            c.DT_DIR => .dir,
+            c.DT_REG => .file,
+            c.DT_LNK, c.DT_UNKNOWN => blk: {
+                const full = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ path, name }, 0) catch return null;
+                defer a.free(full);
+                break :blk kindOf(full); // follows symlinks, like a file manager
+            },
+            else => .other,
+        };
+        if (kind != .dir and kind != .file) continue;
+        list.append(a, .{ .name = a.dupe(u8, name) catch return null, .is_dir = kind == .dir }) catch return null;
     }
     const items = list.toOwnedSlice(a) catch return null;
     std.mem.sort(Entry, items, {}, lessEntry);
-    return items;
+    return items[0..@min(items.len, max_entries_per_dir)];
 }
 
 const Builder = struct {
@@ -207,7 +241,7 @@ pub fn expand(a: std.mem.Allocator, arg: []const u8, title: []const u8) ?*const 
 
 /// A menu file (either format), with the file's own title if it has one.
 fn fileMenu(a: std.mem.Allocator, path: [:0]const u8) ?*const wm_menu.Menu {
-    const text = xpm.readFile(a, path) orelse return null;
+    const text = fileutil.readSmallFile(a, path) orelse return null;
     const parsed = wm_menu.parse(a, text) catch return null;
     return parsed.menu;
 }
@@ -265,6 +299,16 @@ test "parseSpec: path, several paths, WITH, and the unsupported pipe form" {
     try testing.expect((try parseSpec(a, "| find /x")).pipe);
     // An empty WITH is no WITH.
     try testing.expect((try parseSpec(a, "/x WITH ")).with == null);
+
+    // Quotes keep a path with blanks in one piece; a quoted WITH is a path.
+    const q = try parseSpec(a, "\"/home/me/My Docs\" '/srv/a b' WITH less");
+    try testing.expectEqual(@as(usize, 2), q.paths.len);
+    try testing.expectEqualStrings("/home/me/My Docs", q.paths[0]);
+    try testing.expectEqualStrings("/srv/a b", q.paths[1]);
+    try testing.expectEqualStrings("less", q.with.?);
+    const qw = try parseSpec(a, "\"WITH\"");
+    try testing.expectEqual(@as(usize, 1), qw.paths.len);
+    try testing.expect(qw.with == null);
 }
 
 test "shellQuote survives quotes and spaces" {
@@ -403,4 +447,22 @@ test "a directory with too many entries is cut, not hung on" {
     const m = expand(arena.allocator(), t.path, "Big") orelse return error.NoMenu;
     try testing.expect(m.items.len <= max_entries_per_dir);
     try testing.expect(m.items.len > 0);
+}
+
+test "the cap keeps the first entries in sort order, not readdir order" {
+    const gpa = testing.allocator;
+    const t = try TmpTree.make(gpa);
+    defer t.cleanup(gpa);
+    var i: usize = 0;
+    while (i < max_entries_per_dir + 50) : (i += 1) {
+        var name: [24]u8 = undefined;
+        const n = try std.fmt.bufPrint(&name, "f{d:0>4}.txt", .{i});
+        try t.file(gpa, n, "");
+    }
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const m = expand(arena.allocator(), t.path, "Big") orelse return error.NoMenu;
+    try testing.expectEqual(max_entries_per_dir, m.items.len);
+    try testing.expectEqualStrings("f0000.txt", m.items[0].label);
+    try testing.expectEqualStrings("f0199.txt", m.items[max_entries_per_dir - 1].label);
 }

@@ -219,9 +219,17 @@ pub const Model = struct {
             try m.drawer_names.append(gpa, try a.dupe(u8, d.name));
         }
 
-        const names = if (cfg_names.len > 0) cfg_names else list.workspace_names;
+        // The Clip shows a name under the workspace number only when somebody
+        // chose one: `workspace_names` in config.lua, or a name edited by hand
+        // in WMState. Window Maker's own placeholders ("Workspace 1", ...)
+        // are not names and are dropped, so workspaces do not end up with a
+        // label on some and none on others.
+        const from_config = cfg_names.len > 0;
+        const names = if (from_config) cfg_names else list.workspace_names;
         const names_copy = try a.alloc([]const u8, names.len);
-        for (names, 0..) |n, i| names_copy[i] = try a.dupe(u8, n);
+        for (names, 0..) |n, i| {
+            names_copy[i] = if (!from_config and isDefaultWorkspaceName(n, i)) "" else try a.dupe(u8, n);
+        }
         m.names = names_copy;
 
         for (list.apps) |app| {
@@ -352,6 +360,15 @@ pub const Model = struct {
     }
 
     // ---- looking -----------------------------------------------------------------
+
+    /// "Workspace N" for workspace index N-1: the name Window Maker gives a
+    /// workspace nobody named.
+    fn isDefaultWorkspaceName(name: []const u8, index: usize) bool {
+        const prefix = "Workspace ";
+        if (!std.mem.startsWith(u8, name, prefix)) return false;
+        const n = std.fmt.parseInt(usize, name[prefix.len..], 10) catch return false;
+        return n == index + 1;
+    }
 
     pub fn workspaceName(m: *const Model, ws: u32) ?[]const u8 {
         if (ws >= m.names.len) return null;
@@ -1251,6 +1268,21 @@ test "Model: an empty list is just the logo; names: config.lua wins" {
     try std.testing.expectEqual(@as(usize, 1), m.scr.dock.?.icon_count);
     try std.testing.expectEqualStrings("cfg", m.workspaceName(0).?);
     try std.testing.expect(m.workspaceName(1) == null);
+}
+
+test "Model: Window Maker's placeholder names (\"Workspace N\") are not shown, real names are" {
+    var m = try Model.init(
+        std.testing.allocator,
+        .{ .workspace_names = &.{ "Workspace 1", "Web", "Workspace 2", "Workspace 4" } },
+        &.{},
+        4,
+    );
+    defer m.deinit();
+    try std.testing.expect(m.workspaceName(0) == null); // placeholder
+    try std.testing.expectEqualStrings("Web", m.workspaceName(1).?);
+    // Only the placeholder of the SAME workspace counts: this one was typed.
+    try std.testing.expectEqualStrings("Workspace 2", m.workspaceName(2).?);
+    try std.testing.expect(m.workspaceName(3) == null); // placeholder of workspace 4
 }
 
 test "Model: Clip tiles belong to their workspace, omnipresent ones follow it" {

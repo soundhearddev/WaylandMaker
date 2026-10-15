@@ -1450,12 +1450,22 @@ pub const Ui = struct {
         cl.hover = null;
         cl.dirty = true;
         cl.output = pl.output;
-        cl.x = pl.x + pl.w - 2;
+        const left_first = ui.wm.cfg.menu_submenu_align == .left;
+        const right_x = pl.x + pl.w - 2;
+        const left_x = pl.x - cl.w + 2;
+        cl.x = if (left_first) left_x else right_x;
         cl.y = pl.y + title_h + @as(i32, @intCast(row -| pl.scroll)) * item_h - title_h;
         if (cl.output) |out| {
             fitToOutput(cl, out);
-            // Flip to the left when it would leave the output.
-            if (cl.x + cl.w > out.rect.right()) cl.x = pl.x - cl.w + 2;
+            // `menu_submenu_align` is the side tried first; flip to the other
+            // one when the submenu would leave the output on that side.
+            if (left_first) {
+                cl.x = left_x;
+                if (cl.x < out.rect.x) cl.x = right_x;
+            } else {
+                cl.x = right_x;
+                if (cl.x + cl.w > out.rect.right()) cl.x = left_x;
+            }
             clampToOutput(cl, out);
         }
         cl.open = true;
@@ -1508,20 +1518,20 @@ pub const Ui = struct {
         wm.obj.manageDirty();
     }
 
-    /// Runs an `EXEC` entry: split at blanks only, so quotes are NOT honoured
-    /// (unlike `config.parseCommand` for key bindings). Use `SHEXEC` for
-    /// anything that needs quoting.
-    // TODO: use `config.parseCommand` here too, so `EXEC` and `bind = ..., exec`
-    // treat quotes the same way.
+    /// Runs an `EXEC` entry. The line is split exactly like a key binding's
+    /// command (`config.parseCommand`: blanks separate words, "double quotes"
+    /// group one). Use `SHEXEC` for anything that needs a real shell.
     fn spawnWords(ui: *Ui, cmd: []const u8) void {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(ui.gpa());
-        var it = std.mem.tokenizeAny(u8, cmd, " \t");
-        while (it.next()) |w| argv.append(ui.gpa(), w) catch {
-            std.log.err("out of memory while starting `{s}`", .{cmd});
+        var tmp: std.heap.ArenaAllocator = .init(ui.gpa());
+        defer tmp.deinit();
+        const argv = config_mod.parseCommand(tmp.allocator(), cmd) catch |err| {
+            switch (err) {
+                error.OutOfMemory => std.log.err("out of memory while starting `{s}`", .{cmd}),
+                else => std.log.warn("EXEC `{s}` has no command to run", .{cmd}),
+            }
             return;
         };
-        proc.spawn(ui.wm, argv.items);
+        proc.spawn(ui.wm, argv);
     }
 
     // ========================================================================
