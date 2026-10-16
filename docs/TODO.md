@@ -122,6 +122,13 @@
       in `onManage()`, mit Reihenfolge-Regressionstest abgesichert). War bereits so, nur nicht verifiziert.
 
 ### Sonstiges
+- [x] **Code-TODOs abgearbeitet** (`fsmenu.zig`, `ui.zig`, `wm_files.zig`, `xpm.zig`, `fileutil.zig`):
+      `EXEC`-Zeilen im Menü werden mit `config.parseCommand` zerlegt (Anführungszeichen gelten wie bei
+      `bind = ..., exec`); `menu_submenu_align` wird von `ui.openChild` gelesen (gewählte Seite zuerst, sonst
+      gespiegelt); `OPEN_MENU` versteht Pfade in `"…"`/`'…'`; `listDir` sortiert vor dem Kappen (die ersten 200
+      in Sortierreihenfolge statt beliebiger) und spart per `d_type` das `stat()` je Eintrag; `readFile` lebt
+      jetzt als `fileutil.readSmallFile`; `wm_files.join` gibt Out-of-Memory weiter und quotet Wörter mit
+      Leerzeichen.
 - [x] **Clip ohne Platzhalter-Namen**: Der Name unter der Workspace-Nummer erscheint nur noch, wenn er gewählt
       wurde (`workspace_names` in `config.lua` oder von Hand in `WMState`). Window Makers Platzhalter
       („Workspace 1“ …) aus einer alten `WMState` werden ignoriert, damit nicht Workspace 1–3 einen Untertext
@@ -167,4 +174,8 @@
       `config.conf` wird beim Start mit einer Warnung gemeldet)
 - [x] **wlprefs auf Lua umgestellt**: `wlprefs/src/configfile.zig` und die Hilfstexte nutzen `config.lua` statt `config.conf`
       (das Parsen/Schreiben von `key = wert` und `bind("..", "..")` war schon Lua).
-- [ ] Config allow own variables
+- [x] **Lua in `config.lua` ausgebaut** (`config.zig`, `lua.zig`, `action.zig`):
+      eigene Variablen sind erlaubt (nur Tippfehler von Optionen wie `gapp` werden mit „did you mean“
+      gemeldet); alle Optionen sind im Script lesbar (`gap = gap + 2`, `table.insert(width_presets, 0.25)`);
+      `bind("Super+x", function() ... end)` führt eine Lua-Funktion aus, darin `run("...")`, `spawn("...")`,
+      `shell("...")`. Funktionen laufen mit Instruktionslimit, Fehler werden geloggt statt geworfen.

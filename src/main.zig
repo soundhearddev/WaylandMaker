@@ -92,6 +92,8 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
+    config.runner = action.runFromLua;
+
     var args = init.minimal.args.iterate();
     _ = args.skip(); // argv[0]
     while (args.next()) |arg| {

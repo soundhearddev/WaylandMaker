@@ -22,6 +22,7 @@ pub const State = zlua.Lua;
 
 pub const T_NIL = zlua.LuaType.nil;
 pub const T_TABLE = zlua.LuaType.table;
+pub const T_FUNCTION = zlua.LuaType.function;
 
 // ---- state -----------------------------------------------------------------
 
@@ -126,6 +127,47 @@ pub fn pushGlobals(L: *State) void {
     L.pushGlobalTable();
 }
 
+pub fn pushInteger(L: *State, n: i64) void {
+    L.pushInteger(@intCast(n));
+}
+
+pub fn pushNumber(L: *State, n: f64) void {
+    L.pushNumber(@floatCast(n));
+}
+
+pub fn pushBool(L: *State, b: bool) void {
+    L.pushBoolean(b);
+}
+
+pub fn pushString(L: *State, s: []const u8) void {
+    _ = L.pushString(s);
+}
+
+/// Let the globals fall back to the table on top of the stack for names the
+/// script has not assigned (`__index` is a plain table, so no code ever runs
+/// for a lookup). Pops the table. Assigning still creates a real global.
+pub fn setGlobalFallback(L: *State) void {
+    L.createTable(0, 1); //                [fallback, meta]
+    L.pushValue(-2); //                    [fallback, meta, fallback]
+    L.setField(-2, "__index"); //          [fallback, meta]
+    L.pushGlobalTable(); //                [fallback, meta, G]
+    L.pushValue(-2); //                    [fallback, meta, G, meta]
+    L.setMetatable(-2); //                 [fallback, meta, G]
+    L.pop(3);
+}
+
+/// Push t[key] for a string key, raw. `idx` is where the table is NOW.
+pub fn rawGetString(L: *State, idx: i32, key: []const u8) void {
+    const t = if (idx < 0) idx - 1 else idx; // the key push shifts relative indices
+    _ = L.pushString(key);
+    _ = L.getTableRaw(t);
+}
+
+/// Pop a value, do t[n] = value. `idx` is where the table is NOW.
+pub fn rawSetI(L: *State, idx: i32, n: i64) void {
+    L.setIndexRaw(idx, @intCast(n));
+}
+
 // ---- reading values --------------------------------------------------------
 
 /// The bytes of a STRING value (not of a number: those are not converted).
@@ -181,4 +223,14 @@ pub fn next(L: *State, idx: i32) bool {
 pub fn where(L: *State) []const u8 {
     L.where(1);
     return toSlice(L, -1) orelse "";
+}
+
+/// Pop the value on top and keep it in the registry: the number to get it
+/// back with `pushRef`.
+pub fn makeRef(L: *State) i32 {
+    return L.ref(zlua.registry_index);
+}
+
+pub fn pushRef(L: *State, ref: i32) void {
+    _ = L.getIndexRaw(zlua.registry_index, ref);
 }

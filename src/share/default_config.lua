@@ -249,3 +249,28 @@ bind("Super+Page_Up", "workspace_prev")
 --     bind("Super+" .. i, "workspace " .. i)
 --     bind("Super+Shift+" .. i, "move_to_workspace " .. i)
 -- end
+
+-- ---- more Lua ------------------------------------------------------------------
+-- Own variables are fine. Any name that is not an option is yours (an option
+-- that is misspelt, like `gapp`, is reported with a suggestion):
+--
+--     local accent = "#d8a657"        -- `local` is the tidy way
+--     my_term = "foot"                -- a global works as well
+--     border_focused = accent
+--
+-- Every option can be read before you change it, so you can build on it:
+--
+--     gap = gap + 2
+--     table.insert(width_presets, 0.25)
+--     if os.getenv("HOSTNAME") == "laptop" then workspace_count = 2 end
+--
+-- A key can run a Lua function instead of a command. Inside it, run("...")
+-- takes the same text as a bind (run("workspace 2")), spawn("foot -e htop")
+-- starts a program and shell("a | b") runs a line through /bin/sh:
+--
+--     local n = 0
+--     bind("Super+F5", function()
+--         n = n + 1
+--         if n % 2 == 1 then run("workspace 2") else run("workspace 1") end
+--         shell("notify-send 'toggled " .. n .. " times'")
+--     end)
