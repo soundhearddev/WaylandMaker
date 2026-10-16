@@ -124,42 +124,127 @@ pub const Canvas = struct {
         c.cairo_fill(cv.cr);
     }
 
-    /// A line through `points` (at least 2), `width` px wide; closed back to
-    /// the first point if `close`. Nothing is filled.
-    pub fn strokePath(cv: *Canvas, points: []const [2]f64, close: bool, width: f64, col: Color) void {
-        if (points.len < 2) return;
-        c.cairo_save(cv.cr);
-        cv.setColor(col);
-        c.cairo_set_line_width(cv.cr, width);
-        c.cairo_set_line_join(cv.cr, c.CAIRO_LINE_JOIN_MITER);
-        c.cairo_move_to(cv.cr, points[0][0], points[0][1]);
-        for (points[1..]) |pt| c.cairo_line_to(cv.cr, pt[0], pt[1]);
-        if (close) c.cairo_close_path(cv.cr);
-        c.cairo_stroke(cv.cr);
-        c.cairo_restore(cv.cr);
-    }
-
     /// Draw `icon` scaled to fit a `size` x `size` box at (x, y), keeping
-    /// its aspect ratio and centring it in the box.
+    /// its aspect ratio and centring it in the box. The drawn size and the
+    /// position are whole pixels (a fractional edge would smear the picture
+    /// over two rows of pixels), and the resampling is the best cairo has.
+    ///
+    /// That resampling is slow (a 256 px icon in a 48 px tile takes about
+    /// 3 ms), and a Dock redraws all its tiles whenever one of them changes.
+    /// So the scaled picture is made once per size and kept with the icon
+    /// (see `scaledFor`); drawing it again is a plain copy.
     pub fn drawIcon(cv: *Canvas, icon: Icon, x: i32, y: i32, size: i32) void {
         const fs: f64 = @floatFromInt(size);
-        const sx = fs / @as(f64, @floatFromInt(icon.w));
-        const sy = fs / @as(f64, @floatFromInt(icon.h));
-        const scale = @min(sx, sy);
-        const dw = @as(f64, @floatFromInt(icon.w)) * scale;
-        const dh = @as(f64, @floatFromInt(icon.h)) * scale;
+        const iw: f64 = @floatFromInt(icon.w);
+        const ih: f64 = @floatFromInt(icon.h);
+        const fit = @min(fs / iw, fs / ih);
+        const dw = @max(1.0, @round(iw * fit));
+        const dh = @max(1.0, @round(ih * fit));
+        const ox = @as(f64, @floatFromInt(x)) + @floor((fs - dw) / 2);
+        const oy = @as(f64, @floatFromInt(y)) + @floor((fs - dh) / 2);
+
+        if (dw == iw and dh == ih) {
+            // Drawn 1:1: no resampling to save.
+            c.cairo_set_source_surface(cv.cr, icon.surface, ox, oy);
+        } else if (scaledFor(icon.surface, @intFromFloat(dw), @intFromFloat(dh), iw, ih)) |scaled| {
+            c.cairo_set_source_surface(cv.cr, scaled, ox, oy);
+        } else {
+            cv.drawIconDirect(icon, ox, oy, dw, dh);
+            return;
+        }
+        c.cairo_rectangle(cv.cr, ox, oy, dw, dh);
+        c.cairo_fill(cv.cr);
+    }
+
+    /// The slow way, straight from the source (used if the scaled copy cannot
+    /// be made).
+    fn drawIconDirect(cv: *Canvas, icon: Icon, ox: f64, oy: f64, dw: f64, dh: f64) void {
+        const iw: f64 = @floatFromInt(icon.w);
+        const ih: f64 = @floatFromInt(icon.h);
         c.cairo_save(cv.cr);
-        c.cairo_translate(
-            cv.cr,
-            @as(f64, @floatFromInt(x)) + (fs - dw) / 2,
-            @as(f64, @floatFromInt(y)) + (fs - dh) / 2,
-        );
-        c.cairo_scale(cv.cr, scale, scale);
+        c.cairo_translate(cv.cr, ox, oy);
+        c.cairo_scale(cv.cr, dw / iw, dh / ih);
         c.cairo_set_source_surface(cv.cr, icon.surface, 0, 0);
-        c.cairo_paint(cv.cr);
+        if (c.cairo_get_source(cv.cr)) |pat| {
+            c.cairo_pattern_set_filter(pat, c.CAIRO_FILTER_BEST);
+            // Edge pixels continue outwards instead of fading to transparent.
+            c.cairo_pattern_set_extend(pat, c.CAIRO_EXTEND_PAD);
+        }
+        c.cairo_rectangle(cv.cr, 0, 0, iw, ih);
+        c.cairo_fill(cv.cr);
         c.cairo_restore(cv.cr);
     }
 };
+
+// ---- scaled copies of icons ---------------------------------------------------
+
+/// The scaled copies of ONE icon: normally a Dock tile and a miniwindow tile
+/// are the only sizes asked for, so two are kept (the older goes when a third
+/// is asked for). It hangs on the icon's cairo surface as user data and goes
+/// when that surface is destroyed, so no bookkeeping by the owners of icons
+/// is needed and a stale copy can never outlive its icon.
+const Scaled = struct {
+    const keep = 2;
+    w: [keep]i32 = .{ 0, 0 },
+    h: [keep]i32 = .{ 0, 0 },
+    surface: [keep]?*c.cairo_surface_t = .{ null, null },
+    next: usize = 0,
+
+    fn free(p: ?*anyopaque) callconv(.c) void {
+        const sc: *Scaled = @ptrCast(@alignCast(p orelse return));
+        for (sc.surface) |s| if (s) |surf| c.cairo_surface_destroy(surf);
+        std.heap.c_allocator.destroy(sc);
+    }
+};
+
+var scaled_key: c.cairo_user_data_key_t = undefined;
+
+/// `src` drawn into a new `dw` x `dh` surface with the best filter, from
+/// the kept copies or made now. null if it cannot be made.
+fn scaledFor(src: *c.cairo_surface_t, dw: i32, dh: i32, iw: f64, ih: f64) ?*c.cairo_surface_t {
+    var sc: *Scaled = blk: {
+        if (c.cairo_surface_get_user_data(src, &scaled_key)) |p| break :blk @ptrCast(@alignCast(p));
+        const fresh = std.heap.c_allocator.create(Scaled) catch return null;
+        fresh.* = .{};
+        if (c.cairo_surface_set_user_data(src, &scaled_key, fresh, Scaled.free) != c.CAIRO_STATUS_SUCCESS) {
+            std.heap.c_allocator.destroy(fresh);
+            return null;
+        }
+        break :blk fresh;
+    };
+
+    for (0..Scaled.keep) |i| {
+        if (sc.surface[i] != null and sc.w[i] == dw and sc.h[i] == dh) return sc.surface[i];
+    }
+
+    const out = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, dw, dh) orelse return null;
+    if (c.cairo_surface_status(out) != c.CAIRO_STATUS_SUCCESS) {
+        c.cairo_surface_destroy(out);
+        return null;
+    }
+    const cr = c.cairo_create(out) orelse {
+        c.cairo_surface_destroy(out);
+        return null;
+    };
+    c.cairo_scale(cr, @as(f64, @floatFromInt(dw)) / iw, @as(f64, @floatFromInt(dh)) / ih);
+    c.cairo_set_source_surface(cr, src, 0, 0);
+    if (c.cairo_get_source(cr)) |pat| {
+        c.cairo_pattern_set_filter(pat, c.CAIRO_FILTER_BEST);
+        // Edge pixels continue outwards instead of fading to transparent.
+        c.cairo_pattern_set_extend(pat, c.CAIRO_EXTEND_PAD);
+    }
+    c.cairo_rectangle(cr, 0, 0, iw, ih);
+    c.cairo_fill(cr);
+    c.cairo_destroy(cr);
+
+    const slot = sc.next;
+    sc.next = (sc.next + 1) % Scaled.keep;
+    if (sc.surface[slot]) |old| c.cairo_surface_destroy(old);
+    sc.surface[slot] = out;
+    sc.w[slot] = dw;
+    sc.h[slot] = dh;
+    return out;
+}
 
 /// A PNG loaded through cairo (Dock/Clip tile icons).
 pub const Icon = struct {
@@ -301,12 +386,37 @@ pub var fonts: Fonts = blk: {
 };
 
 /// Pixel size of `text` in `font`, measured on a scratch surface.
+///
+/// Measuring is what building a menu spends its time on (every row, twice for
+/// one with a shortcut) and the same strings come back whenever a menu is
+/// rebuilt, redrawn or opened again, so the answers are remembered: a table
+/// of 1024 sets of 4 slots, keyed by a 64-bit hash of font and text. A string
+/// that finds its set full replaces one of its entries.
 pub fn measureText(text: [:0]const u8, font: [:0]const u8) struct { w: i32, h: i32 } {
+    var hasher = std.hash.Wyhash.init(0x6d656173);
+    hasher.update(font);
+    hasher.update("\x00");
+    hasher.update(text);
+    const key = hasher.final();
+
+    const set = &measure_cache[@intCast(key % measure_cache.len)];
+    var free: ?*MeasureSlot = null;
+    for (set) |*slot| {
+        if (!slot.used) {
+            if (free == null) free = slot;
+        } else if (slot.key == key) return .{ .w = slot.w, .h = slot.h };
+    }
+
     var w: c_int = 0;
     var h: c_int = 0;
     c.wm_measure_text(text.ptr, font.ptr, &w, &h);
+    const target = free orelse &set[@intCast((key >> 32) % set.len)];
+    target.* = .{ .used = true, .key = key, .w = w, .h = h };
     return .{ .w = w, .h = h };
 }
+
+const MeasureSlot = struct { used: bool = false, key: u64 = 0, w: i32 = 0, h: i32 = 0 };
+var measure_cache: [1024][4]MeasureSlot = [_][4]MeasureSlot{[_]MeasureSlot{.{}} ** 4} ** 1024;
 
 test "canvas draws into plain memory" {
     var buf: [16 * 16 * 4]u8 = undefined;
@@ -317,5 +427,71 @@ test "canvas draws into plain memory" {
     cv.flush();
     // ARGB32 little-endian: B, G, R, A
     try std.testing.expectEqual(@as(u8, 0xff), buf[2]);
+    try std.testing.expectEqual(@as(u8, 0xff), buf[3]);
+}
+
+test "measureText: the cached answer is the measured one" {
+    const a = measureText("A cache test string", "Sans 10");
+    const b = measureText("A cache test string", "Sans 10");
+    try std.testing.expectEqual(a.w, b.w);
+    try std.testing.expectEqual(a.h, b.h);
+    try std.testing.expect(a.w > 0);
+    // Another font or text is not served from this answer.
+    const wide = measureText("A cache test string, but a good deal longer than before", "Sans 10");
+    try std.testing.expect(wide.w > a.w);
+    const big = measureText("A cache test string", "Sans 24");
+    try std.testing.expect(big.w > a.w);
+}
+
+test "drawIcon: the kept scaled copy looks exactly like scaling on the spot" {
+    var px: [64 * 48]u32 = undefined;
+    for (&px, 0..) |*p, i| {
+        const v: u32 = @truncate(i *% 2654435761);
+        p.* = 0xff000000 | (v & 0x00ffffff);
+    }
+    var icon = Icon.fromPixels(64, 48, &px).?;
+    defer icon.deinit();
+
+    var a: [40 * 40 * 4]u8 = undefined;
+    var b: [40 * 40 * 4]u8 = undefined;
+    @memset(&a, 0);
+    @memset(&b, 0);
+    var ca = try Canvas.initForData(&a, 40, 40, 160);
+    defer ca.deinit();
+    var cb = try Canvas.initForData(&b, 40, 40, 160);
+    defer cb.deinit();
+
+    // 64x48 into a 32 box: 32x24, centred; first through the cache (twice),
+    // then the old way.
+    ca.drawIcon(icon, 4, 4, 32);
+    ca.drawIcon(icon, 4, 4, 32);
+    cb.drawIconDirect(icon, 4, 4 + 4, 32, 24);
+    ca.flush();
+    cb.flush();
+    try std.testing.expectEqualSlices(u8, &b, &a);
+
+    // A different size is made and kept next to it; both stay right.
+    var c2: [40 * 40 * 4]u8 = undefined;
+    @memset(&c2, 0);
+    var cc = try Canvas.initForData(&c2, 40, 40, 160);
+    defer cc.deinit();
+    cc.drawIcon(icon, 0, 0, 16);
+    cc.drawIcon(icon, 0, 0, 24);
+    cc.drawIcon(icon, 0, 0, 32); // a third size: the oldest copy goes
+    cc.drawIcon(icon, 0, 0, 16); // ... and comes back when asked for
+}
+
+test "drawIcon: an icon in its own size is drawn as it is" {
+    var px: [8 * 8]u32 = undefined;
+    @memset(&px, 0xff112233);
+    var icon = Icon.fromPixels(8, 8, &px).?;
+    defer icon.deinit();
+    var buf: [8 * 8 * 4]u8 = undefined;
+    @memset(&buf, 0);
+    var cv = try Canvas.initForData(&buf, 8, 8, 32);
+    defer cv.deinit();
+    cv.drawIcon(icon, 0, 0, 8);
+    cv.flush();
+    try std.testing.expectEqual(@as(u8, 0x33), buf[0]); // B of 0xff112233, little-endian
     try std.testing.expectEqual(@as(u8, 0xff), buf[3]);
 }

@@ -70,22 +70,31 @@ fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
     return null;
 }
 
+/// The themes of `themes` that are installed under `dirs.icons` (one
+/// directory check each). A search tries every size, context and layout of
+/// every theme it is given, so leaving out the ones that are not there saves
+/// most of the failed `open`s: a machine with one or two themes would
+/// otherwise pay for six.
+fn presentThemes(dirs: Dirs, out: *[themes.len][]const u8) []const []const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var n: usize = 0;
+    for (themes) |th| {
+        const p = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dirs.icons, th }) catch continue;
+        if (std.c.access(p.ptr, 0) != 0) continue;
+        out[n] = th;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// The icon file called `name` in the themes (PNG first, then XPM).
 fn findIcon(gpa: std.mem.Allocator, dirs: Dirs, name: []const u8, contexts: []const []const u8) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    // Which of the themes are installed at all: one check each, instead of
-    // a failed open for every size, context and layout of the missing ones.
-    var installed: [themes.len]bool = undefined;
-    for (themes, 0..) |th, i| {
-        installed[i] = if (std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dirs.icons, th })) |p|
-            std.c.access(p.ptr, 0) == 0
-        else |_|
-            false;
-    }
+    var present_buf: [themes.len][]const u8 = undefined;
+    const present = presentThemes(dirs, &present_buf);
     inline for (.{ ".png", ".xpm" }) |ext| {
         for (sizes) |sz| {
-            for (themes, 0..) |th, ti| {
-                if (!installed[ti]) continue;
+            for (present) |th| {
                 for (contexts) |cx| {
                     // <theme>/<size>x<size>/<context>/ (hicolor, Adwaita, ...)
                     if (std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}x{s}/{s}/{s}" ++ ext, .{ dirs.icons, th, sz, sz, cx, name })) |p| {
