@@ -60,11 +60,13 @@ plus per-workspace launchers) are built in; configure them with the `dock_*` / `
 existing Window Maker `~/GNUstep/Defaults/WMState`).
 
 Also built in: minimize/hide (`minimize`, `restore`, `show_all`, `hide_others`; every minimized window gets a tile
-with its program's icon in the Dock, one click brings it back; `mini_dock`, `toggle_mini_dock`), several monitors
+with its program's icon in the Dock, one click brings it back, and its frame flies there and back like in Window Maker (`iconify_style`); `mini_dock`, `toggle_mini_dock`), several monitors
 (`focus_output_*`, `move_to_output_*`), themes (`theme = NAME`, `include = FILE`), XPM icons for Dock tiles,
 `OPEN_MENU` for directories and menu files, scrolling menus, and `bind_layout` / umlaut key names for
 non-US keyboards. See `docs/TODO.md` for what is done and what is not.
 
 **wlprefs** is the settings window (modelled on Window Maker's WPrefs.app): `zig-out/bin/wlprefs`.
 It reads and writes `~/.config/wmaker-wl/config.lua` (the same file wmaker-wl loads) and changes only the lines of the
-keys you change.
+keys you change. See [`docs/WMPREFS.md`](docs/WMPREFS.md); `zig build test-wlprefs` runs its tests.
+
+See [`docs/ARCHITECTURE.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/ARCHITECTURE.md) for the architecture, and [`docs/DOCKAPPS.md`](https://github.com/soundhearddev/WaylandMaker/blob/main/docs/DOCKAPPS.md) for how DockApps, the Dock and the Clip work (`WMState`).

@@ -23,6 +23,7 @@
 | `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient (vertical, diagonal), polygon, bevel, text, measure, PNG icons | no |
 | `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
 | `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling; owns the Dock and Clip surfaces, their clicks, and puts DockApp windows into their tile | yes |
+| `anim.zig` | Window Maker's miniaturize animation (`actions.c`: zoom, twist, flip) ported loop for loop with the same constants and `float` arithmetic (checked point for point against the original C); produces the pictures, draws them as outlines. `ui.zig` shows them on a transparent surface (`animCollect` / `animLaunch` / `animStep`) | no |
 | `appicon.zig` | The system icon of an application window, for the Dock tile of a minimized window: an icon named like the app_id in the installed icon themes (PNG/XPM), else the `Icon=` of its `.desktop` file, else the theme's own placeholder (`application-x-executable`, ...); nothing is drawn by wmaker-wl | no |
 | `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
 | `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |

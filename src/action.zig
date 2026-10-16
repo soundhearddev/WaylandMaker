@@ -39,25 +39,6 @@ pub fn requestFocus(wm: *WindowManager, win: *Window) void {
     wm.obj.manageDirty();
 }
 
-/// What `run("workspace 2")`, `spawn("foot")` and `shell("...")` do inside a
-/// Lua function of config.lua: the same commands as a key binding's text.
-/// (Set as `config.runner` at start-up.)
-pub fn runFromLua(text: []const u8) void {
-    const wm = global orelse return;
-    // A function calling `run("lua N")` could loop for ever.
-    if (std.mem.startsWith(u8, std.mem.trimStart(u8, text, " \t"), "lua")) {
-        std.log.warn("config.lua: run() cannot start a Lua function", .{});
-        return;
-    }
-    var arena: std.heap.ArenaAllocator = .init(wm.gpa);
-    defer arena.deinit();
-    const cmd = parse(arena.allocator(), &wm.cfg, text) catch |err| {
-        std.log.warn("config.lua: bad command `{s}`: {t}", .{ text, err });
-        return;
-    };
-    run(wm, cmd);
-}
-
 // ----------------------------------------------------------------------------
 // Parsing
 // ----------------------------------------------------------------------------
@@ -113,11 +94,6 @@ pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) 
     if (eql(u8, name, "shell") or eql(u8, name, "exec") or eql(u8, name, "shexec")) {
         if (rest.len == 0) return error.BadArguments;
         return .{ .shell = try a.dupe(u8, rest) };
-    }
-
-    // `lua N`: written by config.zig for `bind(combo, function)`, not by hand.
-    if (eql(u8, name, "lua")) {
-        return .{ .lua = std.fmt.parseInt(i32, rest, 10) catch return error.BadArguments };
     }
 
     if (eql(u8, name, "workspace")) return .{ .workspace = try workspaceArg(rest, cfg) };
@@ -183,7 +159,6 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .none => {},
         .spawn => |argv| proc.spawn(wm, argv),
         .shell => |sh| proc.spawnShell(wm, sh),
-        .lua => |ref| config.callLua(cfg, ref),
         .exit => wm.quit = true,
 
         .close => if (focusedWindow(wm)) |w| w.obj.close(),

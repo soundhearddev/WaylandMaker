@@ -124,32 +124,39 @@ pub const Canvas = struct {
         c.cairo_fill(cv.cr);
     }
 
+    /// A line through `points` (at least 2), `width` px wide; closed back to
+    /// the first point if `close`. Nothing is filled.
+    pub fn strokePath(cv: *Canvas, points: []const [2]f64, close: bool, width: f64, col: Color) void {
+        if (points.len < 2) return;
+        c.cairo_save(cv.cr);
+        cv.setColor(col);
+        c.cairo_set_line_width(cv.cr, width);
+        c.cairo_set_line_join(cv.cr, c.CAIRO_LINE_JOIN_MITER);
+        c.cairo_move_to(cv.cr, points[0][0], points[0][1]);
+        for (points[1..]) |pt| c.cairo_line_to(cv.cr, pt[0], pt[1]);
+        if (close) c.cairo_close_path(cv.cr);
+        c.cairo_stroke(cv.cr);
+        c.cairo_restore(cv.cr);
+    }
+
     /// Draw `icon` scaled to fit a `size` x `size` box at (x, y), keeping
-    /// its aspect ratio and centring it in the box. The drawn size and the
-    /// position are whole pixels (a fractional edge would smear the picture
-    /// over two rows of pixels), and the resampling is the best cairo has.
+    /// its aspect ratio and centring it in the box.
     pub fn drawIcon(cv: *Canvas, icon: Icon, x: i32, y: i32, size: i32) void {
         const fs: f64 = @floatFromInt(size);
-        const iw: f64 = @floatFromInt(icon.w);
-        const ih: f64 = @floatFromInt(icon.h);
-        const fit = @min(fs / iw, fs / ih);
-        const dw = @max(1.0, @round(iw * fit));
-        const dh = @max(1.0, @round(ih * fit));
+        const sx = fs / @as(f64, @floatFromInt(icon.w));
+        const sy = fs / @as(f64, @floatFromInt(icon.h));
+        const scale = @min(sx, sy);
+        const dw = @as(f64, @floatFromInt(icon.w)) * scale;
+        const dh = @as(f64, @floatFromInt(icon.h)) * scale;
         c.cairo_save(cv.cr);
         c.cairo_translate(
             cv.cr,
-            @as(f64, @floatFromInt(x)) + @floor((fs - dw) / 2),
-            @as(f64, @floatFromInt(y)) + @floor((fs - dh) / 2),
+            @as(f64, @floatFromInt(x)) + (fs - dw) / 2,
+            @as(f64, @floatFromInt(y)) + (fs - dh) / 2,
         );
-        c.cairo_scale(cv.cr, dw / iw, dh / ih);
+        c.cairo_scale(cv.cr, scale, scale);
         c.cairo_set_source_surface(cv.cr, icon.surface, 0, 0);
-        if (c.cairo_get_source(cv.cr)) |pat| {
-            c.cairo_pattern_set_filter(pat, c.CAIRO_FILTER_BEST);
-            // Edge pixels continue outwards instead of fading to transparent.
-            c.cairo_pattern_set_extend(pat, c.CAIRO_EXTEND_PAD);
-        }
-        c.cairo_rectangle(cv.cr, 0, 0, iw, ih);
-        c.cairo_fill(cv.cr);
+        c.cairo_paint(cv.cr);
         c.cairo_restore(cv.cr);
     }
 };

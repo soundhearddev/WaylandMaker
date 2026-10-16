@@ -66,7 +66,6 @@ test {
     _ = @import("dock.zig");
     _ = @import("appicon.zig");
     _ = @import("xpm.zig");
-    _ = @import("fileutil.zig");
     _ = @import("fsmenu.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
@@ -75,30 +74,9 @@ test {
     _ = ui_mod;
 }
 
-/// `wmaker-wl --check`: load config.lua like the session would, report what
-/// was wrong with it, and exit with 0 (clean) or 1 (warnings), without
-/// touching Wayland. For dotfile pipelines and a quick look after editing.
-fn checkConfig(io: std.Io, gpa: std.mem.Allocator) !void {
-    var cfg = try config.load(io, gpa);
-    defer cfg.deinit();
-    if (cfg.parse_warnings > 0) {
-        std.debug.print("{s}: {d} problem(s), see the warnings above\n", .{ cfg.config_file, cfg.parse_warnings });
-        std.process.exit(1);
-    }
-    std.debug.print("{s}: OK\n", .{cfg.config_file});
-}
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
-
-    config.runner = action.runFromLua;
-
-    var args = init.minimal.args.iterate();
-    _ = args.skip(); // argv[0]
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--check")) return checkConfig(io, gpa);
-    }
 
     ignoreSigchld();
 
@@ -637,10 +615,22 @@ fn onManage(wm: *WindowManager) void {
 
     // 6b. The Dock tiles of minimized windows: after the actions above, which
     //     are what minimize and restore windows (ui.sync() ran before them).
-    if (wm.ui) |u| u.syncBars();
+    //     First note which windows those were, while a restored window's
+    //     tile still exists; then the Dock follows.
+    if (wm.ui) |u| {
+        u.animCollect();
+        u.syncDock();
+    }
 
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
+
+    // 7b. The minimize / restore animations: a restored window's final
+    //     rectangle is known now. Draws the picture that is due.
+    if (wm.ui) |u| {
+        u.animLaunch();
+        u.animStep();
+    }
 
     // 8. Send management state (propose_dimensions, tiled, fullscreen) and
     //    rendering state (position, borders, visibility) in one pass.
@@ -654,6 +644,8 @@ fn onManage(wm: *WindowManager) void {
         window_mod.applyManage(wm, w);
         window_mod.applyRender(wm, w, w == focus_target);
     }
+    // What the next sequence compares with to see a minimize or a restore.
+    if (wm.ui) |u| u.animRemember();
     // The DockApps are not windows: their own host sends their state.
     dockhost.apply(wm, if (wm.ui) |u| u.dockHost() else .{});
 
@@ -879,9 +871,18 @@ test "onManage syncs the Dock tiles of minimized windows after the actions that 
     const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
     const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
     const body = src[body_start..body_end];
-    const again = std.mem.lastIndexOf(u8, body, "u.syncBars()").?;
+    const again = std.mem.lastIndexOf(u8, body, "u.syncDock()").?;
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runPending(wm)").?);
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
+    // The animations: collected before the Dock changes (a restored window's
+    // tile is its starting point), launched after the layout (its end point),
+    // and remembered after the windows were shown or hidden.
+    const collect = std.mem.indexOf(u8, body, "u.animCollect()").?;
+    const layout_at = std.mem.indexOf(u8, body, "layoutAll(wm);").?;
+    try std.testing.expect(collect < again);
+    try std.testing.expect(layout_at > again);
+    try std.testing.expect(std.mem.indexOf(u8, body, "u.animLaunch()").? > layout_at);
+    try std.testing.expect(std.mem.indexOf(u8, body, "u.animRemember()").? > std.mem.indexOf(u8, body, "applyRender(wm, w, w == focus_target)").?);
 }
 
 test "applyDockState: the saved state does not override what config.lua names itself" {

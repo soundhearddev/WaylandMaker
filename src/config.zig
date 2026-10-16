@@ -28,16 +28,10 @@
 // option or a bad value is a warning in the log (and counted in
 // `parse_warnings`). A bad value is refused and the previous one stays; an
 // error in the script ends the script at that point, what ran before it
-// stays. Every option is readable before the script changes it (`gap = gap + 2`),
-// and only what the script assigns counts as set. Any other global is the
-// script's own variable; a name that is a small edit away from an option
-// (`gapp = 8`) is reported with a suggestion, so typos do not go unnoticed.
-// A script that runs for far too long (endless loop) is aborted.
-//
-// `bind("Super+x", function() ... end)` runs a Lua function. Inside it
-// `run("workspace 2")` (any bind command), `spawn("foot")` and
-// `shell("a | b")` work; they are refused anywhere else. The config's Lua
-// state then stays alive (`Config.script`) until the config is replaced.
+// stays. Every global the script creates is an option: an unknown name
+// (`gapp = 8`) is reported, so typos do not go unnoticed. Helpers should be
+// `local`, or start with `_`, to stay out of that check. A script that runs
+// for far too long (endless loop) is aborted.
 //
 // Key names are resolved through xkbcommon, so they are layout-correct.
 // River matches bindings against the *active* layout; no manual QWERTZ /
@@ -98,6 +92,11 @@ pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 /// Where a submenu opens relative to its parent menu.
 pub const SubmenuAlign = enum { right, left };
+
+/// Window Maker's `IconificationStyle`: what a window does on its way to the
+/// Dock when it is minimized and back when it is restored (anim.zig).
+/// `random` picks one of the three for every window.
+pub const IconifyStyle = enum { zoom, twist, flip, none, random };
 
 /// Longest Pango font description accepted for the `font_*` options.
 pub const max_font_len = 63;
@@ -167,6 +166,7 @@ pub const Config = struct {
     // ---- menus ----------------------------------------------------------
     /// Which side of its parent a submenu opens on first. It flips to the
     /// other side when it would leave the screen.
+    // TODO: parsed and editable in wlprefs, but ui.zig does not read it yet.
     menu_submenu_align: SubmenuAlign = .right,
 
     // ---- windows / focus --------------------------------------------------
@@ -264,6 +264,9 @@ pub const Config = struct {
     /// `toggle_mini_dock` command flips it at run time (a config reload sets
     /// it back to this value).
     mini_dock: bool = true,
+    /// Animation of a window going to its Dock tile and coming back
+    /// (Window Maker's IconificationStyle: zoom, twist, flip, none, random).
+    iconify_style: IconifyStyle = .twist,
     /// Window Maker's "Autocollapse": the Clip folds up when the pointer
     /// leaves it and unfolds when it comes back. (No delay: wmaker-wl has no
     /// timers.)
@@ -284,13 +287,7 @@ pub const Config = struct {
     /// ~/GNUstep/Defaults/WMState. Neither needs to exist.
     enable_dockapps: bool = true,
 
-    /// The Lua state of config.lua, kept alive after the script ran only if
-    /// it bound Lua functions (`bind(combo, function)`): they live in it.
-    script: ?*lua.State = null,
-
     pub fn deinit(cfg: *Config) void {
-        if (cfg.script) |L| lua.close(L);
-        cfg.script = null;
         cfg.arena.deinit();
     }
 };
@@ -427,12 +424,6 @@ const Ctx = struct {
     /// An allocation failed inside a Lua callback (which cannot return an
     /// error); parseWith reports it when the script is done.
     oom: bool = false,
-    /// Registry reference of the table holding the options' values from
-    /// before the script ran (what the script reads for an option it has
-    /// not assigned), see `presetOptions`.
-    preset_ref: i32 = 0,
-    /// How many Lua functions the script bound to keys. Any: the state stays.
-    callbacks: u32 = 0,
 
     fn warn(ctx: *Ctx, comptime fmt: []const u8, args: anytype) void {
         std.log.warn(fmt, args);
@@ -486,8 +477,7 @@ pub fn parseWith(
     theme_only: bool,
 ) std.mem.Allocator.Error!void {
     const L = lua.newState() orelse return error.OutOfMemory;
-    var keep_state = false; // see Config.script
-    defer if (!keep_state) lua.close(L);
+    defer lua.close(L);
     lua.limitInstructions(L, max_script_instructions);
 
     var ctx: Ctx = .{
@@ -518,24 +508,12 @@ pub fn parseWith(
         lua.register(L, "unbind", cUnbind);
         lua.register(L, "include", cInclude);
         lua.register(L, "theme", cTheme);
-        lua.register(L, "run", cRun);
-        lua.register(L, "spawn", cSpawn);
-        lua.register(L, "shell", cShell);
         try snapshotGlobals(&ctx, &baseline);
-        try presetOptions(&ctx);
         runChunk(&ctx, text, origin);
     }
 
     try applyGlobals(&ctx, &baseline);
-    if (!theme_only) try applyChangedTables(&ctx);
     if (ctx.oom) return error.OutOfMemory;
-
-    // Lua functions bound to keys live in this state: the config keeps it.
-    if (ctx.callbacks > 0) {
-        if (cfg.script) |old| lua.close(old);
-        cfg.script = L;
-        keep_state = true;
-    }
 }
 
 /// Chunk name for messages: "@file" shows as "file:LINE:", "=<name>" as is.
@@ -626,101 +604,15 @@ fn copyThemeEntry(ctx: *Ctx, origin: []const u8) void {
 fn cBind(L: *lua.State) i32 {
     const ctx = active orelse return 0;
     const combo = lua.toSlice(L, 1);
-    if (combo != null and lua.typeOf(L, 2) == lua.T_FUNCTION) return bindFunction(ctx, combo.?);
     const command = lua.toSlice(L, 2);
     if (combo == null or command == null) {
-        ctx.warnAt("bind() takes a key and a command: bind(\"Super+q\", \"close\") or bind(\"Super+q\", function() ... end)", .{});
+        ctx.warnAt("bind() takes two strings: bind(\"Super+q\", \"close\")", .{});
         return 0;
     }
     addBind(ctx.a, ctx.binds, combo.?, command.?) catch |err| switch (err) {
         error.OutOfMemory => ctx.oom = true,
         error.Invalid => ctx.warnAt("bad bind: `{s}`, `{s}`", .{ combo.?, command.? }),
     };
-    return 0;
-}
-
-/// `bind(combo, function)`: the function is kept in the registry and the
-/// bind's command text is `lua N` (N = its reference), see `callLua`.
-fn bindFunction(ctx: *Ctx, combo: []const u8) i32 {
-    const L = ctx.L;
-    // Check the key first, so a bad one does not leave a reference behind.
-    var probe: std.ArrayList(Bind) = .empty;
-    var buf: [256]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    addBind(fba.allocator(), &probe, combo, "x") catch {
-        ctx.warnAt("bad bind: `{s}` is not a key combination", .{combo});
-        return 0;
-    };
-    lua.pushValue(L, 2);
-    const ref = lua.makeRef(L);
-    const text = ctx.print("lua {d}", .{ref}) orelse return 0;
-    addBind(ctx.a, ctx.binds, combo, text) catch |err| switch (err) {
-        error.OutOfMemory => ctx.oom = true,
-        error.Invalid => ctx.warnAt("bad bind: `{s}`", .{combo}),
-    };
-    ctx.callbacks += 1;
-    return 0;
-}
-
-/// Where `run`, `spawn` and `shell` send their text (action.runFromLua; set
-/// at start-up, config.zig cannot import action.zig).
-pub var runner: ?*const fn ([]const u8) void = null;
-
-/// Calls from Lua are only allowed while a bound function runs.
-threadlocal var in_callback: bool = false;
-
-/// A function bound with `bind(combo, function)` runs, in the state of the
-/// config that bound it. Errors (and endless loops) are logged, never raised.
-pub fn callLua(cfg: *const Config, ref: i32) void {
-    const L = cfg.script orelse {
-        std.log.warn("a Lua key binding without its script (config reloaded?)", .{});
-        return;
-    };
-    lua.limitInstructions(L, max_callback_instructions);
-    lua.pushRef(L, ref);
-    const was = in_callback;
-    in_callback = true;
-    defer in_callback = was;
-    if (!lua.call(L)) {
-        const msg = lua.toSlice(L, -1) orelse "(error object is not a string)";
-        std.log.warn("config.lua: {s}", .{msg});
-        lua.pop(L, 1);
-    }
-}
-
-/// A key binding's function should be quick: it runs inside the manage
-/// sequence of the compositor.
-const max_callback_instructions = 5_000_000;
-
-fn cRun(L: *lua.State) i32 {
-    return luaCommand(L, "");
-}
-
-fn cSpawn(L: *lua.State) i32 {
-    return luaCommand(L, "spawn ");
-}
-
-fn cShell(L: *lua.State) i32 {
-    return luaCommand(L, "shell ");
-}
-
-/// `run("workspace 2")` / `spawn("foot -e htop")` / `shell("a | b")`.
-fn luaCommand(L: *lua.State, comptime prefix: []const u8) i32 {
-    const text = lua.toSlice(L, 1) orelse {
-        if (active) |ctx| ctx.warnAt("takes one string: run(\"workspace 2\")", .{}) else std.log.warn("config.lua: run/spawn/shell take one string", .{});
-        return 0;
-    };
-    if (!in_callback) {
-        if (active) |ctx| ctx.warnAt("run/spawn/shell only work inside a function bound to a key", .{});
-        return 0;
-    }
-    const r = runner orelse return 0;
-    var buf: [2048]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, prefix ++ "{s}", .{text}) catch {
-        std.log.warn("config.lua: command too long", .{});
-        return 0;
-    };
-    r(line);
     return 0;
 }
 
@@ -857,15 +749,7 @@ fn applyEntry(ctx: *Ctx, baseline: *const StringSet) std.mem.Allocator.Error!voi
         if (ctx.user_script) markExplicit(ctx.cfg, key);
     } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.UnknownKey => {
-            // Any other global is the script's own variable. Only a name
-            // that looks like a misspelt option is reported.
-            if (closestOption(key)) |near| {
-                ctx.warn("{s}: unknown option `{s}` (did you mean `{s}`?)", .{ ctx.origin, key, near });
-            } else if (isRetiredOption(key)) {
-                ctx.warn("{s}: `{s}` is not an option here", .{ ctx.origin, key });
-            }
-        },
+        error.UnknownKey => ctx.warn("{s}: unknown option `{s}`", .{ ctx.origin, key }),
         error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, key, lua.typeName(L, -1) }),
     }
 }
@@ -878,42 +762,6 @@ fn markExplicit(cfg: *Config, key: []const u8) void {
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
 
-// The options, grouped by the kind of value they take. applyOption (Lua
-// value -> Config), pushOption (Config -> Lua value) and the typo check all
-// walk these same lists.
-const pixel_options = .{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" };
-const fraction_options = .{ "default_column_width", "width_step", "floating_size" };
-const colour_options = .{ "border_focused", "border_unfocused", "border_floating" };
-const bool_options = .{
-    "dock_enabled",
-    "dock_on_top",
-    "dock_auto_raise",
-    "dock_single_click",
-    "dock_save_state",
-    "dock_reserve_space",
-    "clip_enabled",
-    "mini_dock",
-    "clip_on_top",
-    "clip_collapsed",
-    "clip_auto_collapse",
-    "clip_auto_raise",
-    "focus_new_windows",
-    "workspace_wrap",
-    "clip_scroll_workspaces",
-    "focus_follows_mouse",
-    "enable_wmaker_compat",
-    "enable_autostart",
-    "enable_dockapps",
-};
-const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align" };
-const font_options = .{ "font_menu_title", "font_menu", "font_dock" };
-const command_options = .{ "terminal", "launcher", "browser" };
-/// Options with their own kind of value.
-const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod" };
-
-/// Every option name, for the typo check.
-const all_options = pixel_options ++ fraction_options ++ colour_options ++ bool_options ++ enum_options ++ font_options ++ command_options ++ special_options;
-
 /// Set the option `key` to the Lua value on top of the stack. Nothing is
 /// changed unless the value is valid.
 fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
@@ -922,7 +770,7 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
     const cfg = ctx.cfg;
     const eql = std.mem.eql;
 
-    inline for (pixel_options) |name| {
+    inline for (.{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" }) |name| {
         if (eql(u8, key, name)) {
             const v = lua.toInteger(L, -1) orelse return error.Invalid;
             if (v < 0 or v > max_pixels) return error.Invalid;
@@ -938,7 +786,7 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         return;
     }
 
-    inline for (fraction_options) |name| {
+    inline for (.{ "default_column_width", "width_step", "floating_size" }) |name| {
         if (eql(u8, key, name)) {
             const v = lua.toNumber(L, -1) orelse return error.Invalid;
             if (!(v > 0 and v <= 1)) return error.Invalid;
@@ -947,21 +795,41 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         }
     }
 
-    inline for (colour_options) |name| {
+    inline for (.{ "border_focused", "border_unfocused", "border_floating" }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = colourValue(L) orelse return error.Invalid;
             return;
         }
     }
 
-    inline for (bool_options) |name| {
+    inline for (.{
+        "dock_enabled",
+        "dock_on_top",
+        "dock_auto_raise",
+        "dock_single_click",
+        "dock_save_state",
+        "dock_reserve_space",
+        "clip_enabled",
+        "mini_dock",
+        "clip_on_top",
+        "clip_collapsed",
+        "clip_auto_collapse",
+        "clip_auto_raise",
+        "focus_new_windows",
+        "workspace_wrap",
+        "clip_scroll_workspaces",
+        "focus_follows_mouse",
+        "enable_wmaker_compat",
+        "enable_autostart",
+        "enable_dockapps",
+    }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = lua.toBool(L, -1) orelse return error.Invalid;
             return;
         }
     }
 
-    inline for (enum_options) |name| {
+    inline for (.{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align", "iconify_style" }) |name| {
         if (eql(u8, key, name)) {
             const s = lua.toSlice(L, -1) orelse return error.Invalid;
             @field(cfg, name) = std.meta.stringToEnum(@TypeOf(@field(cfg, name)), s) orelse return error.Invalid;
@@ -969,7 +837,7 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         }
     }
 
-    inline for (font_options) |name| {
+    inline for (.{ "font_menu_title", "font_menu", "font_dock" }) |name| {
         if (eql(u8, key, name)) {
             const s = lua.toSlice(L, -1) orelse return error.Invalid;
             @field(cfg, name) = try parseFont(a, s);
@@ -977,7 +845,7 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         }
     }
 
-    inline for (command_options) |name| {
+    inline for (.{ "terminal", "launcher", "browser" }) |name| {
         if (eql(u8, key, name)) {
             @field(cfg, name) = try commandValue(ctx);
             return;
@@ -1053,169 +921,6 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
     }
 
     return error.UnknownKey;
-}
-
-// ---- reading options from the script ----------------------------------------
-
-/// Before the script runs, every option is readable in it with the value it
-/// has right now (the built-in default, or what an earlier file set), so a
-/// script can build on it: `gap = gap + 2`, `if border_width > 2 then ... end`,
-/// `table.insert(width_presets, 0.9)`. The values sit in a table that the
-/// globals fall back to, so they are NOT globals of the script: only what the
-/// script assigns counts as set (and as written down, see `Explicit`).
-fn presetOptions(ctx: *Ctx) std.mem.Allocator.Error!void {
-    const L = ctx.L;
-    lua.newTable(L); //                              [preset]
-    inline for (all_options) |name| {
-        lua.pushString(L, name);
-        if (try pushOption(ctx, name)) {
-            lua.rawSet(L, -3); //                    preset[name] = value
-        } else lua.pop(L, 1); //                     the name
-    }
-    lua.pushValue(L, -1);
-    ctx.preset_ref = lua.makeRef(L); //              [preset]
-    lua.setGlobalFallback(L); //                     []
-}
-
-/// A table option the script changed in place (`table.insert(width_presets,
-/// 0.9)`) was never assigned, so it is not a global: take it from the preset
-/// table, where it was changed. Applying an unchanged one is a no-op.
-fn applyChangedTables(ctx: *Ctx) std.mem.Allocator.Error!void {
-    const L = ctx.L;
-    lua.pushRef(L, ctx.preset_ref); //               [preset]
-    inline for (.{ "width_presets", "workspace_names", "terminal", "launcher", "browser" }) |name| {
-        lua.pushGlobals(L);
-        lua.rawGetString(L, -1, name); //            [preset, G, value]
-        const assigned = lua.typeOf(L, -1) != lua.T_NIL;
-        lua.pop(L, 2); //                            [preset]
-        if (!assigned) {
-            lua.rawGetString(L, -1, name); //        [preset, value]
-            applyOption(ctx, name) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.UnknownKey => {},
-                error.Invalid => ctx.warn("{s}: bad value for `{s}` (got a {s})", .{ ctx.origin, name, lua.typeName(L, -1) }),
-            };
-            lua.pop(L, 1); //                        [preset]
-        }
-    }
-    lua.pop(L, 1);
-}
-
-/// Push the current value of the option `name`, in the form the script
-/// would write it. false: nothing was pushed.
-fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool {
-    const L = ctx.L;
-    const cfg = ctx.cfg;
-
-    if (comptime inList(pixel_options, name)) {
-        lua.pushInteger(L, @field(cfg, name));
-    } else if (comptime std.mem.eql(u8, name, "dock_size")) {
-        lua.pushInteger(L, cfg.dock_size);
-    } else if (comptime std.mem.eql(u8, name, "workspace_count")) {
-        lua.pushInteger(L, cfg.workspace_count);
-    } else if (comptime inList(fraction_options, name)) {
-        lua.pushNumber(L, @field(cfg, name));
-    } else if (comptime inList(colour_options, name)) {
-        var buf: [16]u8 = undefined;
-        lua.pushString(L, std.fmt.bufPrint(&buf, "#{x:0>6}", .{@field(cfg, name)}) catch return false);
-    } else if (comptime inList(bool_options, name)) {
-        lua.pushBool(L, @field(cfg, name));
-    } else if (comptime inList(enum_options, name)) {
-        lua.pushString(L, @tagName(@field(cfg, name)));
-    } else if (comptime inList(font_options, name)) {
-        lua.pushString(L, @field(cfg, name));
-    } else if (comptime inList(command_options, name)) {
-        pushStrings(L, @field(cfg, name), 0);
-    } else if (comptime std.mem.eql(u8, name, "workspace_names")) {
-        pushStrings(L, cfg.workspace_names, 0);
-    } else if (comptime std.mem.eql(u8, name, "width_presets")) {
-        lua.newTable(L);
-        for (cfg.width_presets, 1..) |w, i| {
-            lua.pushNumber(L, w);
-            lua.rawSetI(L, -2, @intCast(i));
-        }
-    } else if (comptime std.mem.eql(u8, name, "bind_layout")) {
-        if (cfg.bind_layout) |n| lua.pushInteger(L, n) else lua.pushString(L, "current");
-    } else if (comptime std.mem.eql(u8, name, "mouse_mod")) {
-        var buf: [48]u8 = undefined;
-        lua.pushString(L, modsText(&buf, cfg.mouse_mod));
-    } else return false;
-    return true;
-}
-
-fn pushStrings(L: *lua.State, items: []const []const u8, _: u8) void {
-    lua.newTable(L);
-    for (items, 1..) |item, i| {
-        lua.pushString(L, item);
-        lua.rawSetI(L, -2, @intCast(i));
-    }
-}
-
-fn inList(comptime list: anytype, comptime name: []const u8) bool {
-    inline for (list) |n| {
-        if (comptime std.mem.eql(u8, n, name)) return true;
-    }
-    return false;
-}
-
-/// "Super+Shift" for the modifiers, the form `parseMods` reads back.
-fn modsText(buf: []u8, mods: Modifiers) []const u8 {
-    var w: std.Io.Writer = .fixed(buf);
-    const parts = .{ .{ "mod4", "Super" }, .{ "shift", "Shift" }, .{ "ctrl", "Ctrl" }, .{ "mod1", "Alt" }, .{ "mod3", "Mod3" }, .{ "mod5", "Mod5" } };
-    var first = true;
-    inline for (parts) |p| {
-        if (@field(mods, p[0])) {
-            if (!first) w.writeByte('+') catch {};
-            w.writeAll(p[1]) catch {};
-            first = false;
-        }
-    }
-    return w.buffered();
-}
-
-// ---- own variables ----------------------------------------------------------
-
-/// Any global that is not an option is the script's own variable, but one
-/// that is a small edit away from an option name is most likely a typo
-/// (`gapp`, `bordr_width`) and is reported with a suggestion.
-fn closestOption(key: []const u8) ?[]const u8 {
-    const limit: usize = if (key.len <= 4) 1 else 2;
-    var best: ?[]const u8 = null;
-    var best_d: usize = limit + 1;
-    inline for (all_options) |name| {
-        const d = editDistance(key, name);
-        if (d < best_d) {
-            best_d = d;
-            best = name;
-        }
-    }
-    return best;
-}
-
-/// Names people expect to be options but that are not (the Dock level lives
-/// in the Dock menu and the saved state). Not left as silent own variables.
-fn isRetiredOption(key: []const u8) bool {
-    inline for (.{"dock_level"}) |n| {
-        if (std.mem.eql(u8, key, n)) return true;
-    }
-    return false;
-}
-
-/// Levenshtein distance; 99 when either string is too long to bother.
-fn editDistance(a: []const u8, b: []const u8) usize {
-    if (a.len > 40 or b.len > 40) return 99;
-    var prev: [41]usize = undefined;
-    var cur: [41]usize = undefined;
-    for (0..b.len + 1) |j| prev[j] = j;
-    for (a, 1..) |ca, i| {
-        cur[0] = i;
-        for (b, 1..) |cb, j| {
-            const sub = prev[j - 1] + @intFromBool(ca != cb);
-            cur[j] = @min(@min(prev[j] + 1, cur[j - 1] + 1), sub);
-        }
-        prev = cur;
-    }
-    return prev[b.len];
 }
 
 /// A colour: `"#d8a657"`, `"d8a657"`, `"0xd8a657"` or the number `0xd8a657`.
@@ -1708,102 +1413,7 @@ test "a syntax error is one warning and changes nothing" {
     try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
 }
 
-var test_ran: [16][64]u8 = undefined;
-var test_ran_len: [16]usize = .{0} ** 16;
-var test_ran_n: usize = 0;
-
-fn testRunner(text: []const u8) void {
-    if (test_ran_n >= test_ran.len) return;
-    const n = @min(text.len, 64);
-    @memcpy(test_ran[test_ran_n][0..n], text[0..n]);
-    test_ran_len[test_ran_n] = n;
-    test_ran_n += 1;
-}
-
-fn testRan(i: usize) []const u8 {
-    return test_ran[i][0..test_ran_len[i]];
-}
-
-test "bind() takes a Lua function; it runs later with run/spawn/shell" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-
-    runner = testRunner;
-    defer runner = null;
-    test_ran_n = 0;
-
-    try parse(arena.allocator(),
-        \\local n = 0
-        \\bind("Super+x", function()
-        \\  n = n + 1
-        \\  run("workspace " .. n)
-        \\  spawn("foot -e htop")
-        \\  shell("echo hi | cat")
-        \\end)
-        \\bind("Super+y", "close")
-        \\bind("Super+z", function() error("boom") end)
-        \\run("close")   -- not inside a bound function: refused
-    , &cfg, &binds, "<test>");
-    // One warning: the run() at the top level. The function was kept.
-    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
-    try std.testing.expect(cfg.script != null);
-    try std.testing.expectEqual(@as(usize, 3), binds.items.len);
-    try std.testing.expect(std.mem.startsWith(u8, binds.items[0].command, "lua "));
-    try std.testing.expectEqualStrings("close", binds.items[1].command);
-
-    const ref = try std.fmt.parseInt(i32, binds.items[0].command[4..], 10);
-    callLua(&cfg, ref);
-    callLua(&cfg, ref); // keeps its upvalue: n is 2 now
-    try std.testing.expectEqual(@as(usize, 6), test_ran_n);
-    try std.testing.expectEqualStrings("workspace 1", testRan(0));
-    try std.testing.expectEqualStrings("spawn foot -e htop", testRan(1));
-    try std.testing.expectEqualStrings("shell echo hi | cat", testRan(2));
-    try std.testing.expectEqualStrings("workspace 2", testRan(3));
-
-    // An error in the function is logged, not raised, and the state survives.
-    const bad = try std.fmt.parseInt(i32, binds.items[2].command[4..], 10);
-    callLua(&cfg, bad);
-    callLua(&cfg, ref);
-    try std.testing.expectEqual(@as(usize, 9), test_ran_n);
-    try std.testing.expectEqualStrings("workspace 3", testRan(6));
-}
-
-test "a script without Lua binds does not keep its state" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    try parseText(arena.allocator(), &cfg, "bind(\"Super+x\", \"close\")\n");
-    try std.testing.expect(cfg.script == null);
-}
-
-test "an endless loop in a bound function is stopped" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "bind(\"Super+x\", function() while true do end end)\n", &cfg, &binds, "<test>");
-    const ref = try std.fmt.parseInt(i32, binds.items[0].command[4..], 10);
-    callLua(&cfg, ref); // returns: the instruction limit raised an error
-}
-
-test "bind() with a bad key and a function leaves nothing behind" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    try parse(arena.allocator(), "bind(\"Hyper+\", function() end)\n", &cfg, &binds, "<test>");
-    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
-    try std.testing.expectEqual(@as(usize, 0), binds.items.len);
-    try std.testing.expect(cfg.script == null);
-}
-
-test "misspelt options are reported, own variables and helpers are not" {
+test "unknown options are reported (typos), helpers are not" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
@@ -1811,72 +1421,11 @@ test "misspelt options are reported, own variables and helpers are not" {
     try parseText(arena.allocator(), &cfg,
         \\local x = 5       -- local: not an option
         \\_helper = 1       -- starts with _: not an option
-        \\gapp = 8          -- a typo of `gap`
-        \\my_colour = "#abcdef"   -- an own variable
-        \\somewhere_else = "top"  -- not close to any option: an own variable too
-        \\function my_helper() return 1 end
+        \\gapp = 8          -- a typo
+        \\dock_level = "top"
     );
-    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
     try std.testing.expectEqual(@as(i32, 8), cfg.gap);
-}
-
-test "a script can read the options and build on them" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    try parseText(arena.allocator(), &cfg,
-        \\gap = gap + 2                         -- 8 -> 10
-        \\if border_focused == "#d8a657" or true then border_width = border_width + 1 end
-        \\table.insert(width_presets, 0.25)     -- changed in place, never assigned
-        \\local n = 0
-        \\for _ in pairs(workspace_names) do n = n + 1 end
-        \\terminal = terminal[1] .. " --class x"
-        \\mouse_mod = mouse_mod .. "+Shift"
-        \\own = new_window .. "!"
-        \\dock_edge = (dock_edge == "right") and "left" or "right"
-    );
-    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
-    try std.testing.expectEqual(@as(i32, 10), cfg.gap);
-    try std.testing.expectEqual(@as(i32, 3), cfg.border_width);
-    try std.testing.expectEqual(@as(usize, 5), cfg.width_presets.len);
-    try std.testing.expectEqual(@as(f64, 0.25), cfg.width_presets[4]);
-    try std.testing.expectEqual(@as(usize, 3), cfg.terminal.len); // a string is split like a command line
-    try std.testing.expectEqualStrings("x", cfg.terminal[2]);
-    try std.testing.expect(cfg.mouse_mod.mod4 and cfg.mouse_mod.shift);
-    try std.testing.expectEqual(DockEdge.left, cfg.dock_edge);
-}
-
-test "only an option the script assigns counts as written down" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    var binds: std.ArrayList(Bind) = .empty;
-    // Reading dock_edge must not make it explicit; assigning the SAME value must.
-    try parse(arena.allocator(), "local e = dock_edge\nclip_corner = clip_corner\n", &cfg, &binds, "config.lua");
-    try std.testing.expect(!cfg.explicit.dock_edge);
-    try std.testing.expect(cfg.explicit.clip_corner);
-}
-
-test "every option reads back what applyOption accepts" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    // Assign every option its own current value: nothing may be refused
-    // (that would mean pushOption and applyOption disagree about the form).
-    comptime var src: []const u8 = "";
-    inline for (all_options) |name| src = src ++ name ++ " = " ++ name ++ "\n";
-    try parseText(arena.allocator(), &cfg, src);
-    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
-}
-
-test "typo distance" {
-    try std.testing.expectEqualStrings("gap", closestOption("gapp").?);
-    try std.testing.expectEqualStrings("border_width", closestOption("bordr_width").?);
-    try std.testing.expect(closestOption("my_colour") == null);
-    try std.testing.expect(closestOption("x") == null);
 }
 
 test "values of the wrong type are refused, not converted" {
@@ -2197,7 +1746,7 @@ test "Dock options: the new switches parse, defaults" {
     try std.testing.expect(cfg.clip_auto_raise);
 
     // `dock_level` is not a config key (the Dock menu and the saved state
-    // carry the level), so it is reported, not taken for an own variable.
+    // carry the level), so it is reported, not silently half-applied.
     const before = cfg.parse_warnings;
     try parseText(arena.allocator(), &cfg, "dock_level = \"top\"\n");
     try std.testing.expectEqual(before + 1, cfg.parse_warnings);
@@ -2229,4 +1778,26 @@ test "the built-in default config marks no option explicit" {
     var binds: std.ArrayList(Bind) = .empty;
     try parse(arena.allocator(), default_config_text, &cfg, &binds, "<built-in>");
     try std.testing.expectEqual(Explicit{}, cfg.explicit);
+}
+
+test "iconify_style: Window Maker's names, twist by default, anything else is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    {
+        var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+        defer cfg.deinit();
+        try std.testing.expectEqual(IconifyStyle.twist, cfg.iconify_style);
+    }
+    inline for (.{ "zoom", "twist", "flip", "none", "random" }) |name| {
+        var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+        defer cfg.deinit();
+        try parseText(arena.allocator(), &cfg, "iconify_style = \"" ++ name ++ "\"");
+        try std.testing.expectEqual(std.meta.stringToEnum(IconifyStyle, name).?, cfg.iconify_style);
+        try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    }
+    var bad: Config = .{ .arena = .init(std.testing.allocator) };
+    defer bad.deinit();
+    try parseText(arena.allocator(), &bad, "iconify_style = \"spin\"");
+    try std.testing.expectEqual(IconifyStyle.twist, bad.iconify_style);
+    try std.testing.expectEqual(@as(u32, 1), bad.parse_warnings);
 }

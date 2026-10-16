@@ -434,7 +434,10 @@ pub fn applyManage(wm: *WindowManager, win: *Window) void {
 pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
     const cfg = &wm.cfg;
 
-    if (!isVisible(win)) {
+    // A window that is coming back from the Dock stays hidden until the
+    // animation of its frame is over (Window Maker maps it afterwards).
+    const held = if (wm.ui) |u| u.animHolding(win) else false;
+    if (held or !isVisible(win)) {
         if (win.visible != false) {
             win.obj.hide();
             win.visible = false;

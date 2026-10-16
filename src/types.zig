@@ -147,6 +147,12 @@ pub const Window = struct {
     min_floating: bool = false,
     /// Counts up: the highest is the one `restore` brings back first.
     min_order: u64 = 0,
+    /// What the last manage sequence ended with, so the next one can see
+    /// that the window was minimized or restored (ui.zig `animCollect`):
+    /// `minimized` as it was, and the window's frame on screen (w == 0:
+    /// it was not shown).
+    anim_min: bool = false,
+    anim_rect: Rect = .{},
 
     /// Content rect (borders excluded) currently *wanted* on screen in
     /// global coordinates. Computed by layout every pass.
@@ -490,9 +496,6 @@ pub const Command = union(enum) {
     /// expansion, backgrounding with `&`, or any other shell syntax --
     /// effectively "run any program" from a key combo.
     shell: []const u8,
-    /// A Lua function of config.lua, bound with `bind("Super+x", function() ... end)`.
-    /// The number is its reference in the config's Lua state, see config.callLua.
-    lua: i32,
     close,
     exit,
     toggle_floating,

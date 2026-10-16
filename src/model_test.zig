@@ -1150,11 +1150,9 @@ test "everything wlprefs writes is read back by the compositor with the same val
 
 test "wlprefs' action list is exactly what the compositor knows" {
     const actions = @import("wlprefs_actions");
-    // Every command of types.Command (but `none`, and `lua`, which config.zig
-    // writes for a `bind(combo, function)` and is no choice in a list) is
-    // known to wlprefs ...
+    // Every command of types.Command (but `none`) is known to wlprefs ...
     inline for (@typeInfo(types.Command).@"union".fields) |f| {
-        if (!std.mem.eql(u8, f.name, "none") and !std.mem.eql(u8, f.name, "lua")) {
+        if (!std.mem.eql(u8, f.name, "none")) {
             if (!actions.known(f.name)) {
                 std.debug.print("wlprefs does not know the command `{s}`; add it to wlprefs/src/actions.zig\n", .{f.name});
                 return error.ActionMissingInWlprefs;

@@ -157,7 +157,9 @@ pub const DockApp = struct {
     ///   4. an argument that is itself a self-declared app_id (a terminal
     ///      started with `--class dockapp:htop`) -- then ONLY that counts,
     ///      or every window of that terminal would look like this entry;
-    ///   5. the program's file name (`/usr/bin/firefox` -> `firefox`).
+    ///   5. the program's file name (`/usr/bin/firefox` -> `firefox`);
+    ///   6. the last part of a reverse-DNS app_id (`org.mozilla.firefox`) is
+    ///      that file name or a part of the name.
     pub fn matches(app: DockApp, window_app_id: []const u8) bool {
         const eql = std.ascii.eqlIgnoreCase;
         if (window_app_id.len == 0) return false;
@@ -179,8 +181,24 @@ pub const DockApp = struct {
             forced = true;
             if (eql(v, window_app_id)) return true;
         }
-        if (forced or app.command.len == 0) return false;
-        return eql(std.fs.path.basename(app.command[0]), window_app_id);
+        if (forced) return false;
+        if (app.command.len > 0 and eql(std.fs.path.basename(app.command[0]), window_app_id)) return true;
+
+        // A reverse-DNS app_id ("org.mozilla.firefox", "org.gnome.Nautilus"),
+        // which is what most Wayland programs use: its last part is the
+        // program's name. Without this a docked Firefox looks "not running"
+        // (three dots in the tile's corner) while it is.
+        if (std.mem.lastIndexOfScalar(u8, window_app_id, '.')) |dot| {
+            const tail = window_app_id[dot + 1 ..];
+            if (tail.len > 0) {
+                if (app.command.len > 0 and eql(std.fs.path.basename(app.command[0]), tail)) return true;
+                var np = std.mem.splitScalar(u8, app.name, '.');
+                while (np.next()) |part| {
+                    if (part.len > 0 and eql(part, tail)) return true;
+                }
+            }
+        }
+        return false;
     }
 };
 
@@ -745,6 +763,16 @@ test "matches: explicit app_id, dockapp name, instance.Class, program name" {
     try std.testing.expect(path.matches("Firefox"));
     try std.testing.expect(!path.matches(""));
 
+    // Wayland programs mostly use a reverse-DNS app_id: its last part counts.
+    try std.testing.expect(path.matches("org.mozilla.firefox"));
+    try std.testing.expect(!path.matches("org.mozilla.thunderbird"));
+    try std.testing.expect(!path.matches("firefox.")); // no empty last part
+    const nautilus: DockApp = .{ .name = "Nautilus", .command = &.{"nautilus"} };
+    try std.testing.expect(nautilus.matches("org.gnome.Nautilus"));
+    try std.testing.expect(!nautilus.matches("org.gnome.gedit"));
+    const named: DockApp = .{ .name = "gedit.Gedit", .command = &.{} };
+    try std.testing.expect(named.matches("org.gnome.gedit"));
+
     // A terminal started with --class dockapp:htop must not make every
     // window of that terminal look like "running htop".
     const htop: DockApp = .{
@@ -754,6 +782,7 @@ test "matches: explicit app_id, dockapp name, instance.Class, program name" {
     try std.testing.expect(htop.matches("dockapp:htop"));
     try std.testing.expect(!htop.matches("Alacritty"));
     try std.testing.expect(!htop.matches("alacritty"));
+    try std.testing.expect(!htop.matches("org.alacritty.Alacritty")); // still only the forced one
 
     const flag: DockApp = .{
         .name = "t",

@@ -58,6 +58,7 @@ const dockapp = @import("dockapp.zig");
 const workspace = @import("workspace.zig");
 const config_mod = @import("config.zig");
 const wm_files = @import("wm_files.zig");
+const anim = @import("anim.zig");
 
 const WindowManager = types.WindowManager;
 const Allocator = std.mem.Allocator;
@@ -390,6 +391,56 @@ const double_click_ms: u32 = 400;
 /// ever shows up.
 const launch_timeout_ms: u32 = 8000;
 
+/// Most windows that fly to or from the Dock at the same moment.
+const anim_max: usize = 8;
+/// The surface an animation is drawn on is never bigger than this (px).
+const anim_max_px: i32 = 8192;
+
+/// A window that was minimized or restored: found by `animCollect`, turned
+/// into a running animation by `animLaunch`.
+const AnimReq = struct {
+    win: *types.Window,
+    restore: bool,
+    /// Where it starts (the window's frame, or the Dock tile).
+    from: anim.Box,
+};
+
+const ActiveAnim = struct {
+    plan: anim.Plan,
+    start_ms: u32,
+    /// The picture that is on the surface now; maxInt = none yet.
+    drawn: u32 = std.math.maxInt(u32),
+    /// A window that comes back stays hidden until its animation is over
+    /// (Window Maker maps it afterwards).
+    hold: ?*types.Window = null,
+};
+
+/// Which picture is due `now`.
+fn animIndex(a: *const ActiveAnim, now: u32) u32 {
+    return (now -% a.start_ms) / a.plan.delay_ms;
+}
+
+/// The animation of a window's frame for the configured style; null for none.
+fn animStyle(style: config_mod.IconifyStyle, now: u32) ?anim.Style {
+    return switch (style) {
+        .zoom => .zoom,
+        .twist => .twist,
+        .flip => .flip,
+        .none => null,
+        .random => switch (now % 3) {
+            0 => .zoom,
+            1 => .twist,
+            else => .flip,
+        },
+    };
+}
+
+/// A window's frame on the screen: its content and the border.
+fn frameBox(wm: *const types.WindowManager, w: *const types.Window) anim.Box {
+    const bw: i32 = if (w.mode == .fullscreen) 0 else w.borderWidth(&wm.cfg);
+    return .{ .x = w.target.x - bw, .y = w.target.y - bw, .w = w.target.w + 2 * bw, .h = w.target.h + 2 * bw };
+}
+
 /// A tile that was started this recently ignores a second start from a
 /// plain click (a double click in single-click mode, an impatient second
 /// click): without this the program would run twice. Window Maker ignores
@@ -529,6 +580,17 @@ pub const Ui = struct {
     /// Mouse wheel movement not yet turned into a workspace step.
     scroll_acc: f64 = 0,
 
+    // ---- minimize / restore animation (anim.zig) ---------------------------------
+    anim_req: [anim_max]AnimReq = undefined,
+    anim_req_n: usize = 0,
+    anims: [anim_max]ActiveAnim = undefined,
+    anim_n: usize = 0,
+    /// The transparent surface the frames are drawn on, and the global box
+    /// it covers. It exists only while something flies.
+    anim_panel: ?*Panel = null,
+    anim_box: anim.Box = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    anim_redraw: bool = false,
+
     // ---- menu state -------------------------------------------------------
     arena: std.heap.ArenaAllocator,
     levels: std.ArrayList(Level) = .empty,
@@ -574,6 +636,7 @@ pub const Ui = struct {
         for (ui.desktops.items) |d| d.panel.destroy();
         ui.desktops.deinit(ui.gpa());
         for ([_]*Bar{ &ui.dock, &ui.clip }) |b| if (b.panel) |p| p.destroy();
+        if (ui.anim_panel) |p| p.destroy();
         if (ui.model) |*m| m.deinit();
         ui.graveyard.deinit(ui.gpa());
         ui.levels.deinit(ui.gpa());
@@ -874,6 +937,12 @@ pub const Ui = struct {
         if (ui.model) |*m| {
             if (m.nextLaunchExpiry(now, launch_timeout_ms)) |ms| sooner(&best, now, now +% ms);
         }
+        if (ui.animWaitMs(now)) |ms| {
+            // At least 1 ms: a picture that cannot be drawn yet (river still
+            // holds both buffers) must not make the loop spin.
+            const wait = @max(ms, 1);
+            if (best == null or wait < best.?) best = wait;
+        }
         const left = best orelse return -1;
         return @intCast(@min(left, 60_000));
     }
@@ -898,6 +967,10 @@ pub const Ui = struct {
                 ui.markBarsDirty();
                 ui.wm.obj.manageDirty();
             }
+        }
+        // The next picture of an animation is due: a manage sequence draws it.
+        if (ui.animWaitMs(now)) |ms| {
+            if (ms == 0) ui.wm.obj.manageDirty();
         }
     }
 
@@ -1450,22 +1523,12 @@ pub const Ui = struct {
         cl.hover = null;
         cl.dirty = true;
         cl.output = pl.output;
-        const left_first = ui.wm.cfg.menu_submenu_align == .left;
-        const right_x = pl.x + pl.w - 2;
-        const left_x = pl.x - cl.w + 2;
-        cl.x = if (left_first) left_x else right_x;
+        cl.x = pl.x + pl.w - 2;
         cl.y = pl.y + title_h + @as(i32, @intCast(row -| pl.scroll)) * item_h - title_h;
         if (cl.output) |out| {
             fitToOutput(cl, out);
-            // `menu_submenu_align` is the side tried first; flip to the other
-            // one when the submenu would leave the output on that side.
-            if (left_first) {
-                cl.x = left_x;
-                if (cl.x < out.rect.x) cl.x = right_x;
-            } else {
-                cl.x = right_x;
-                if (cl.x + cl.w > out.rect.right()) cl.x = left_x;
-            }
+            // Flip to the left when it would leave the output.
+            if (cl.x + cl.w > out.rect.right()) cl.x = pl.x - cl.w + 2;
             clampToOutput(cl, out);
         }
         cl.open = true;
@@ -1518,20 +1581,20 @@ pub const Ui = struct {
         wm.obj.manageDirty();
     }
 
-    /// Runs an `EXEC` entry. The line is split exactly like a key binding's
-    /// command (`config.parseCommand`: blanks separate words, "double quotes"
-    /// group one). Use `SHEXEC` for anything that needs a real shell.
+    /// Runs an `EXEC` entry: split at blanks only, so quotes are NOT honoured
+    /// (unlike `config.parseCommand` for key bindings). Use `SHEXEC` for
+    /// anything that needs quoting.
+    // TODO: use `config.parseCommand` here too, so `EXEC` and `bind = ..., exec`
+    // treat quotes the same way.
     fn spawnWords(ui: *Ui, cmd: []const u8) void {
-        var tmp: std.heap.ArenaAllocator = .init(ui.gpa());
-        defer tmp.deinit();
-        const argv = config_mod.parseCommand(tmp.allocator(), cmd) catch |err| {
-            switch (err) {
-                error.OutOfMemory => std.log.err("out of memory while starting `{s}`", .{cmd}),
-                else => std.log.warn("EXEC `{s}` has no command to run", .{cmd}),
-            }
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(ui.gpa());
+        var it = std.mem.tokenizeAny(u8, cmd, " \t");
+        while (it.next()) |w| argv.append(ui.gpa(), w) catch {
+            std.log.err("out of memory while starting `{s}`", .{cmd});
             return;
         };
-        proc.spawn(ui.wm, argv);
+        proc.spawn(ui.wm, argv.items);
     }
 
     // ========================================================================
@@ -1832,6 +1895,9 @@ pub const Ui = struct {
         for (ui.drawer_bars.items) |b| {
             if (ui.raisedBar(b)) if (b.panel) |p| p.node.placeTop();
         }
+        // The flying frames are above the Dock (they end on its tile) and
+        // below the menus.
+        if (ui.anim_panel) |p| p.node.placeTop();
     }
 
     /// Menus are above everything else.
@@ -2062,10 +2128,18 @@ pub const Ui = struct {
         ui.clearDrawerBars();
     }
 
-    /// Public: main.onManage() runs it a second time after the actions, so
-    /// the Dock tile of a window minimized by a key binding (or the loss of
-    /// one that was restored) shows up in the same sequence.
-    pub fn syncBars(ui: *Ui) void {
+    /// main.onManage() runs this a second time after the actions, so the Dock
+    /// tile of a window minimized by a key binding (or the loss of one that
+    /// was restored) shows up in the same sequence. The surface that a
+    /// changed Dock replaced is destroyed right away, like sync() does at
+    /// its end: left in the graveyard it would stay on the screen with its
+    /// old tiles until the next input event.
+    pub fn syncDock(ui: *Ui) void {
+        ui.syncBars();
+        ui.reapGraveyard();
+    }
+
+    fn syncBars(ui: *Ui) void {
         const wm = ui.wm;
         if (ui.model_gen != wm.dock_gen) ui.rebuildModel();
 
@@ -2164,6 +2238,224 @@ pub const Ui = struct {
         ui.presentBar(&ui.dock, m);
         ui.presentBar(&ui.clip, m);
         for (ui.drawer_bars.items) |b| ui.presentBar(b, m);
+    }
+
+    // ---- minimize / restore animation ---------------------------------------------
+    //
+    // Window Maker's miniaturize animation (anim.zig): the window's frame
+    // flies to its Dock tile when it is minimized, and from the tile back to
+    // the window when it is restored. How the three steps fit together:
+    //
+    //   * animRemember() ends every manage sequence by writing down which
+    //     windows are minimized and where the others are on the screen;
+    //   * animCollect() starts the next one by comparing: a window that is
+    //     minimized now but was not is a minimize, the other way round a
+    //     restore. This finds every way there is (key, menu, Dock click,
+    //     hide_others, ...) without any of them knowing about animations;
+    //   * animLaunch() runs after the layout, when the final rectangle of a
+    //     restored window is known, and animStep() draws the pictures.
+
+    /// The Dock tile at grid cell (cx, cy) as a global box; null if the Dock
+    /// has no surface.
+    fn dockCellBox(ui: *const Ui, cx: i32, cy: i32) ?anim.Box {
+        const b = &ui.dock;
+        if (b.rect.w <= 0 or b.rect.h <= 0) return null;
+        const p = dock_mod.cellPx(b.cells, cx, cy);
+        return .{ .x = b.rect.x + p[0], .y = b.rect.y + p[1], .w = dock_mod.tile, .h = dock_mod.tile };
+    }
+
+    /// Where the tile of the minimized window `order` is, if it has one.
+    fn miniTileBox(ui: *Ui, order: u64) ?anim.Box {
+        const m = if (ui.model) |*mm| mm else return null;
+        const idx = m.miniSlotFor(order) orelse return null;
+        const s = m.slot(idx) orelse return null;
+        return ui.dockCellBox(s.gi.xindex, s.gi.yindex);
+    }
+
+    /// The end of a manage sequence: what animCollect compares with.
+    pub fn animRemember(ui: *Ui) void {
+        var it = ui.wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
+            w.anim_min = w.minimized;
+            const on_screen = w.visible == true and !w.minimized and !w.closed and
+                w.workspace != null and w.target.w > 0 and w.target.h > 0;
+            const b = frameBox(ui.wm, w);
+            w.anim_rect = if (on_screen) .{ .x = b.x, .y = b.y, .w = b.w, .h = b.h } else .{};
+        }
+    }
+
+    /// Which windows were minimized or restored since the last sequence.
+    /// Must run BEFORE the Dock is synced: the tile of a restored window is
+    /// where the animation starts, and the sync takes it away.
+    pub fn animCollect(ui: *Ui) void {
+        ui.anim_req_n = 0;
+        var it = ui.wm.windows.first();
+        while (it) |w| : (it = types.nextWindow(w, ui.wm)) {
+            if (w.closed or w.anim_min == w.minimized) continue;
+            if (ui.anim_req_n >= anim_max) break;
+            var from: anim.Box = undefined;
+            if (w.minimized) {
+                // It was on the screen where it was last seen; a window on
+                // another workspace flies nowhere.
+                const r = w.anim_rect;
+                if (r.w <= 0 or r.h <= 0) continue;
+                from = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+            } else {
+                from = ui.miniTileBox(w.min_order) orelse ui.dockCellBox(0, 0) orelse continue;
+            }
+            ui.anim_req[ui.anim_req_n] = .{ .win = w, .restore = !w.minimized, .from = from };
+            ui.anim_req_n += 1;
+        }
+    }
+
+    /// Start what animCollect found. Runs after the layout.
+    pub fn animLaunch(ui: *Ui) void {
+        ui.animLaunchAt(ui.nowMs());
+    }
+
+    fn animLaunchAt(ui: *Ui, now: u32) void {
+        defer ui.anim_req_n = 0;
+        const style = animStyle(ui.wm.cfg.iconify_style, now) orelse return;
+        for (ui.anim_req[0..ui.anim_req_n]) |r| {
+            if (ui.anim_n >= anim_max) break;
+            const w = r.win;
+            if (w.closed) continue;
+            var to: anim.Box = undefined;
+            if (r.restore) {
+                // To where the window is now (after the layout), if that is
+                // on the screen.
+                const ws = w.workspace orelse continue;
+                if (ws.output.active != ws.index or w.target.w <= 0 or w.target.h <= 0) continue;
+                to = frameBox(ui.wm, w);
+            } else {
+                // To its tile; if it has none (the Dock is full or off) to
+                // the Dock's first tile; if there is no Dock, nowhere.
+                to = ui.miniTileBox(w.min_order) orelse ui.dockCellBox(0, 0) orelse continue;
+            }
+            ui.anims[ui.anim_n] = .{
+                .plan = anim.plan(style, r.from, to),
+                .start_ms = now,
+                .hold = if (r.restore) w else null,
+            };
+            ui.anim_n += 1;
+            ui.anim_redraw = true;
+        }
+    }
+
+    /// Is the window on its way back from the Dock? Then it stays hidden
+    /// until the animation is over (window.applyRender asks).
+    pub fn animHolding(ui: *const Ui, w: *const types.Window) bool {
+        for (ui.anims[0..ui.anim_n]) |*an| {
+            if (an.hold == w) return true;
+        }
+        return false;
+    }
+
+    /// Milliseconds until an animation needs a new picture (0: now), null
+    /// if nothing flies.
+    fn animWaitMs(ui: *const Ui, now: u32) ?u32 {
+        if (ui.anim_n == 0) return null;
+        var best: u32 = std.math.maxInt(u32);
+        for (ui.anims[0..ui.anim_n]) |*an| {
+            const idx = animIndex(an, now);
+            if (idx >= an.plan.n or idx != an.drawn) return 0;
+            const left = an.plan.delay_ms - (now -% an.start_ms) % an.plan.delay_ms;
+            best = @min(best, left);
+        }
+        return best;
+    }
+
+    /// Stop everything that flies and let go of the windows it holds.
+    fn animCancel(ui: *Ui) void {
+        ui.anim_n = 0;
+        ui.animEnd();
+    }
+
+    /// Nothing flies any more: the surface goes.
+    fn animEnd(ui: *Ui) void {
+        if (ui.anim_panel) |p| {
+            ui.graveyard.append(ui.gpa(), p) catch p.destroy();
+            ui.anim_panel = null;
+            ui.reapGraveyard();
+        }
+    }
+
+    /// A surface that covers every running animation. null: it cannot be
+    /// made (too big, out of memory), and nothing is shown.
+    fn animEnsurePanel(ui: *Ui) bool {
+        var u = ui.anims[0].plan.bounds;
+        for (ui.anims[1..ui.anim_n]) |an| {
+            const b = an.plan.bounds;
+            const x0 = @min(u.x, b.x);
+            const y0 = @min(u.y, b.y);
+            const x1 = @max(u.x + u.w, b.x + b.w);
+            const y1 = @max(u.y + u.h, b.y + b.h);
+            u = .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+        }
+        if (ui.anim_panel != null) {
+            const o = ui.anim_box;
+            if (u.x >= o.x and u.y >= o.y and u.x + u.w <= o.x + o.w and u.y + u.h <= o.y + o.h) return true;
+            ui.animEnd();
+        }
+        if (u.w <= 0 or u.h <= 0 or u.w > anim_max_px or u.h > anim_max_px) return false;
+        const p = Panel.create(ui, u.w, u.h) catch return false;
+        // Frames in the air never catch the pointer.
+        if (ui.compositor.createRegion()) |region| {
+            defer region.destroy();
+            p.surface.setInputRegion(region);
+        } else |_| {}
+        ui.anim_panel = p;
+        ui.anim_box = u;
+        ui.anim_redraw = true;
+        return true;
+    }
+
+    /// Draw what is due. Runs in every manage sequence (the event loop
+    /// starts one whenever a picture is due, see onTimer).
+    pub fn animStep(ui: *Ui) void {
+        if (ui.anim_n == 0) {
+            if (ui.anim_panel != null) ui.animEnd();
+            return;
+        }
+        const now = ui.nowMs();
+
+        // The finished ones go; a window they held is shown again by the
+        // applyRender that follows in this sequence.
+        var i: usize = 0;
+        while (i < ui.anim_n) {
+            if (animIndex(&ui.anims[i], now) >= ui.anims[i].plan.n) {
+                ui.anims[i] = ui.anims[ui.anim_n - 1];
+                ui.anim_n -= 1;
+            } else i += 1;
+        }
+        if (ui.anim_n == 0) {
+            ui.animEnd();
+            return;
+        }
+
+        if (!ui.animEnsurePanel()) {
+            std.log.warn("animation: no surface for it; skipped", .{});
+            ui.animCancel();
+            return;
+        }
+        const panel = ui.anim_panel.?;
+        var changed = ui.anim_redraw;
+        for (ui.anims[0..ui.anim_n]) |*an| {
+            if (animIndex(an, now) != an.drawn) changed = true;
+        }
+        if (changed) {
+            // Both buffers still with river: the next tick tries again.
+            const slot = panel.freeSlot() catch return;
+            slot.canvas.clear(.{ .r = 0, .g = 0, .b = 0, .a = 0 });
+            for (ui.anims[0..ui.anim_n]) |*an| {
+                const idx = animIndex(an, now);
+                an.drawn = idx;
+                anim.draw(&slot.canvas, an.plan.frame(idx), ui.anim_box.x, ui.anim_box.y);
+            }
+            panel.present(slot);
+            ui.anim_redraw = false;
+        }
+        place(panel, ui.anim_box.x, ui.anim_box.y);
     }
 
     // ---- Dock and Clip menus ---------------------------------------------------
@@ -2569,6 +2861,9 @@ pub const Ui = struct {
     /// can no longer be activated.
     pub fn forgetWindow(ui: *Ui, w: *types.Window) void {
         if (ui.return_focus == w) ui.return_focus = null;
+        for (ui.anims[0..ui.anim_n]) |*an| {
+            if (an.hold == w) an.hold = null;
+        }
         for (ui.levels.items) |*lvl| {
             for (lvl.rows) |*row| switch (row.kind) {
                 .focus_window => |rw| if (rw == w) {
@@ -3654,6 +3949,126 @@ test "the Dock tile of a minimized window asks for exactly that window" {
     first.minimized = false;
     f.ui.activateSlot(.{ .index = t1 }, false);
     try std.testing.expect(f.wm.pending_ui == null);
+}
+
+test "animation: a minimized window is noticed and flies to its Dock tile" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    f.wm.cfg.iconify_style = .zoom; // ends exactly on the tile (twist stops 3/16 short, like Window Maker)
+    const w = try f.addWindow("foot");
+    const other = try f.addWindow("other"); // minimized, but it was not on the screen
+    w.anim_rect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    w.minimized = true;
+    w.min_order = 7;
+    other.minimized = true;
+    other.min_order = 8;
+    _ = f.dockBar();
+    _ = try f.ui.model.?.attachWindow("foot", "foot", 7);
+    _ = f.dockBar();
+
+    f.ui.animCollect();
+    try std.testing.expectEqual(@as(usize, 1), f.ui.anim_req_n);
+    try std.testing.expect(f.ui.anim_req[0].win == w and !f.ui.anim_req[0].restore);
+    try std.testing.expectEqual(@as(i32, 100), f.ui.anim_req[0].from.x);
+
+    f.ui.animLaunchAt(1000);
+    try std.testing.expectEqual(@as(usize, 1), f.ui.anim_n);
+    try std.testing.expectEqual(@as(usize, 0), f.ui.anim_req_n);
+    try std.testing.expect(f.ui.anims[0].hold == null); // a minimized window is hidden anyway
+    try std.testing.expectEqual(@as(u32, 1000), f.ui.anims[0].start_ms);
+
+    // The last picture of the zoom is on the tile.
+    const tile_box = f.ui.miniTileBox(7).?;
+    const last = f.ui.anims[0].plan.frame(1000).boxes[6];
+    try std.testing.expect(@abs(last[0] - tile_box.x) <= 1 and @abs(last[1] - tile_box.y) <= 1);
+    try std.testing.expect(@abs(last[2] - tile_box.w) <= 1 and @abs(last[3] - tile_box.h) <= 1);
+
+    // `none` starts nothing.
+    f.ui.anim_n = 0;
+    f.wm.cfg.iconify_style = .none;
+    f.ui.animCollect();
+    f.ui.animLaunchAt(2000);
+    try std.testing.expectEqual(@as(usize, 0), f.ui.anim_n);
+}
+
+test "animation: a restored window starts on its Dock tile" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const w = try f.addWindow("foot");
+    w.anim_min = true; // it was minimized at the end of the last sequence
+    w.minimized = false; // and is not now
+    w.min_order = 7;
+    _ = f.dockBar();
+    _ = try f.ui.model.?.attachWindow("foot", "foot", 7);
+    _ = f.dockBar();
+
+    f.ui.animCollect();
+    try std.testing.expectEqual(@as(usize, 1), f.ui.anim_req_n);
+    try std.testing.expect(f.ui.anim_req[0].win == w and f.ui.anim_req[0].restore);
+    const tile_box = f.ui.miniTileBox(7).?;
+    try std.testing.expectEqual(tile_box, f.ui.anim_req[0].from);
+
+    // It has no workspace on the screen here: nothing flies, nothing is held.
+    f.ui.animLaunchAt(1000);
+    try std.testing.expectEqual(@as(usize, 0), f.ui.anim_n);
+    try std.testing.expect(!f.ui.animHolding(w));
+}
+
+test "animation: a window coming back is held until it is forgotten or the animation ends" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const w = try f.addWindow("foot");
+    const from: anim.Box = .{ .x = 1856, .y = 64, .w = 64, .h = 64 };
+    const to: anim.Box = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    f.ui.anims[0] = .{ .plan = anim.plan(.twist, from, to), .start_ms = 1000, .hold = w };
+    f.ui.anim_n = 1;
+    try std.testing.expect(f.ui.animHolding(w));
+
+    // The event loop sleeps until the next picture is due.
+    try std.testing.expectEqual(@as(?u32, 0), f.ui.animWaitMs(1000)); // picture 0 is not drawn yet
+    f.ui.anims[0].drawn = 0;
+    try std.testing.expectEqual(@as(?u32, 20), f.ui.animWaitMs(1000));
+    try std.testing.expectEqual(@as(?u32, 15), f.ui.animWaitMs(1005));
+    try std.testing.expectEqual(@as(?u32, 0), f.ui.animWaitMs(1020)); // picture 1 is due
+    const over = 1000 + f.ui.anims[0].plan.durationMs() + 1;
+    try std.testing.expectEqual(@as(?u32, 0), f.ui.animWaitMs(over)); // over: step() ends it
+
+    // A window that dies while it flies is not held (nor pointed at) any more.
+    f.ui.forgetWindow(w);
+    try std.testing.expect(!f.ui.animHolding(w));
+    f.ui.anim_n = 0;
+    try std.testing.expectEqual(@as(?u32, null), f.ui.animWaitMs(1000));
+}
+
+test "animation: styles, window frame and what a sequence remembers" {
+    try std.testing.expectEqual(@as(?anim.Style, .zoom), animStyle(.zoom, 5));
+    try std.testing.expectEqual(@as(?anim.Style, .twist), animStyle(.twist, 5));
+    try std.testing.expectEqual(@as(?anim.Style, .flip), animStyle(.flip, 5));
+    try std.testing.expectEqual(@as(?anim.Style, null), animStyle(.none, 5));
+    // random: all three turn up
+    var seen = [_]bool{ false, false, false };
+    for (0..3) |t| seen[@intFromEnum(animStyle(.random, @intCast(t)).?)] = true;
+    try std.testing.expect(seen[0] and seen[1] and seen[2]);
+
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const w = try f.addWindow("foot");
+    w.target = .{ .x = 10, .y = 20, .w = 100, .h = 50 };
+    const bw = w.borderWidth(&f.wm.cfg);
+    const fb = frameBox(&f.wm, w);
+    try std.testing.expectEqual(anim.Box{ .x = 10 - bw, .y = 20 - bw, .w = 100 + 2 * bw, .h = 50 + 2 * bw }, fb);
+
+    // A window that is not shown (visible unknown) leaves no rectangle; a
+    // minimized one is remembered as minimized.
+    w.minimized = true;
+    w.anim_rect = .{ .x = 1, .y = 1, .w = 5, .h = 5 };
+    f.ui.animRemember();
+    try std.testing.expect(w.anim_min);
+    try std.testing.expectEqual(@as(i32, 0), w.anim_rect.w);
 }
 
 test "sync() builds the Dock before the desktops and the bars are restacked after the windows" {

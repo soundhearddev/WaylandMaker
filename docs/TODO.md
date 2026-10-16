@@ -96,9 +96,12 @@
       verlässt den Streifen (`workspace == null`, wird dadurch von der Render-Runde versteckt), merkt sich
       Spalte, Breite bzw. Rechteck und kommt auf den **aktuellen** Workspace zurück. Im Fenster-Menü steht es
       als `(Titel)`; Auswählen oder ein Klick auf seine Dock-/Clip-Kachel holt es zurück. DockApps werden nie
-      versteckt. Jedes minimierte Fenster bekommt eine eigene temporäre Kachel im Dock (`dockhost.syncModel`,
-      `Model.attachWindow`; nie gespeichert, kein Menü, ein Klick holt genau dieses Fenster zurück, ein kleiner
-      „Minimieren“-Balken unten links unterscheidet sie von Programm-Kacheln). Das Icon ist das System-Icon des
+      versteckt. Jedes minimierte Fenster bekommt eine eigene temporäre Kachel am Ende der Dock-Spalte, unter
+      der letzten Kachel (`dockhost.syncModel`, `Model.attachWindow`; das Log meldet `dockhost: Dock tile for the
+      minimized window ...`, bei vollem Dock eine Warnung; nie gespeichert, kein Menü, ein Klick holt genau dieses Fenster zurück, ein kleiner
+      „Minimieren“-Balken unten links unterscheidet sie von Programm-Kacheln). Beim Minimieren fliegt der Fensterrahmen zur Kachel, beim Wiederherstellen von der Kachel zurück
+      (`anim.zig`, Original: `actions.c` `animateResize*`; Option `iconify_style` = zoom / twist (Standard) /
+      flip / none / random; das Fenster erscheint erst nach der Animation). Das Icon ist das System-Icon des
       Programms (`appicon.zig`: Icon-Theme, `Icon=` der `.desktop`-Datei, sonst der Platzhalter des Themes; nur
       PNG/XPM, nichts Selbstgezeichnetes; nur ohne jedes Theme der Anfangsbuchstabe). `mini_dock` und der Befehl
       `toggle_mini_dock` (Standard: `Super+Shift+m`) schalten das ein/aus. Ist das Dock voll oder
@@ -122,24 +125,8 @@
       in `onManage()`, mit Reihenfolge-Regressionstest abgesichert). War bereits so, nur nicht verifiziert.
 
 ### Sonstiges
-- [x] **Code-TODOs abgearbeitet** (`fsmenu.zig`, `ui.zig`, `wm_files.zig`, `xpm.zig`, `fileutil.zig`):
-      `EXEC`-Zeilen im Menü werden mit `config.parseCommand` zerlegt (Anführungszeichen gelten wie bei
-      `bind = ..., exec`); `menu_submenu_align` wird von `ui.openChild` gelesen (gewählte Seite zuerst, sonst
-      gespiegelt); `OPEN_MENU` versteht Pfade in `"…"`/`'…'`; `listDir` sortiert vor dem Kappen (die ersten 200
-      in Sortierreihenfolge statt beliebiger) und spart per `d_type` das `stat()` je Eintrag; `readFile` lebt
-      jetzt als `fileutil.readSmallFile`; `wm_files.join` gibt Out-of-Memory weiter und quotet Wörter mit
-      Leerzeichen.
-- [x] **Clip ohne Platzhalter-Namen**: Der Name unter der Workspace-Nummer erscheint nur noch, wenn er gewählt
-      wurde (`workspace_names` in `config.lua` oder von Hand in `WMState`). Window Makers Platzhalter
-      („Workspace 1“ …) aus einer alten `WMState` werden ignoriert, damit nicht Workspace 1–3 einen Untertext
-      haben und 4 keinen.
-- [ ] **`focus_up`/`focus_down` bei Floating-Fenstern** laufen scheinbar verkehrt herum (`focus_up` geht in der
-      Z-Reihenfolge nach unten, siehe `action.focusFloatingStep`); erst klären, was gewollt ist.
-- [ ] `compatibility.zig`: Stubs (`libwmaker` per `dlopen`, WMakerrc-Parser, Zwischenablage). `registerHook` speichert
-      jetzt wirklich (Test), `loadAttributes` liest höchstens 1 MiB und gibt bei Fehlern keinen Speicher mehr verloren.
 - [ ] Drag-Reordering von Spalten
 - [ ] Animationen beim Scrollen
-- [ ] Modular Workspaces
 - [ ] Docks Platz belegung fix und überlappung fix
 - [x] config keybind exec shell / apps custom (`shell`/`exec`/`shexec` in `action.zig`, siehe
       `process.spawnShell`)
@@ -147,9 +134,8 @@
       wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
 - [ ] **Mehrere Seats**: Menü und Dock gehören zurzeit dem ersten Seat.
 - [ ] **Dock/Clip auf jedem Output** (oder pro Output wählbar).
-- [x] **`wmaker-wl --check`**: lädt `config.lua` wie die Sitzung, meldet die Warnungen und beendet sich mit
-      Exit-Code 0 (sauber) bzw. 1 (Warnungen), ohne Wayland. *Noch offen:* dasselbe für `wlprefs` und für
-      Root-Menü/Attribute/DockApps (`loadStartup`).
+- [ ] **`--check` für wlprefs/wmaker-wl**: Config laden, `parse_warnings` und unlesbare Dateien melden, mit
+      Exit-Code (für Dotfile-Pipelines).
 - [ ] **Fuzzing** der Parser (`plist`, `xpm`, `wm_menu`, `config`): die Schleifen sind begrenzt und getestet,
       ein Fuzz-Lauf fehlt.
 - [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).
@@ -174,8 +160,4 @@
       `config.conf` wird beim Start mit einer Warnung gemeldet)
 - [x] **wlprefs auf Lua umgestellt**: `wlprefs/src/configfile.zig` und die Hilfstexte nutzen `config.lua` statt `config.conf`
       (das Parsen/Schreiben von `key = wert` und `bind("..", "..")` war schon Lua).
-- [x] **Lua in `config.lua` ausgebaut** (`config.zig`, `lua.zig`, `action.zig`):
-      eigene Variablen sind erlaubt (nur Tippfehler von Optionen wie `gapp` werden mit „did you mean“
-      gemeldet); alle Optionen sind im Script lesbar (`gap = gap + 2`, `table.insert(width_presets, 0.25)`);
-      `bind("Super+x", function() ... end)` führt eine Lua-Funktion aus, darin `run("...")`, `spawn("...")`,
-      `shell("...")`. Funktionen laufen mit Instruktionslimit, Fehler werden geloggt statt geworfen.
+- [ ] Config allow own variables
