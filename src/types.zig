@@ -496,6 +496,9 @@ pub const Command = union(enum) {
     /// expansion, backgrounding with `&`, or any other shell syntax --
     /// effectively "run any program" from a key combo.
     shell: []const u8,
+    /// A Lua function of config.lua, bound with `bind("Super+x", function() ... end)`.
+    /// The number is its reference in the config's Lua state, see config.callLua.
+    lua: i32,
     close,
     exit,
     toggle_floating,

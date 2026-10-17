@@ -124,6 +124,23 @@ pub const Canvas = struct {
         c.cairo_fill(cv.cr);
     }
 
+    /// Outline through `points` (at least 2 of them) with a line `width`
+    /// pixels wide; `closed` joins the last point back to the first. Round
+    /// joins and caps, so a thick line does not show spikes at its corners.
+    pub fn strokePath(cv: *Canvas, points: []const [2]f64, closed: bool, width: f64, col: Color) void {
+        if (points.len < 2) return;
+        c.cairo_save(cv.cr);
+        defer c.cairo_restore(cv.cr);
+        cv.setColor(col);
+        c.cairo_set_line_width(cv.cr, width);
+        c.cairo_set_line_join(cv.cr, c.CAIRO_LINE_JOIN_ROUND);
+        c.cairo_set_line_cap(cv.cr, c.CAIRO_LINE_CAP_ROUND);
+        c.cairo_move_to(cv.cr, points[0][0], points[0][1]);
+        for (points[1..]) |pt| c.cairo_line_to(cv.cr, pt[0], pt[1]);
+        if (closed) c.cairo_close_path(cv.cr);
+        c.cairo_stroke(cv.cr);
+    }
+
     /// Draw `icon` scaled to fit a `size` x `size` box at (x, y), keeping
     /// its aspect ratio and centring it in the box. The drawn size and the
     /// position are whole pixels (a fractional edge would smear the picture
@@ -494,4 +511,32 @@ test "drawIcon: an icon in its own size is drawn as it is" {
     cv.flush();
     try std.testing.expectEqual(@as(u8, 0x33), buf[0]); // B of 0xff112233, little-endian
     try std.testing.expectEqual(@as(u8, 0xff), buf[3]);
+}
+
+test "strokePath: an open and a closed outline" {
+    var buf: [20 * 20 * 4]u8 = undefined;
+    @memset(&buf, 0);
+    var cv = try Canvas.initForData(&buf, 20, 20, 80);
+    defer cv.deinit();
+    const tri = [_][2]f64{ .{ 2, 2 }, .{ 17, 2 }, .{ 10, 17 } };
+    cv.strokePath(&tri, true, 3, Color.rgb(0xffffff));
+    cv.flush();
+    const alpha = struct {
+        fn at(b: []const u8, x: usize, y: usize) u8 {
+            return b[(y * 20 + x) * 4 + 3];
+        }
+    }.at;
+    try std.testing.expect(alpha(&buf, 10, 2) > 200); // on the top edge
+    try std.testing.expect(alpha(&buf, 10, 8) == 0); // inside: only an outline
+    // Closed: the edge from the last point back to the first is drawn.
+    try std.testing.expect(alpha(&buf, 6, 9) > 100);
+
+    var open_buf: [20 * 20 * 4]u8 = undefined;
+    @memset(&open_buf, 0);
+    var co = try Canvas.initForData(&open_buf, 20, 20, 80);
+    defer co.deinit();
+    co.strokePath(&tri, false, 3, Color.rgb(0xffffff));
+    co.flush();
+    try std.testing.expect(alpha(&open_buf, 6, 9) == 0); // not closed: no such edge
+    co.strokePath(tri[0..1], true, 3, Color.rgb(0xffffff)); // fewer than 2 points: nothing, no crash
 }

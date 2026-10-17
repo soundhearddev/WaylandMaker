@@ -66,6 +66,8 @@ test {
     _ = @import("dock.zig");
     _ = @import("appicon.zig");
     _ = @import("xpm.zig");
+    _ = @import("fileutil.zig");
+    _ = @import("fuzz_test.zig");
     _ = @import("fsmenu.zig");
     _ = wm_files;
     _ = @import("model_test.zig");
@@ -74,9 +76,51 @@ test {
     _ = ui_mod;
 }
 
+/// Warnings and errors logged so far; `--check` turns them into its exit code.
+var problems: u32 = 0;
+
+pub const std_options: std.Options = .{ .logFn = countingLog };
+
+fn countingLog(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (level == .warn or level == .err) problems +%= 1;
+    std.log.defaultLog(level, scope, format, args);
+}
+
+/// `wmaker-wl --check`: read everything the session would read (config.lua,
+/// the key bindings it makes, the root menu, WMWindowAttributes, WMState and
+/// the autostart path), say what is wrong with it, and exit with 0 (clean) or
+/// 1 (problems), without touching Wayland. For dotfile pipelines and a quick
+/// look after editing. A broken file is reported and, like in the session,
+/// skipped in favour of the next candidate.
+fn checkConfig(io: std.Io, gpa: std.mem.Allocator) !void {
+    var cfg = try config.load(io, gpa);
+    defer cfg.deinit();
+    const arena = cfg.arena.allocator();
+    _ = try action.parseAll(arena, &cfg);
+    _ = try wm_files.load(io, arena, &cfg);
+    if (problems > 0) {
+        std.debug.print("{s}: {d} problem(s), see the messages above\n", .{ cfg.config_file, problems });
+        std.process.exit(1);
+    }
+    std.debug.print("{s}: OK\n", .{cfg.config_file});
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
+
+    config.runner = action.runFromLua;
+
+    var args = init.minimal.args.iterate();
+    _ = args.skip(); // argv[0]
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--check")) return checkConfig(io, gpa);
+    }
 
     ignoreSigchld();
 
@@ -615,12 +659,7 @@ fn onManage(wm: *WindowManager) void {
 
     // 6b. The Dock tiles of minimized windows: after the actions above, which
     //     are what minimize and restore windows (ui.sync() ran before them).
-    //     First note which windows those were, while a restored window's
-    //     tile still exists; then the Dock follows.
-    if (wm.ui) |u| {
-        u.animCollect();
-        u.syncDock();
-    }
+    if (wm.ui) |u| u.syncBars();
 
     // 7. Layout. Geometry only; no requests yet.
     layoutAll(wm);
@@ -871,18 +910,9 @@ test "onManage syncs the Dock tiles of minimized windows after the actions that 
     const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
     const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
     const body = src[body_start..body_end];
-    const again = std.mem.lastIndexOf(u8, body, "u.syncDock()").?;
+    const again = std.mem.lastIndexOf(u8, body, "u.syncBars()").?;
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runPending(wm)").?);
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
-    // The animations: collected before the Dock changes (a restored window's
-    // tile is its starting point), launched after the layout (its end point),
-    // and remembered after the windows were shown or hidden.
-    const collect = std.mem.indexOf(u8, body, "u.animCollect()").?;
-    const layout_at = std.mem.indexOf(u8, body, "layoutAll(wm);").?;
-    try std.testing.expect(collect < again);
-    try std.testing.expect(layout_at > again);
-    try std.testing.expect(std.mem.indexOf(u8, body, "u.animLaunch()").? > layout_at);
-    try std.testing.expect(std.mem.indexOf(u8, body, "u.animRemember()").? > std.mem.indexOf(u8, body, "applyRender(wm, w, w == focus_target)").?);
 }
 
 test "applyDockState: the saved state does not override what config.lua names itself" {

@@ -219,9 +219,17 @@ pub const Model = struct {
             try m.drawer_names.append(gpa, try a.dupe(u8, d.name));
         }
 
-        const names = if (cfg_names.len > 0) cfg_names else list.workspace_names;
+        // The Clip shows a name under the workspace number only when somebody
+        // chose one: `workspace_names` in config.lua, or a name edited by hand
+        // in WMState. Window Maker's own placeholders ("Workspace 1", ...)
+        // are not names and are dropped, so workspaces do not end up with a
+        // label on some and none on others.
+        const from_config = cfg_names.len > 0;
+        const names = if (from_config) cfg_names else list.workspace_names;
         const names_copy = try a.alloc([]const u8, names.len);
-        for (names, 0..) |n, i| names_copy[i] = try a.dupe(u8, n);
+        for (names, 0..) |n, i| {
+            names_copy[i] = if (!from_config and isDefaultWorkspaceName(n, i)) "" else try a.dupe(u8, n);
+        }
         m.names = names_copy;
 
         for (list.apps) |app| {
@@ -352,6 +360,15 @@ pub const Model = struct {
     }
 
     // ---- looking -----------------------------------------------------------------
+
+    /// "Workspace N" for workspace index N-1: the name Window Maker gives a
+    /// workspace nobody named.
+    fn isDefaultWorkspaceName(name: []const u8, index: usize) bool {
+        const prefix = "Workspace ";
+        if (!std.mem.startsWith(u8, name, prefix)) return false;
+        const n = std.fmt.parseInt(usize, name[prefix.len..], 10) catch return false;
+        return n == index + 1;
+    }
 
     pub fn workspaceName(m: *const Model, ws: u32) ?[]const u8 {
         if (ws >= m.names.len) return null;
@@ -1050,6 +1067,16 @@ fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool) vo
     if (!slot.running and slot.app.command.len > 0) drawNotRunning(cv, x, y);
     if (slot.gi.omnipresent) drawOmnipresent(cv, x, y);
     if (slot.launching) drawLaunching(cv, x, y);
+    if (slot.app.mini_window != 0) drawMinimizedMark(cv, x, y);
+}
+
+/// What tells a minimized window's tile from an application's: the flat bar
+/// of a minimize button in the lower left corner (the place of the "not
+/// running" dots, which such a tile never has).
+fn drawMinimizedMark(cv: *gfx.Canvas, x: i32, y: i32) void {
+    cv.fillRect(x + 6, y + tile - 10, 16, 5, col_dark);
+    cv.fillRect(x + 5, y + tile - 11, 16, 5, col_light);
+    cv.fillRect(x + 6, y + tile - 10, 14, 3, col_tile_to);
 }
 
 /// The empty slot a dragged tile will drop into: a recessed tile.
@@ -1200,7 +1227,10 @@ pub fn drawBar(cv: *gfx.Canvas, m: *const Model, v: View) void {
 // Tests
 // ----------------------------------------------------------------------------
 
-fn mk(name: []const u8, place: dockapp.Place, x: i32, y: i32) dockapp.DockApp {
+// `name` is comptime on purpose: `&.{name}` is then a constant in the binary.
+// With a runtime name it would point into this function's stack frame, which
+// is gone when `mk` returns (it only seemed to work in Debug builds).
+fn mk(comptime name: []const u8, place: dockapp.Place, x: i32, y: i32) dockapp.DockApp {
     return .{ .name = name, .command = &.{name}, .place = place, .x = x, .y = y };
 }
 
@@ -1241,6 +1271,21 @@ test "Model: an empty list is just the logo; names: config.lua wins" {
     try std.testing.expectEqual(@as(usize, 1), m.scr.dock.?.icon_count);
     try std.testing.expectEqualStrings("cfg", m.workspaceName(0).?);
     try std.testing.expect(m.workspaceName(1) == null);
+}
+
+test "Model: Window Maker's placeholder names (\"Workspace N\") are not shown, real names are" {
+    var m = try Model.init(
+        std.testing.allocator,
+        .{ .workspace_names = &.{ "Workspace 1", "Web", "Workspace 2", "Workspace 4" } },
+        &.{},
+        4,
+    );
+    defer m.deinit();
+    try std.testing.expect(m.workspaceName(0) == null); // placeholder
+    try std.testing.expectEqualStrings("Web", m.workspaceName(1).?);
+    // Only the placeholder of the SAME workspace counts: this one was typed.
+    try std.testing.expectEqualStrings("Workspace 2", m.workspaceName(2).?);
+    try std.testing.expect(m.workspaceName(3) == null); // placeholder of workspace 4
 }
 
 test "Model: Clip tiles belong to their workspace, omnipresent ones follow it" {
