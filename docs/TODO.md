@@ -31,6 +31,7 @@
 - [ ] Animationen beim Scrollen
 - [ ] Modular Workspaces
 - [ ] Docks Platz belegung fix und überlappung fix
+- [ ] Fenster fokus bei maximierung beibehalten
 - [ ] **Session speichern** (`SAVE_SESSION`, Fenster + Workspaces + Spalten): nur sinnvoll, wenn Programme
       wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
 - [ ] **Mehrere Seats**: Menü und Dock gehören zurzeit dem ersten Seat.
