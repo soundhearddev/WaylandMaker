@@ -22,7 +22,7 @@
 - [ ] Menü läuft ausschließlich über den ersten gebundenen `wl_seat`; bei mehreren Seats bekommen weitere
       keinen Zeiger/keine Tastatur fürs Menü.
 - [ ] **Perf (Messen)**: Es fehlt ein Benchmark im Repo (`zig build bench`); die Zahlen oben stammen aus einem
-      lokalen Wegwerf-Test.
+ lokalen Wegwerf-Test.
 - [ ] **`focus_up`/`focus_down` bei Floating-Fenstern** laufen scheinbar verkehrt herum (`focus_up` geht in der
       Z-Reihenfolge nach unten, siehe `action.focusFloatingStep`); erst klären, was gewollt ist.
 - [ ] `compatibility.zig`: Stubs (`libwmaker` per `dlopen`, WMakerrc-Parser, Zwischenablage). `registerHook` speichert
@@ -41,3 +41,4 @@
 - [ ] **Fuzzing** der Parser (`plist`, `xpm`, `wm_menu`, `config`): die Schleifen sind begrenzt und getestet,
       ein Fuzz-Lauf fehlt.
 - [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).
+- [ ] after rofi/fuzzel closing window focus fix
