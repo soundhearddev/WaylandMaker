@@ -179,7 +179,24 @@ pub fn validThemeName(name: []const u8) bool {
 }
 
 /// Every key edited by wlprefs.
+/// Why wlprefs cannot show the value that config.lua gives a key.
+pub const Odd = enum(u8) {
+    none,
+    /// Not a literal but an expression, a call or a variable
+    /// (`gap = base * 2`): the compositor computes it, this window cannot.
+    computed,
+    /// A literal of the wrong kind for the key (`gap = "12"`, `dock_edge = 3`):
+    /// the compositor refuses it and keeps the default.
+    wrong_type,
+};
+
 pub const Settings = struct {
+    /// Per key (index in `keys`): what the file does that this window cannot
+    /// show. Such a line is shown with the default and left alone by `render`
+    /// -- unless the user changes that key in the window, which replaces the
+    /// line by the chosen value.
+    odd: [keys.len]Odd = [_]Odd{.none} ** keys.len,
+
     // ---- layout
     gap: i32 = 8,
     outer_gap: i32 = 8,
@@ -528,13 +545,104 @@ pub fn parse(s: *Settings, text: []const u8) void {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const l = splitLine(&lex, raw) orelse continue;
+        const idx = keyIndex(l.key);
+
+        // What kind of literal is it, and may this key have one of that kind?
+        const kind = literalKind(l.value);
+        if (kind) |k| {
+            if (!kindAllowed(l.key, k)) {
+                if (idx) |i| s.odd[i] = .wrong_type;
+                continue;
+            }
+        }
         const v = plainValue(l.key, l.value, &buf) orelse {
             // Something computed: the GUI cannot show it, and must not "fix" it.
-            if (std.mem.eql(u8, l.key, "mouse_mod")) s.mouse_mod.raw = true;
+            if (std.mem.eql(u8, l.key, "mouse_mod")) {
+                s.mouse_mod.raw = true;
+            } else if (idx) |i| s.odd[i] = .computed;
             continue;
         };
+        // A later line that is a plain literal again takes over from an
+        // earlier odd one: the last assignment is the one that counts.
+        if (idx) |i| s.odd[i] = .none;
         apply(s, l.key, v);
     }
+}
+
+/// The kinds of Lua literal wlprefs tells apart.
+const Kind = enum { number, boolean, string, table };
+
+/// What the literal text `v` is, or null if it is not a literal (an
+/// expression, a variable, a call).
+fn literalKind(v: []const u8) ?Kind {
+    const t = std.mem.trim(u8, v, " \t");
+    if (t.len == 0) return null;
+    switch (t[0]) {
+        '"', '\'' => return .string,
+        '[' => return if (lualine.literalLen(t) != null) .string else null,
+        '{' => return .table,
+        else => {},
+    }
+    if (std.mem.eql(u8, t, "true") or std.mem.eql(u8, t, "false")) return .boolean;
+    if (isNumberLiteral(t)) return .number;
+    return null;
+}
+
+/// May `key` be given a literal of kind `k`? What the compositor's
+/// config.zig takes: a number for the numeric keys (a numeric STRING is
+/// refused), a boolean for the switches, a string for names and enums, ...
+/// Keys wlprefs does not know accept anything.
+fn kindAllowed(key: []const u8, k: Kind) bool {
+    const eql = std.mem.eql;
+    inline for (number_keys) |n| if (eql(u8, key, n)) return k == .number;
+    inline for (bool_keys) |n| if (eql(u8, key, n)) return k == .boolean;
+    inline for (.{ "border_focused", "border_unfocused", "border_floating", "bind_layout" }) |n| {
+        if (eql(u8, key, n)) return k == .number or k == .string;
+    }
+    inline for (.{ "terminal", "launcher", "browser" }) |n| {
+        if (eql(u8, key, n)) return k == .string or k == .table;
+    }
+    inline for (.{ "font_menu_title", "font_menu", "font_dock", "theme", "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align" }) |n| {
+        if (eql(u8, key, n)) return k == .string;
+    }
+    inline for (.{ "width_presets", "workspace_names" }) |n| {
+        if (eql(u8, key, n)) return k == .table;
+    }
+    return true;
+}
+
+/// How many keys the file sets in a way this window cannot show.
+pub fn oddCount(s: *const Settings) usize {
+    var n: usize = 0;
+    for (s.odd) |o| {
+        if (o != .none) n += 1;
+    }
+    return n;
+}
+
+/// A line for the status area about the keys of `page` that the file sets
+/// in a way this window cannot show (null if there are none), e.g.
+/// `gap (computed): shown with the default; changing it here replaces the line`.
+pub fn oddNote(s: *const Settings, page: []const []const u8, buf: []u8) ?[:0]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var any = false;
+    for (page) |name| {
+        const i = keyIndex(name) orelse continue;
+        const why = switch (s.odd[i]) {
+            .none => continue,
+            .computed => "computed",
+            .wrong_type => "wrong type",
+        };
+        if (any) w.writeAll(", ") catch break;
+        w.print("{s} ({s})", .{ name, why }) catch break;
+        any = true;
+    }
+    if (!any) return null;
+    w.writeAll(": shown with the default; changing it here replaces the line") catch {};
+    const text = w.buffered();
+    if (text.len >= buf.len) return null;
+    buf[text.len] = 0;
+    return buf[0..text.len :0];
 }
 
 // ----------------------------------------------------------------------------
@@ -643,7 +751,7 @@ pub const keys = [_][]const u8{
     "font_menu_title",     "font_menu",            "font_dock",
 };
 
-fn keyIndex(key: []const u8) ?usize {
+pub fn keyIndex(key: []const u8) ?usize {
     for (keys, 0..) |name, i| if (std.mem.eql(u8, name, key)) return i;
     return null;
 }
@@ -700,6 +808,10 @@ pub fn render(
         seen[idx] = true;
 
         const name = keys[idx];
+        // A key the file gives something the GUI could not read (an
+        // expression, a wrong kind) has the default in `s` and `base`, so
+        // `sameValue` below keeps the line byte for byte -- until the user
+        // changes that key here: then the value they chose replaces it.
         // Untouched by the user, or a value we must not write: byte-identical.
         const new_v = format(s, name, &vbuf) orelse {
             try out.appendSlice(gpa, raw);
@@ -850,6 +962,7 @@ fn isColourKey(name: []const u8) bool {
 /// hand in the meantime shows up instead of being shown stale.
 pub fn rebase(cur: *Settings, old_base: *const Settings, new_base: *const Settings) void {
     var buf: [64]u8 = undefined;
+    cur.odd = new_base.odd;
     for (keys) |k| {
         if (!sameValue(cur, old_base, k)) continue; // the user's change: keep
         if (sameValue(cur, new_base, k)) continue;
@@ -1227,6 +1340,81 @@ test "an invalid or computed value is left alone unless the user changes that ke
     const out2 = try render(gpa, original, &s, &base);
     defer gpa.free(out2);
     try testing.expectEqualStrings("gap = banana\nouter_gap = 8\nborder_width = 5\n", out2);
+}
+
+test "values of the wrong kind and computed ones are tracked, and shown as the default" {
+    var s = Settings.init();
+    parse(&s,
+        \\gap = "12"
+        \\outer_gap = base * 2
+        \\border_width = 4
+        \\dock_edge = 3
+        \\focus_new_windows = 1
+        \\terminal = { "foot", "-e", "htop" }
+        \\border_focused = 0xd8a657
+        \\workspace_names = "Main"
+    );
+    const gap = keyIndex("gap").?;
+    try testing.expectEqual(Odd.wrong_type, s.odd[gap]);
+    try testing.expectEqual(@as(i32, 8), s.gap); // not 12: the compositor refuses a string
+    try testing.expectEqual(Odd.computed, s.odd[keyIndex("outer_gap").?]);
+    try testing.expectEqual(Odd.none, s.odd[keyIndex("border_width").?]);
+    try testing.expectEqual(@as(i32, 4), s.border_width);
+    try testing.expectEqual(Odd.wrong_type, s.odd[keyIndex("dock_edge").?]);
+    try testing.expectEqual(Odd.wrong_type, s.odd[keyIndex("focus_new_windows").?]);
+    // These kinds are fine for their keys.
+    try testing.expectEqual(Odd.none, s.odd[keyIndex("terminal").?]);
+    try testing.expectEqual(Odd.none, s.odd[keyIndex("border_focused").?]);
+    // A table is not a name list given as a string.
+    try testing.expectEqual(Odd.wrong_type, s.odd[keyIndex("workspace_names").?]);
+    try testing.expectEqual(@as(usize, 5), oddCount(&s));
+
+    // A later plain line for the same key takes over.
+    parse(&s, "gap = 12\n");
+    try testing.expectEqual(Odd.none, s.odd[gap]);
+    try testing.expectEqual(@as(i32, 12), s.gap);
+
+    var buf: [200]u8 = undefined;
+    const note = oddNote(&s, &.{ "gap", "outer_gap", "dock_edge" }, &buf).?;
+    try testing.expect(std.mem.startsWith(u8, note, "outer_gap (computed), dock_edge (wrong type): "));
+    try testing.expect(oddNote(&s, &.{ "gap", "border_width" }, &buf) == null);
+}
+
+test "a line of the wrong kind is replaced when the user changes that key, else kept" {
+    const gpa = testing.allocator;
+    const original = "gap = \"12\"\nouter_gap = 8\n";
+    var base = Settings.init();
+    parse(&base, original);
+    var s = base;
+    s.outer_gap = 10;
+    const kept = try render(gpa, original, &s, &base);
+    defer gpa.free(kept);
+    try testing.expectEqualStrings("gap = \"12\"\nouter_gap = 10\n", kept);
+    s = base;
+    s.gap = 9;
+    const fixed = try render(gpa, original, &s, &base);
+    defer gpa.free(fixed);
+    try testing.expectEqualStrings("gap = 9\nouter_gap = 8\n", fixed);
+}
+
+test "a multi-line string is not read as settings" {
+    const text =
+        \\notes = [[
+        \\gap = 99
+        \\terminal = "evil"
+        \\]]
+        \\gap = 7
+    ;
+    var s = Settings.init();
+    parse(&s, text);
+    try testing.expectEqual(@as(i32, 7), s.gap);
+    try testing.expect(!std.mem.eql(u8, s.terminal.get(), "evil"));
+    // ... and render does not rewrite what is inside it.
+    var changed = s;
+    changed.gap = 5;
+    const out = try render(testing.allocator, text, &changed, &s);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("notes = [[\ngap = 99\nterminal = \"evil\"\n]]\ngap = 5", out);
 }
 
 test "a key that appears twice: both lines follow the change (the last one wins anyway)" {

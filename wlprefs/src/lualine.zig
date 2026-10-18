@@ -11,18 +11,52 @@
 //     key = literal                  gap = 8        terminal = "foot"
 //     name("string", "string")       bind("Super+q", "close")   theme("nord")
 //
-// where a literal is a number, true/false, a string ("..", '..', [[..]]) or
-// a table of those ({ 0.5, 1 }, { "Main", "Web" }). A line that is anything
-// else -- an expression, a loop, two statements on one line -- is not ours
-// and is left alone.
+// where a literal is a number, true/false, a string ("..", '..', [[..]],
+// [==[..]==]) or a table of those ({ 0.5, 1 }, { "Main", "Web" }). A line that
+// is anything else -- an expression, a loop, two statements on one line -- is
+// not ours and is left alone. So are the lines INSIDE a string or a comment
+// that spans several lines: `Lexer` follows those from line to line, so that a
+// `gap = 5` in the middle of a `[[ ... ]]` is text, not a setting.
 
 const std = @import("std");
 
-/// State carried from one line to the next: are we inside a `--[[ ... ]]`
-/// block comment? Lines inside one are not code.
+/// State carried from one line to the next: are we inside a long bracket
+/// that spans lines -- a `--[[ ... ]]` comment or a `[[ ... ]]` string (any
+/// level: `[==[ ... ]==]`)? Lines inside one are not code.
 pub const Lexer = struct {
     in_block: bool = false,
+    /// The level of that long bracket: the number of `=` in `[==[`.
+    level: usize = 0,
 };
+
+const LongOpen = struct {
+    /// The number of `=` between the brackets.
+    level: usize,
+    /// Bytes the opener takes (`[[` is 2, `[==[` is 4).
+    len: usize,
+};
+
+/// A long bracket opens at `s[at]`: `[`, any number of `=`, `[`.
+fn longOpen(s: []const u8, at: usize) ?LongOpen {
+    if (at >= s.len or s[at] != '[') return null;
+    var i = at + 1;
+    while (i < s.len and s[i] == '=') i += 1;
+    if (i < s.len and s[i] == '[') return .{ .level = i - at - 1, .len = i - at + 1 };
+    return null;
+}
+
+/// Where the closer of a long bracket of `level` (`]`, `level` times `=`,
+/// `]`) starts at or after `from`. It is `level + 2` bytes long.
+fn longClose(s: []const u8, from: usize, level: usize) ?usize {
+    var i = from;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != ']') continue;
+        var j = i + 1;
+        while (j < s.len and s[j] == '=') j += 1;
+        if (j - i - 1 == level and j < s.len and s[j] == ']') return i;
+    }
+    return null;
+}
 
 pub const Code = struct {
     /// The statement: no indentation, no comment, no trailing `;` or CR.
@@ -34,19 +68,25 @@ pub const Code = struct {
 /// The code of one line, or null for a blank line, a comment, a line that is
 /// part of a block comment, or a line with more than one statement.
 pub fn code(lex: *Lexer, raw: []const u8) ?Code {
+    return codeImpl(lex, raw, true);
+}
+
+/// Like `code`, but a line with several statements gives its whole text
+/// (`bind("a", "b"); bind("c", "d")`) instead of null. For counting what
+/// wlprefs cannot read, not for editing.
+pub fn codeAny(lex: *Lexer, raw: []const u8) ?Code {
+    return codeImpl(lex, raw, false);
+}
+
+fn codeImpl(lex: *Lexer, raw: []const u8, strict: bool) ?Code {
     // A UTF-8 byte order mark (some editors add one to the first line) is not
     // part of the code, but it stays part of the line.
     if (std.mem.startsWith(u8, raw, "\xEF\xBB\xBF")) {
-        const c = code(lex, raw[3..]) orelse return null;
+        const c = codeImpl(lex, raw[3..], strict) orelse return null;
         return .{ .body = c.body, .comment = c.comment + 3 };
     }
     if (lex.in_block) {
-        if (std.mem.indexOf(u8, raw, "]]") != null) lex.in_block = false;
-        return null;
-    }
-    const lead = std.mem.trimStart(u8, raw, " \t");
-    if (std.mem.startsWith(u8, lead, "--[[")) {
-        if (std.mem.indexOf(u8, lead[4..], "]]") == null) lex.in_block = true;
+        if (longClose(raw, 0, lex.level) != null) lex.in_block = false;
         return null;
     }
 
@@ -66,17 +106,32 @@ pub fn code(lex: *Lexer, raw: []const u8) ?Code {
         }
         switch (ch) {
             '"', '\'' => in_str = ch,
-            '[' => {
-                if (i + 1 < raw.len and raw[i + 1] == '[') {
-                    // A long string: skip it. One that does not end on this
-                    // line is a multi-line string, which is not ours.
-                    const close = std.mem.indexOfPos(u8, raw, i + 2, "]]") orelse return null;
-                    i = close + 1;
-                }
+            '[' => if (longOpen(raw, i)) |o| {
+                // A long string: skip it. One that does not end on this
+                // line is a multi-line string: the line is not ours, and
+                // neither are the ones up to its end.
+                const close = longClose(raw, i + o.len, o.level) orelse {
+                    lex.in_block = true;
+                    lex.level = o.level;
+                    return null;
+                };
+                i = close + o.level + 1;
             },
             '-' => {
                 if (i + 1 < raw.len and raw[i + 1] == '-') {
                     end = i;
+                    // `--[[ ... ]]`: a comment that may go on over the next
+                    // lines. Whatever follows its end on this line is code
+                    // we do not try to read.
+                    if (longOpen(raw, i + 2)) |o| {
+                        if (longClose(raw, i + 2 + o.len, o.level)) |close| {
+                            const rest = std.mem.trim(u8, raw[close + o.level + 2 ..], " \t\r");
+                            if (rest.len > 0) return null;
+                        } else {
+                            lex.in_block = true;
+                            lex.level = o.level;
+                        }
+                    }
                     break;
                 }
             },
@@ -90,11 +145,51 @@ pub fn code(lex: *Lexer, raw: []const u8) ?Code {
     if (semicolons > 0) {
         // One `;` at the very end is only decoration; any other is a second
         // statement.
-        if (semicolons > 1 or !std.mem.endsWith(u8, body, ";")) return null;
-        body = std.mem.trimEnd(u8, body[0 .. body.len - 1], " \t");
+        if (semicolons > 1 or !std.mem.endsWith(u8, body, ";")) {
+            if (strict) return null;
+        } else {
+            body = std.mem.trimEnd(u8, body[0 .. body.len - 1], " \t");
+        }
     }
     if (body.len == 0) return null;
     return .{ .body = body, .comment = end };
+}
+
+/// Does the code `body` call `name(...)` anywhere (outside strings)? A longer
+/// identifier does not count: `mybind(` is not `bind(`.
+pub fn callsFunction(body: []const u8, name: []const u8) bool {
+    var i: usize = 0;
+    var in_str: u8 = 0;
+    while (i < body.len) {
+        const ch = body[i];
+        if (in_str != 0) {
+            if (ch == '\\') {
+                i += 2;
+                continue;
+            }
+            if (ch == in_str) in_str = 0;
+            i += 1;
+            continue;
+        }
+        if (ch == '"' or ch == '\'') {
+            in_str = ch;
+            i += 1;
+            continue;
+        }
+        if (std.ascii.isAlphabetic(ch) or ch == '_') {
+            const start = i;
+            while (i < body.len and (std.ascii.isAlphanumeric(body[i]) or body[i] == '_')) i += 1;
+            // After a `.` or `:` it is a field or method (`wm.bind(`), not the function.
+            const field = start > 0 and (body[start - 1] == '.' or body[start - 1] == ':');
+            if (!field and std.mem.eql(u8, body[start..i], name)) {
+                const rest = std.mem.trimStart(u8, body[i..], " \t");
+                if (rest.len > 0 and rest[0] == '(') return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return false;
 }
 
 pub fn isIdentifier(s: []const u8) bool {
@@ -159,9 +254,9 @@ pub fn literalLen(s: []const u8) ?usize {
         }
         return null;
     }
-    if (std.mem.startsWith(u8, s, "[[")) {
-        const close = std.mem.indexOfPos(u8, s, 2, "]]") orelse return null;
-        return close + 2;
+    if (longOpen(s, 0)) |o| {
+        const close = longClose(s, o.len, o.level) orelse return null;
+        return close + o.level + 2;
     }
     return null;
 }
@@ -173,7 +268,7 @@ pub fn unquote(a: std.mem.Allocator, lit: []const u8) std.mem.Allocator.Error!?[
     const len = literalLen(lit) orelse return null;
     if (len != lit.len) return null;
 
-    if (lit[0] == '[') return try a.dupe(u8, lit[2 .. lit.len - 2]);
+    if (longOpen(lit, 0)) |o| return try a.dupe(u8, lit[o.len .. lit.len - o.level - 2]);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -255,6 +350,54 @@ test "code: comments, strings that contain `--`, semicolons, block comments" {
 
     // A string that does not end is not ours.
     try testing.expect(code(&lex, "terminal = \"foot") == null);
+}
+
+test "code: a multi-line string hides the lines inside it, of any level" {
+    var lex: Lexer = .{};
+    try testing.expect(code(&lex, "x = [[") == null);
+    try testing.expect(lex.in_block);
+    try testing.expect(code(&lex, "gap = 99") == null); // text, not a setting
+    try testing.expect(code(&lex, "]]") == null);
+    try testing.expect(!lex.in_block);
+    try testing.expect(code(&lex, "gap = 8") != null);
+
+    // Level 2: a `]]` inside does not end it.
+    try testing.expect(code(&lex, "--[==[ a ]] still a comment") == null);
+    try testing.expect(lex.in_block);
+    try testing.expect(code(&lex, "gap = 99 ]==]") == null);
+    try testing.expect(!lex.in_block);
+
+    // Code in front of a block comment that starts in the middle of a line counts.
+    const c = code(&lex, "gap = 8 --[[ a note").?;
+    try testing.expectEqualStrings("gap = 8", c.body);
+    try testing.expect(lex.in_block);
+    try testing.expect(code(&lex, "still the note ]]") == null);
+    try testing.expect(!lex.in_block);
+
+    // Code after a comment that closes on the same line is not ours.
+    try testing.expect(code(&lex, "--[[ x ]] gap = 8") == null);
+    try testing.expect(!lex.in_block);
+
+    // A string of level 1 is one literal, with its text.
+    try testing.expectEqual(@as(?usize, 10), literalLen("[=[a]]b]=] x"));
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("a]]b", (try unquote(arena.allocator(), "[=[a]]b]=]")).?);
+    try testing.expect(literalLen("[=[never closed]]") == null);
+}
+
+test "codeAny and callsFunction" {
+    var lex: Lexer = .{};
+    try testing.expect(code(&lex, "bind(\"a\", \"b\"); bind(\"c\", \"d\")") == null);
+    const c = codeAny(&lex, "bind(\"a\", \"b\"); bind(\"c\", \"d\")  -- two").?;
+    try testing.expect(callsFunction(c.body, "bind"));
+    try testing.expectEqualStrings("gap = 8", codeAny(&lex, "gap = 8;").?.body);
+    try testing.expect(callsFunction("for i = 1, 4 do bind(\"x\" .. i, \"y\") end", "bind"));
+    try testing.expect(callsFunction("bind (\"a\", f())", "bind"));
+    try testing.expect(!callsFunction("mybind(\"a\")", "bind"));
+    try testing.expect(!callsFunction("terminal = \"x bind(y)\"", "bind"));
+    try testing.expect(!callsFunction("wm.bind(\"a\")", "bind"));
+    try testing.expect(!callsFunction("local bind = 3", "bind"));
 }
 
 test "assignment and call" {

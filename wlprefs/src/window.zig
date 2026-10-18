@@ -165,6 +165,8 @@ pub const Window = struct {
     scroll_x: i32 = 0,
     /// First visible row of the key binding list.
     bind_scroll: i32 = 0,
+    /// First theme row shown in the Appearance page's list.
+    theme_scroll: i32 = 0,
     /// The key binding editor's state.
     bind_ui: panels.BindUi = .{},
     /// The text fields of the page last drawn, in order (Tab walks them).
@@ -716,13 +718,13 @@ pub const Window = struct {
             .focus => panels.focus(ctx, ox, oy, s),
             .window_handling => panels.windowHandling(ctx, ox, oy, s),
             .workspace => panels.workspace(ctx, ox, oy, s),
-            .appearance => panels.appearance(ctx, ox, oy, s),
+            .appearance => panels.appearance(ctx, ox, oy, s, &win.prefs.themes, &win.theme_scroll),
             .mouse_settings => panels.mouse(ctx, ox, oy, s),
             .ergonomic => panels.ergonomic(ctx, ox, oy, s),
             .docks => panels.docks(ctx, ox, oy, s),
             .configurations => panels.configurations(ctx, ox, oy, s),
             .font_simple => panels.fonts(ctx, ox, oy, s),
-            .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bindList(), &win.bind_scroll, &win.bind_ui, s),
+            .keyboard_shortcuts => panels.shortcuts(ctx, ox, oy, win.prefs.bindList(), win.prefs.computed_binds, &win.bind_scroll, &win.bind_ui, s),
             else => return false,
         }
         return true;
@@ -1188,8 +1190,19 @@ pub const Window = struct {
         drawButton(cv, save_x, button_y, save_close_w, button_h, "Save", dirty and win.prefs.canSave());
         drawButton(cv, close_x, button_y, save_close_w, button_h, "Close", true);
 
+        // What the file does on this page that the window cannot show (an
+        // expression, a value of the wrong kind): said once, here, where the
+        // messages go, so nobody wonders why a field ignores their edit.
+        var note_buf: [180:0]u8 = undefined;
+        const note: ?[:0]const u8 = if (win.selected) |cat|
+            settings.oddNote(&win.prefs.base, pageKeys(cat), &note_buf)
+        else
+            null;
+
         if (win.status[0] != 0) {
             cv.drawText(&win.status, balloon_x, button_y + button_h + 1, font_small, text_dim);
+        } else if (note) |n| {
+            cv.drawText(n, balloon_x, button_y + button_h + 1, font_small, text_dim);
         } else if (dirty) {
             var buf: [48:0]u8 = undefined;
             const n = win.prefs.changed();
@@ -1241,14 +1254,12 @@ test "a multi-byte character is added whole or not at all" {
     try std.testing.expectEqual(settings.Text.capacity, t.len);
 }
 
-test "control characters are refused, '#' is an ordinary character" {
-    // config.lua is Lua: `#` starts no comment there (comments are `--`), and
-    // a colour is typed as "#rrggbb", so a leading `#` must be accepted.
+test "control characters are refused; '#' is no comment in Lua and is typed like any other" {
     var t: settings.Text = .{};
     Window.textAppend(&t, "\x01");
     Window.textAppend(&t, "\x7f");
     try std.testing.expectEqual(@as(usize, 0), t.len);
-    Window.textAppend(&t, "#");
-    Window.textAppend(&t, "d");
-    try std.testing.expectEqualStrings("#d", t.get());
+    Window.textAppend(&t, "#"); // a colour, a name: fine
+    Window.textAppend(&t, "a");
+    try std.testing.expectEqualStrings("#a", t.get());
 }

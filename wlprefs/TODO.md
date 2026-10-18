@@ -1,6 +1,8 @@
 # wlprefs: was noch fehlt
 
-Stand: nach der Lua-Umstellung. Alles hier ist **noch nicht gemacht und nicht getestet**.
+Stand: nach der Lua-Umstellung und der Runde mit `--check`, Theme-Liste, Hinweisen und Typprüfung. Was
+unten mit `[x]` steht, ist umgesetzt und durch Tests abgedeckt (`zig build test-wlprefs`: 92, `zig build test`: 301).
+Die Offenen sind **noch nicht gemacht**.
 Sortiert nach: großer Nutzen, kleiner Aufwand zuerst.
 
 ---
@@ -23,7 +25,10 @@ decken neue Schlüssel automatisch mit ab.
 - [x] `clip_auto_raise` – Seite Other Configurations (Checkbox)
 - [x] `font_menu_title`, `font_menu`, `font_dock` – Seite Fonts (drei Textfelder, Prüfung mit `validFont`)
 - [ ] `menu_submenu_align` – Seite Menu: bleibt offen. Die Menü-Seite ist bewusst „nur Anzeige“, ein echter
-      Schalter braucht Klick-Behandlung in `window.zig` und `panel_menu.zig`.
+      Schalter braucht Klick-Behandlung in `window.zig` und `panel_menu.zig`. **Offene Frage:** Window Makers
+      Seite hat zwei Knöpfe zur Submenü-Ausrichtung (`AlignSubmenus`: aus/an, dort geht es um die vertikale
+      Ausrichtung am Eltern-Eintrag). Unsere Option ist eine Seite (`left`/`right`). Die zwei Knöpfe passen
+      nicht 1:1; wie sollen sie auf `left`/`right` abgebildet werden?
 
 Danach `docs/WMPREFS.md` (Tabelle "Echte Seiten") ergänzen.
 
@@ -31,16 +36,21 @@ Danach `docs/WMPREFS.md` (Tabelle "Echte Seiten") ergänzen.
 
 ## 2. Kleine, nützliche Dinge
 
-- [ ] **`wlprefs --check`**: Config laden, Warnungen und unlesbare Dateien melden, Exit-Code ungleich 0
-      bei Problemen. Hilft bei Skripten und beim Testen. (`wlprefs/src/main.zig`)
-- [ ] **Theme-Liste statt Textfeld**: `Themes/*.lua` neben der Config und in `/usr/share/wmaker-wl/Themes`
-      auflisten, Auswahl per Klick, Farben als kleine Vorschau. (`panels.zig`, Seite Appearance)
-- [ ] **Hinweis bei berechneten Werten**: steht in der Config `gap = base * 2`, zeigt wlprefs den
-      Standardwert. Ein Symbol oder Tooltip "wird im Skript berechnet, wird nicht überschrieben" wäre ehrlicher.
-- [ ] **Hinweis bei Binds aus Schleifen**: Binds aus `for ... do bind(...) end` fehlen in der Kürzelliste.
-      Eine Zeile "N Binds kommen aus berechnetem Code" unter der Liste.
-- [ ] **Strengere Typprüfung**: `gap = "12"` (String) zeigt wlprefs als 12, der Compositor lehnt es ab.
-      In `plainValue` (`settings.zig`) Typen prüfen.
+- [x] **`wlprefs --check`** (`check.zig`, `main.zig`): lädt die Config wie das Fenster, meldet unlesbare
+      Datei, Werte der falschen Art und nicht speicherbare Werte mit Exit-Code 1; berechnete Werte und
+      Schleifen-Binds sind Hinweise (Exit-Code 0).
+- [x] **Theme-Liste statt Textfeld** (`themes.zig`, `panels.zig`, Seite Appearance): `Themes/*.lua` neben der
+      Config und in `/usr/local/share/wmaker-wl/Themes` und `/usr/share/wmaker-wl/Themes` (wie der Compositor,
+      gleiche Namen früherer Verzeichnisse verdecken spätere), Auswahl per Klick, die drei Rahmenfarben als
+      Vorschau, „(none)“, ein nicht installiertes Theme bleibt sichtbar. *Noch offen:* Mausrad auf der Liste.
+- [x] **Hinweis bei berechneten Werten**: `Settings.odd` merkt sich pro Schlüssel „berechnet“ oder „falsche Art“;
+      die Statuszeile der Seite sagt es („gap (computed): shown with the default; changing it here replaces
+      the line“). Ohne Änderung des Schlüssels bleibt die Zeile Byte für Byte erhalten; ändert der Nutzer ihn,
+      ersetzt der gewählte Wert die Zeile (wie schon vorher getestet).
+- [x] **Hinweis bei Binds aus Schleifen**: `binds.computedBindLines` zählt Zeilen, die Binds auf eine Art
+      machen, die die Liste nicht lesen kann; die Seite sagt „N lines in config.lua make more binds …“.
+- [x] **Strengere Typprüfung**: `parse` prüft Art des Literals gegen die Art des Schlüssels (Zahl, Bool,
+      String, Tabelle); `gap = "12"` ist „falsche Art“ und wird nicht als 12 gezeigt.
 
 ---
 
@@ -61,28 +71,28 @@ Danach `docs/WMPREFS.md` (Tabelle "Echte Seiten") ergänzen.
 - [ ] Mehrfachauswahl.
 - [ ] Zeilen verschieben.
 - [ ] Aufnahme von Tasten aus höheren Ebenen (AltGr) testen: bisher ungetestet.
-- [ ] Wurden die `bind`-Zeilen zwischendurch von Hand geändert, ersetzt Speichern den ganzen Block.
-      Besser: nur die wirklich geänderten Zeilen anfassen.
+- [x] Speichern fasst nur die wirklich geänderten `bind`-/`unbind`-Zeilen an (`binds.rewriteUserLines`):
+      eine Zeile, die noch gewollt ist (gleiche Taste, gleiche Aktion), bleibt mit Schreibweise und Kommentar
+      an ihrer Stelle; fehlende kommen hinter die letzte stehengebliebene Bind-Zeile.
 
 ---
 
 ## 5. Schwächen der Lua-Umstellung
 
-- [ ] **Mehrzeilige Strings** (`[[ ... ]]` über mehrere Zeilen) erkennt der Zeilenparser nicht
-      (`wlprefs/src/lualine.zig`). Solche Zeilen bleiben unberührt, wlprefs sieht sie aber auch nicht.
+- [x] **Mehrzeilige Strings und Block-Kommentare** (`[[ ... ]]`, `[==[ ... ]==]`, `--[[ ... ]]` über mehrere
+      Zeilen, beliebiger Level): der Zeilenparser folgt ihnen von Zeile zu Zeile (`lualine.Lexer`), Zeilen darin
+      sind Text und werden weder gelesen noch umgeschrieben.
 - [ ] **Mehrere Anweisungen in einer Zeile** (`a = 1; b = 2`) werden bewusst nicht angefasst.
-- [ ] **Test mit echter Config**: ein Test, der eine Config mit `include(...)` und `theme(...)` mit dem
-      echten Lua-Parser lädt und mit wlprefs vergleicht. Heute decken die Abgleichstests in
-      `src/model_test.zig` die Schlüssel ab, nicht die Sonderfälle.
-- [ ] **Speicherlimit für Config-Skripte** (Compositor, `src/lua.zig`): Es gibt ein Zeitlimit, aber ein Skript
-      kann viel Speicher anfordern (`string.rep`). Dafür bräuchte es einen begrenzten Allocator.
+- [x] **Test mit echter Config** (`src/model_test.zig`): eine Config mit `theme(...)`, `include(...)` und
+      `gap = gap + 2` läuft durch den echten Lua-Parser und durch wlprefs; nach dem Bearbeiten einer anderen
+      Option liest der Compositor sie unverändert plus die Änderung.
+- [x] **Speicherlimit für Config-Skripte** (`src/lua.zig`): ein zählender Allocator begrenzt jeden Lua-State auf
+      64 MiB; `string.rep` mit Hunderten MiB und ein endlos wachsendes Table enden als Skriptfehler.
 
 ---
 
 ## Reihenfolge-Vorschlag
 
-1. Abschnitt 1 (die zehn fehlenden Einstellungen).
-2. `--check`.
-3. Theme-Liste.
-4. Hinweise bei berechneten Werten und Schleifen-Binds.
-5. Fensterregeln-Editor.
+1. `menu_submenu_align` (wartet auf die Frage oben).
+2. Fensterregeln-Editor (`WMWindowAttributes`, nach dem Vorbild des Window-Inspector-Panels von Window Maker).
+3. DockApps-Editor, Root-Menü-Editor.

@@ -1201,6 +1201,82 @@ test "the compositor accepts a config that wlprefs edited in place, binds includ
     try std.testing.expect(std.mem.indexOf(u8, text, "unbind(\"Super+q\")") != null);
 }
 
+/// A config directory in memory: the files `include` and `theme` can read.
+const MemFiles = struct {
+    paths: []const []const u8,
+    texts: []const []const u8,
+
+    fn read(ctx: *anyopaque, a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+        const self: *const MemFiles = @ptrCast(@alignCast(ctx));
+        for (self.paths, self.texts) |p, t| {
+            if (std.mem.eql(u8, p, path)) return a.dupe(u8, t) catch null;
+        }
+        return null;
+    }
+};
+
+fn parseWithIncludes(gpa: std.mem.Allocator, files: *const MemFiles, text: []const u8) !config.Config {
+    var cfg: config.Config = .{ .arena = .init(gpa) };
+    errdefer cfg.deinit();
+    var binds: std.ArrayList(config.Bind) = .empty;
+    const inc: config.Includer = .{ .ctx = @constCast(files), .read = MemFiles.read, .dir = "/cfg" };
+    try config.parseWith(cfg.arena.allocator(), text, &cfg, &binds, "/cfg/config.lua", &inc, false);
+    return cfg;
+}
+
+test "a config with theme() and include(): wlprefs edits its own lines, the compositor still reads all of it" {
+    const gpa = std.testing.allocator;
+    const files: MemFiles = .{
+        .paths = &.{ "/cfg/Themes/t.lua", "/cfg/extra.lua" },
+        .texts = &.{ "gap = 20\nborder_width = 6\n", "outer_gap = 5\n" },
+    };
+    const original =
+        \\theme("t")
+        \\gap = gap + 2
+        \\include("extra.lua")
+        \\terminal = "foot"
+        \\
+    ;
+
+    // What the compositor makes of it: the theme sets gap to 20, the
+    // script reads it and adds 2; the include comes on top.
+    var before = try parseWithIncludes(gpa, &files, original);
+    defer before.deinit();
+    try std.testing.expectEqual(@as(i32, 22), before.gap);
+    try std.testing.expectEqual(@as(i32, 6), before.border_width);
+    try std.testing.expectEqual(@as(i32, 5), before.outer_gap);
+    try std.testing.expectEqual(@as(u32, 0), before.parse_warnings);
+
+    // wlprefs sees only the file itself: `gap` is computed (shown as the
+    // default), the theme and the include are invisible to it.
+    var base = prefs_settings.Settings.init();
+    prefs_settings.parse(&base, original);
+    try std.testing.expectEqual(prefs_settings.Odd.computed, base.odd[prefs_settings.keyIndex("gap").?]);
+    try std.testing.expectEqualStrings("foot", base.terminal.get());
+
+    // The user changes the terminal only.
+    var s = base;
+    s.terminal.set("alacritty");
+    const text = try prefs_settings.render(gpa, original, &s, &base);
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings(
+        \\theme("t")
+        \\gap = gap + 2
+        \\include("extra.lua")
+        \\terminal = "alacritty"
+        \\
+    , text);
+
+    // And the compositor reads the edited file as before, plus the change.
+    var after = try parseWithIncludes(gpa, &files, text);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(i32, 22), after.gap);
+    try std.testing.expectEqual(@as(i32, 6), after.border_width);
+    try std.testing.expectEqual(@as(i32, 5), after.outer_gap);
+    try std.testing.expectEqualStrings("alacritty", after.terminal[0]);
+    try std.testing.expectEqual(@as(u32, 0), after.parse_warnings);
+}
+
 // ----------------------------------------------------------------------------
 // Minimize / restore (Window Maker's miniaturize, HIDE, HIDE_OTHERS, SHOW_ALL)
 // ----------------------------------------------------------------------------

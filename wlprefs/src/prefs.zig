@@ -24,6 +24,7 @@ const std = @import("std");
 const settings = @import("settings.zig");
 const configfile = @import("configfile.zig");
 const binds = @import("binds.zig");
+const themes = @import("themes.zig");
 const actions = @import("actions.zig");
 
 const Settings = settings.Settings;
@@ -72,6 +73,11 @@ pub const Prefs = struct {
     /// Key bindings in effect (what the file says); arena owned by the struct.
     bind_arena: std.heap.ArenaAllocator,
     bind_list: []const binds.Entry = &.{},
+    /// Lines of the file that make binds this window cannot read (loops, ...).
+    computed_binds: usize = 0,
+
+    /// The themes `theme("NAME")` can load (Appearance page).
+    themes: themes.List = .{},
 
     /// The key binding list while it is being edited; null = not touched.
     /// Compared with `bind_list` to know whether there is anything to save.
@@ -98,7 +104,18 @@ pub const Prefs = struct {
         else
             try configfile.defaultConfigPath(gpa);
         p.load();
+        p.scanThemes();
         return p;
+    }
+
+    /// (Re)read the list of installed themes: `Themes/` next to the config
+    /// file, then the system directories.
+    pub fn scanThemes(p: *Prefs) void {
+        const dir: ?[]const u8 = if (p.path) |path|
+            (if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| (if (i == 0) "/" else path[0..i]) else ".")
+        else
+            null;
+        themes.scan(p.gpa, &p.themes, dir);
     }
 
     pub fn deinit(p: *Prefs) void {
@@ -142,6 +159,7 @@ pub const Prefs = struct {
     fn refreshBinds(p: *Prefs) void {
         _ = p.bind_arena.reset(.retain_capacity);
         p.bind_list = binds.effective(p.bind_arena.allocator(), settings.default_config_text, p.original.items) catch &.{};
+        p.computed_binds = binds.computedBindLines(p.original.items);
     }
 
     // ---- state ---------------------------------------------------------------

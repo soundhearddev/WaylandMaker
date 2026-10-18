@@ -16,7 +16,7 @@ const wlprefs = @import("wlprefs");
 const Window = wlprefs.window.Window;
 
 const usage =
-    \\usage: wlprefs [--config FILE] [--shot DIR]
+    \\usage: wlprefs [--config FILE] [--shot DIR] [--check]
     \\
     \\The settings window of wmaker-wl. It edits wmaker-wl's config.lua
     \\($XDG_CONFIG_HOME/wmaker-wl/config.lua, else ~/.config/wmaker-wl/) and
@@ -25,6 +25,8 @@ const usage =
     \\  --config FILE   edit FILE instead (to try wlprefs out)
     \\  --shot DIR      draw every page into DIR/NN-name.png and exit; needs no
     \\                  Wayland session (for screenshots)
+    \\  --check         read the config the way the window does, report what is
+    \\                  wrong with it and exit (0: fine, 1: problems); writes nothing
     \\  -h, --help      show this text
     \\
 ;
@@ -52,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
 
     var config_path: ?[]const u8 = null;
     var shot_dir: ?[]const u8 = null;
+    var check_only = false;
     var args = init.minimal.args.iterate();
     _ = args.skip();
     while (args.next()) |arg| {
@@ -68,12 +71,20 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("wlprefs: --shot needs a directory\n\n{s}", .{usage});
                 std.process.exit(2);
             };
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            check_only = true;
         } else if (std.mem.startsWith(u8, arg, "--config=")) {
             config_path = arg["--config=".len..];
         } else {
             std.debug.print("wlprefs: unknown argument `{s}`\n\n{s}", .{ arg, usage });
             std.process.exit(2);
         }
+    }
+
+    if (check_only) {
+        const code = try wlprefs.check.run(gpa, config_path);
+        if (code != 0) std.process.exit(code);
+        return;
     }
 
     // Read the config BEFORE anything else: if that goes wrong we want to say

@@ -141,6 +141,28 @@ const Builder = struct {
     }
 };
 
+/// How many lines of `text` make key bindings in a way this window cannot
+/// read: a loop (`for i = 1, 9 do bind(...) end`), a call with computed
+/// arguments, two statements on one line. The compositor has those binds; the
+/// list on the page cannot show them, so the page says how many lines there are.
+pub fn computedBindLines(text: []const u8) usize {
+    var lex: lualine.Lexer = .{};
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const c = lualine.codeAny(&lex, raw) orelse continue;
+        if (!lualine.callsFunction(c.body, "bind") and !lualine.callsFunction(c.body, "unbind")) continue;
+        // A plain `bind("a", "b")` / `unbind("a")` is what the list shows.
+        if (lualine.call(c.body)) |call| {
+            const plain_bind = std.mem.eql(u8, call.name, "bind") and call.n == 2;
+            const plain_unbind = std.mem.eql(u8, call.name, "unbind") and call.n == 1;
+            if (plain_bind or plain_unbind) continue;
+        }
+        n += 1;
+    }
+    return n;
+}
+
 /// The bindings in effect, in the order the compositor reads them. All
 /// strings live in `a` (use an arena).
 pub fn effective(a: std.mem.Allocator, defaults: []const u8, user: []const u8) ![]Entry {
@@ -237,13 +259,57 @@ pub fn userLines(a: std.mem.Allocator, defaults: []const u8, list: []const Entry
     return lines.toOwnedSlice(a);
 }
 
-/// Replace every `bind(..)`/`unbind(..)` line of `text` by `lines`: they go where the
-/// first old one was (or at the end, under a heading, if there was none).
-/// Everything else in the file is untouched. Result owned by the caller.
+/// What a `bind`/`unbind` statement means, as a string: the same key
+/// combination (modifier order and case do not matter) with the same action
+/// gives the same string. null if `call` is not a bind or unbind that
+/// wlprefs can read.
+fn statementKey(a: std.mem.Allocator, call: lualine.Call) !?[]u8 {
+    if (std.mem.eql(u8, call.name, "bind") and call.n == 2) {
+        const combo = (try lualine.unquote(a, call.args[0])) orelse return null;
+        const action = (try lualine.unquote(a, call.args[1])) orelse return null;
+        return try std.fmt.allocPrint(a, "b:{s}\x00{s}", .{ try normalize(a, combo), std.mem.trim(u8, action, " \t") });
+    }
+    if (std.mem.eql(u8, call.name, "unbind") and call.n == 1) {
+        const combo = (try lualine.unquote(a, call.args[0])) orelse return null;
+        return try std.fmt.allocPrint(a, "u:{s}", .{try normalize(a, combo)});
+    }
+    return null;
+}
+
+/// Make the plain `bind(..)`/`unbind(..)` lines of `text` say what `lines`
+/// say, and touch as little as possible to get there:
+///
+///  * a line that is already one of `lines` (same combination, same action;
+///    spacing, quotes and a comment behind it do not matter) stays exactly
+///    where and as it is;
+///  * an old line that is not wanted any more is dropped;
+///  * a wanted line that is not there yet is added: where the first dropped
+///    line was, else behind the last bind line there is, else at the end of
+///    the file under a heading.
+///
+/// Everything else in the file -- loops that make binds, comments, other
+/// settings -- is untouched. Result owned by the caller.
 pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const []const u8) ![]u8 {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+
+    // What each wanted line means, and whether an old line already says it.
+    const wanted = try a.alloc(?[]u8, lines.len);
+    for (lines, 0..) |l, i| {
+        var lex: lualine.Lexer = .{};
+        wanted[i] = null;
+        const c = lualine.code(&lex, l) orelse continue;
+        const call = lualine.call(c.body) orelse continue;
+        wanted[i] = try statementKey(a, call);
+    }
+    const present = try a.alloc(bool, lines.len);
+    @memset(present, false);
+
     var kept: std.ArrayList([]const u8) = .empty;
     defer kept.deinit(gpa);
-    var insert_at: ?usize = null;
+    var insert_at: ?usize = null; // where the first dropped line was
+    var after_last: ?usize = null; // behind the last bind line that stayed
 
     var lex: lualine.Lexer = .{};
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -251,7 +317,22 @@ pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const
         if (lualine.code(&lex, raw)) |c| {
             if (lualine.call(c.body)) |call| {
                 if (std.mem.eql(u8, call.name, "bind") or std.mem.eql(u8, call.name, "unbind")) {
-                    if (insert_at == null) insert_at = kept.items.len;
+                    var stays = false;
+                    if (try statementKey(a, call)) |key| {
+                        for (wanted, 0..) |w, i| {
+                            if (!present[i] and w != null and std.mem.eql(u8, w.?, key)) {
+                                present[i] = true;
+                                stays = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (stays) {
+                        try kept.append(gpa, raw);
+                        after_last = kept.items.len;
+                    } else if (insert_at == null) {
+                        insert_at = kept.items.len;
+                    }
                     continue;
                 }
             }
@@ -266,10 +347,16 @@ pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const
         trailing_nl = true;
     }
 
+    var missing: usize = 0;
+    for (lines, 0..) |_, i| {
+        if (!present[i]) missing += 1;
+    }
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 
-    const at = insert_at orelse kept.items.len;
+    const at = @min(insert_at orelse after_last orelse kept.items.len, kept.items.len);
+    const heading = insert_at == null and after_last == null and missing > 0;
     var first = true;
     const Join = struct {
         fn piece(o: *std.ArrayList(u8), g: std.mem.Allocator, f: *bool, s_: []const u8) !void {
@@ -278,15 +365,17 @@ pub fn rewriteUserLines(gpa: std.mem.Allocator, text: []const u8, lines: []const
             try o.appendSlice(g, s_);
         }
     };
-    for (kept.items[0..@min(at, kept.items.len)]) |p| try Join.piece(&out, gpa, &first, p);
-    if (insert_at == null and lines.len > 0) {
+    for (kept.items[0..at]) |p| try Join.piece(&out, gpa, &first, p);
+    if (heading) {
         try Join.piece(&out, gpa, &first, "");
         try Join.piece(&out, gpa, &first, "-- ---- key bindings (set by wlprefs) ----");
     }
-    for (lines) |l| try Join.piece(&out, gpa, &first, l);
-    for (kept.items[@min(at, kept.items.len)..]) |p| try Join.piece(&out, gpa, &first, p);
+    for (lines, 0..) |l, i| {
+        if (!present[i]) try Join.piece(&out, gpa, &first, l);
+    }
+    for (kept.items[at..]) |p| try Join.piece(&out, gpa, &first, p);
 
-    if (trailing_nl or (insert_at == null and lines.len > 0)) try out.append(gpa, '\n');
+    if (trailing_nl or heading) try out.append(gpa, '\n');
     return out.toOwnedSlice(gpa);
 }
 
@@ -523,6 +612,72 @@ test "rewriteUserLines: no old bind lines -> a block at the end; no new lines ->
     try std.testing.expect(std.mem.startsWith(u8, e, "-- bind(\"Super+x\", \"close\")\nfor i = 1, 3 do"));
     try std.testing.expect(std.mem.indexOf(u8, e, "--[[\nbind(\"Super+c\", \"close\")\n]]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, e, "bind(\"Super+y\", \"exit\")\n") != null);
+}
+
+test "rewriteUserLines leaves the lines that are still wanted exactly where and as they are" {
+    const gpa = std.testing.allocator;
+    const text =
+        \\-- keys
+        \\bind( "shift + Super+x" , 'close' )   -- my favourite
+        \\gap = 8
+        \\bind("Super+old", "exit")
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\bind("Super+x", "close")
+        \\unbind("Super+q")
+        \\-- end
+        \\
+    ;
+    // Wanted: the first bind (same combination, other spelling), the unbind;
+    // new: Super+n. Gone: Super+old; the second identical bind is a duplicate.
+    const out = try rewriteUserLines(gpa, text, &.{
+        "bind(\"Super+Shift+x\", \"close\")",
+        "unbind(\"Super+q\")",
+        "bind(\"Super+n\", \"spawn_terminal\")",
+    });
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(
+        \\-- keys
+        \\bind( "shift + Super+x" , 'close' )   -- my favourite
+        \\gap = 8
+        \\bind("Super+n", "spawn_terminal")
+        \\for i = 1, 3 do bind("Super+" .. i, "workspace " .. i) end
+        \\unbind("Super+q")
+        \\-- end
+        \\
+    , out);
+
+    // Nothing changed: byte for byte the same file.
+    const same = try rewriteUserLines(gpa, "bind(\"Super+x\", \"close\")\ngap = 8\n", &.{"bind(\"super+X\", \"close\")"});
+    defer gpa.free(same);
+    try std.testing.expectEqualStrings("bind(\"Super+x\", \"close\")\ngap = 8\n", same);
+
+    // A new line goes behind the last bind that stayed, not to the end of the file.
+    const added = try rewriteUserLines(gpa, "bind(\"Super+x\", \"close\")\ngap = 8\n", &.{ "bind(\"Super+x\", \"close\")", "bind(\"Super+n\", \"exit\")" });
+    defer gpa.free(added);
+    try std.testing.expectEqualStrings("bind(\"Super+x\", \"close\")\nbind(\"Super+n\", \"exit\")\ngap = 8\n", added);
+
+    // Same key, other action: the old line goes, the new one takes its place.
+    const changed = try rewriteUserLines(gpa, "bind(\"Super+x\", \"close\")\ngap = 8\n", &.{"bind(\"Super+x\", \"exit\")"});
+    defer gpa.free(changed);
+    try std.testing.expectEqualStrings("bind(\"Super+x\", \"exit\")\ngap = 8\n", changed);
+}
+
+test "computedBindLines counts what the list cannot show" {
+    const text =
+        \\bind("Super+a", "close")
+        \\unbind("Super+q")
+        \\for i = 1, 9 do bind("Super+" .. i, "workspace " .. i) end
+        \\local function mybind(k) end
+        \\bind("Super+b", "x"); bind("Super+c", "y")
+        \\-- bind("Super+d", "z")
+        \\--[[
+        \\for i = 1, 3 do bind(i, i) end
+        \\]]
+        \\terminal = "my bind(x)"
+        \\bind("Super+" .. "e", "close")
+    ;
+    try std.testing.expectEqual(@as(usize, 3), computedBindLines(text));
+    try std.testing.expectEqual(@as(usize, 0), computedBindLines("bind(\"a\", \"b\")\n"));
 }
 
 test "sameList ignores order and key spelling" {

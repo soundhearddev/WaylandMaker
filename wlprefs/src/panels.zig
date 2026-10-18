@@ -14,6 +14,7 @@ const gfx = @import("gfx.zig");
 const settings = @import("settings.zig");
 const icons = @import("icons.zig");
 const binds = @import("binds.zig");
+const themes = @import("themes.zig");
 const Settings = settings.Settings;
 
 const face = gfx.Color.rgb(0xaeaeae);
@@ -246,9 +247,6 @@ pub const Ctx = struct {
         if (c.cv) |cv| {
             cv.fillRect(bx, y, 44, 20, gfx.Color.rgb(v.*));
             cv.relief(bx, y, 44, 20, .sunken);
-            var buf: [16:0]u8 = undefined;
-            const s = std.fmt.bufPrintZ(&buf, "#{x:0>6}", .{v.* & 0xffffff}) catch "?";
-            cv.drawText(s, bx + 52, y + 2, font, dim);
         }
         const names = [_][:0]const u8{ "R", "G", "B" };
         inline for (names, 0..) |n, i| {
@@ -410,27 +408,119 @@ pub fn workspace(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     c.textField(ox + 34, oy + 202, 452, "Presets:", &s.width_presets);
 }
 
-pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
-    c.frame(ox + 14, oy + 6, 492, 170, "Window Frame");
+pub const theme_rows = 4;
+const theme_row_h = 16;
+
+/// One line of the theme list: "(none)", an installed theme, or the theme
+/// the file names that is not installed (so what is selected is always visible).
+const ThemeRow = struct {
+    label: []const u8,
+    /// null for "(none)" and for a theme that is not installed.
+    colours: ?[3]u32 = null,
+    missing: bool = false,
+};
+
+fn themeRowCount(s: *const Settings, list: *const themes.List) usize {
+    const cur = std.mem.trim(u8, s.theme.get(), " \t");
+    const extra: usize = if (cur.len > 0 and list.find(cur) == null) 1 else 0;
+    return 1 + list.len + extra;
+}
+
+fn themeRow(s: *const Settings, list: *const themes.List, i: usize) ThemeRow {
+    if (i == 0) return .{ .label = "(none)" };
+    if (i - 1 < list.len) {
+        const t = &list.items[i - 1];
+        return .{ .label = t.name(), .colours = .{ t.focused, t.unfocused, t.floating } };
+    }
+    return .{ .label = std.mem.trim(u8, s.theme.get(), " \t"), .missing = true };
+}
+
+/// How far the theme list can scroll.
+pub fn themeMaxScroll(n: usize) i32 {
+    if (n <= theme_rows) return 0;
+    return @intCast(n - theme_rows);
+}
+
+pub fn appearance(c: *Ctx, ox: i32, oy: i32, s: *Settings, list: *const themes.List, scroll: *i32) void {
+    c.frame(ox + 14, oy + 6, 492, 128, "Window Frame");
     c.stepInt(ox + 34, oy + 28, "Border width (px):", &s.border_width, 0, 16, 1);
     c.colour(ox + 34, oy + 54, "Focused:", &s.border_focused);
     c.colour(ox + 34, oy + 80, "Unfocused:", &s.border_unfocused);
     c.colour(ox + 34, oy + 106, "Floating:", &s.border_floating);
-    c.textField(ox + 34, oy + 136, 300, "Theme:", &s.theme);
-    c.hint(ox + 346, oy + 140, "Themes/NAME.lua");
 
+    // ---- Theme: the installed themes, one click to choose --------------------
+    c.frame(ox + 14, oy + 138, 492, 94, "Theme");
+    const lx = ox + 30;
+    const ly = oy + 160;
+    const lw = 300;
+    const lh = theme_rows * theme_row_h + 4;
+    const n = themeRowCount(s, list);
+    scroll.* = std.math.clamp(scroll.*, 0, themeMaxScroll(n));
+
+    const cur = std.mem.trim(u8, s.theme.get(), " \t");
     if (c.cv) |cv| {
-        // Live preview of the three frames.
-        const py = oy + 182;
-        const cols = [_]u32{ s.border_focused, s.border_unfocused, s.border_floating };
-        const names = [_][:0]const u8{ "focused", "unfocused", "floating" };
-        for (cols, 0..) |col, i| {
-            const x = ox + 34 + @as(i32, @intCast(i)) * 160;
-            const bw: i32 = @max(1, @min(6, s.border_width));
-            cv.fillRect(x, py, 140, 40, gfx.Color.rgb(col));
-            cv.fillRect(x + bw, py + bw, 140 - 2 * bw, 40 - 2 * bw, gfx.Color.rgb(0x282828));
-            cv.drawTextCentered(names[i], x + 70, py + 11, font, gfx.Color.rgb(0xd4d4d4));
+        cv.fillRect(lx, ly, lw, lh, white);
+        cv.relief(lx, ly, lw, lh, .sunken);
+        var i: usize = 0;
+        while (i < theme_rows) : (i += 1) {
+            const idx: usize = @as(usize, @intCast(scroll.*)) + i;
+            if (idx >= n) break;
+            const row = themeRow(s, list, idx);
+            const y = ly + 2 + @as(i32, @intCast(i)) * theme_row_h;
+            const selected = if (idx == 0) cur.len == 0 else std.mem.eql(u8, row.label, cur);
+            if (selected) cv.fillRect(lx + 2, y, lw - 4, theme_row_h, gfx.Color.rgb(0x3a3a6a));
+            const fg = if (selected) white else if (row.missing) dim else black;
+            var nb: [72]u8 = undefined;
+            cv.drawText(clipText(&nb, row.label, 30), lx + 6, y, font, fg);
+            if (row.missing) cv.drawText("(not installed)", lx + lw - 100, y, font_small, fg);
+            if (row.colours) |cols| {
+                for (cols, 0..) |col, k| {
+                    const sx = lx + lw - 62 + @as(i32, @intCast(k)) * 18;
+                    cv.fillRect(sx, y + 2, 14, 12, gfx.Color.rgb(col));
+                    cv.relief(sx, y + 2, 14, 12, .sunken);
+                }
+            }
         }
+    }
+    if (c.hit(lx, ly, lw, lh)) {
+        const row: usize = @intCast(@divTrunc(c.cy - ly - 2, theme_row_h));
+        const idx = @as(usize, @intCast(scroll.*)) + row;
+        if (row < theme_rows and idx < n) {
+            const picked = themeRow(s, list, idx);
+            if (idx == 0) {
+                s.theme.clear();
+            } else if (!picked.missing) {
+                s.theme.set(picked.label);
+            }
+            c.res.changed = true;
+        }
+    }
+
+    const bx = lx + lw + 4;
+    if (c.stepBtn(bx, ly, "^") and scroll.* > 0) {
+        scroll.* -= 1;
+        c.res.redraw = true;
+    }
+    if (c.stepBtn(bx, ly + lh - 20, "v") and scroll.* < themeMaxScroll(n)) {
+        scroll.* += 1;
+        c.res.redraw = true;
+    }
+
+    // The three frames as they look with the colours above (live preview).
+    if (c.cv) |cv| {
+        const names = [_][:0]const u8{ "focused", "unfocused", "floating" };
+        const cols = [_]u32{ s.border_focused, s.border_unfocused, s.border_floating };
+        const bw: i32 = @max(1, @min(4, s.border_width));
+        for (cols, 0..) |col, i| {
+            const py = ly + @as(i32, @intCast(i)) * 22;
+            const px = ox + 374;
+            cv.fillRect(px, py, 116, 20, gfx.Color.rgb(col));
+            cv.fillRect(px + bw, py + bw, 116 - 2 * bw, 20 - 2 * bw, gfx.Color.rgb(0x282828));
+            cv.drawTextCentered(names[i], px + 58, py + 3, font_small, gfx.Color.rgb(0xd4d4d4));
+        }
+    }
+    if (c.cv) |cv| {
+        cv.drawText("Themes/NAME.lua. A colour set below theme() in config.lua wins.", ox + 92, oy + 147, font_small, dim);
     }
 }
 
@@ -564,6 +654,7 @@ pub fn shortcuts(
     ox: i32,
     oy: i32,
     list: []const binds.Entry,
+    computed: usize,
     scroll: *i32,
     ui: *BindUi,
     s: *Settings,
@@ -651,6 +742,19 @@ pub fn shortcuts(
         if (c.radio(rx, ry + 1, label, bl == n)) bl = n;
     }
     s.bind_layout = bl;
+
+    // Binds made by code the list cannot read: they work, they just are not here.
+    if (computed > 0) {
+        if (c.cv) |cv| {
+            var buf: [112:0]u8 = undefined;
+            const t = std.fmt.bufPrintZ(
+                &buf,
+                "{d} line{s} in config.lua make{s} more binds (loops, computed keys): not listed here, kept as they are.",
+                .{ computed, if (computed == 1) "" else "s", if (computed == 1) "s" else "" },
+            ) catch "";
+            cv.drawText(t, lx, ry + 24, font_small, dim);
+        }
+    }
 }
 
 fn bindEditor(c: *Ctx, ox: i32, oy: i32, ui: *BindUi) void {

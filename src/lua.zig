@@ -26,14 +26,83 @@ pub const T_FUNCTION = zlua.LuaType.function;
 
 // ---- state -----------------------------------------------------------------
 
+/// A script gets at most this much memory. A normal config needs well under
+/// a megabyte; `string.rep("x", 1e10)` or a table that grows for ever would
+/// otherwise take the whole session (and the machine) with it. Past the limit
+/// an allocation fails, which Lua reports as the error "not enough memory" in
+/// the script, like any other error.
+pub const max_script_bytes: usize = 64 * 1024 * 1024;
+
+/// An allocator that counts what a Lua state holds and refuses to go past
+/// `limit`. Everything else goes to `backing`.
+const Limiter = struct {
+    backing: std.mem.Allocator,
+    used: usize = 0,
+    limit: usize,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(l: *Limiter) std.mem.Allocator {
+        return .{ .ptr = l, .vtable = &vtable };
+    }
+
+    fn from(ctx: *anyopaque) *Limiter {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const l = from(ctx);
+        if (len > l.limit - l.used) return null;
+        const p = l.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
+        l.used += len;
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const l = from(ctx);
+        if (new_len > memory.len and new_len - memory.len > l.limit - l.used) return false;
+        if (!l.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        l.used = l.used - memory.len + new_len;
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const l = from(ctx);
+        if (new_len > memory.len and new_len - memory.len > l.limit - l.used) return null;
+        const p = l.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        l.used = l.used - memory.len + new_len;
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const l = from(ctx);
+        l.backing.rawFree(memory, alignment, ret_addr);
+        l.used -= memory.len;
+    }
+};
+
 /// null: out of memory. Lua allocates from the C allocator, not from the
-/// config's arena: a whole interpreter's memory must not pile up in it.
+/// config's arena: a whole interpreter's memory must not pile up in it. It
+/// is counted, and a script cannot take more than `max_script_bytes`.
 pub fn newState() ?*State {
-    return zlua.Lua.init(std.heap.c_allocator) catch null;
+    const l = std.heap.c_allocator.create(Limiter) catch return null;
+    l.* = .{ .backing = std.heap.c_allocator, .limit = max_script_bytes };
+    return zlua.Lua.init(l.allocator()) catch {
+        std.heap.c_allocator.destroy(l);
+        return null;
+    };
 }
 
 pub fn close(L: *State) void {
+    // The limiter outlives lua_close (which frees through it).
+    const limiter: *Limiter = Limiter.from(L.allocator().ptr);
     L.deinit();
+    std.heap.c_allocator.destroy(limiter);
 }
 
 /// base, table, string, math, os, io, ... (the user's own script is trusted,

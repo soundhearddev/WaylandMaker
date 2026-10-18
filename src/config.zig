@@ -1932,6 +1932,33 @@ test "bind() with a bad key and a function leaves nothing behind" {
     try std.testing.expect(cfg.script == null);
 }
 
+test "a script that asks for far too much memory fails, the rest of the config is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\gap = 3
+        \\local big = string.rep("x", 400 * 1024 * 1024)
+        \\gap = 4
+    );
+    // The script stopped at the failing line with an error, `gap = 3` ran.
+    try std.testing.expect(cfg.parse_warnings >= 1);
+    try std.testing.expectEqual(@as(i32, 3), cfg.gap);
+}
+
+test "a script that grows a table until the memory limit stops there" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\local t = {}
+        \\for i = 1, 1e9 do t[i] = { i, i, i, i } end
+    );
+    try std.testing.expect(cfg.parse_warnings >= 1);
+}
+
 test "misspelt options are reported, own variables and helpers are not" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
