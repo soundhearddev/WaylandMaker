@@ -30,7 +30,7 @@ pub const binds = @import("binds.zig");
 pub const check = @import("check.zig");
 pub const themes = @import("themes.zig");
 
-pub const version_string = "0.2.0";
+pub const version_string = "0.2.1";
 
 /// The section list, 1:1 with upstream WPrefs.app/WPrefs.c's
 /// `Initialize()` -- same 16 sections (its `MAX_SECTIONS`), same order,

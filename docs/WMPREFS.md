@@ -1,6 +1,3 @@
-> **Stand:** wlprefs liest und schreibt `config.lua`, dieselbe Datei, die wmaker-wl lädt (Zuweisungen `key = wert`,
-> `bind("..", "..")`); ein übrig gebliebenes altes `config.conf` wird von keinem der beiden mehr gelesen.
-
 # WPrefs für wmaker-wl: Bestandsaufnahme & Plan
 
 Dieses Dokument beschreibt, was X11 Window Makers `WPrefs.app` konfiguriert, was davon in
