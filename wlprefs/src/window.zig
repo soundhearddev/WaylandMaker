@@ -1241,12 +1241,14 @@ test "a multi-byte character is added whole or not at all" {
     try std.testing.expectEqual(settings.Text.capacity, t.len);
 }
 
-test "a comment-starting '#' and control characters are refused" {
+test "control characters are refused, '#' is an ordinary character" {
+    // config.lua is Lua: `#` starts no comment there (comments are `--`), and
+    // a colour is typed as "#rrggbb", so a leading `#` must be accepted.
     var t: settings.Text = .{};
-    Window.textAppend(&t, "#");
     Window.textAppend(&t, "\x01");
+    Window.textAppend(&t, "\x7f");
     try std.testing.expectEqual(@as(usize, 0), t.len);
-    Window.textAppend(&t, "a");
-    Window.textAppend(&t, "#"); // inside a word is fine
-    try std.testing.expectEqualStrings("a#", t.get());
+    Window.textAppend(&t, "#");
+    Window.textAppend(&t, "d");
+    try std.testing.expectEqualStrings("#d", t.get());
 }

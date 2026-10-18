@@ -1619,7 +1619,13 @@ test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
     o.rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
     o.usable = null;
     o.reserved = .{};
+    o.struts = .{};
     try std.testing.expectEqual(o.rect, o.workArea());
+
+    // niri's struts come on top of both.
+    o.struts = .{ .left = 10, .top = 20 };
+    try std.testing.expectEqual(types.Rect{ .x = 10, .y = 20, .w = 990, .h = 780 }, o.workArea());
+    o.struts = .{};
 
     o.reserved = .{ .right = 64 };
     try std.testing.expectEqual(types.Rect{ .x = 0, .y = 0, .w = 936, .h = 800 }, o.workArea());

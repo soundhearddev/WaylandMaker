@@ -1,3 +1,24 @@
+## Erledigt (diese Runde)
+
+- [x] **Kamera bei Maximierung**: `maximize_follow` (Standard an) hält den Viewport auf der aktiven maximierten
+      Spalte, in jedem Layout-Durchlauf (Scroll-Befehle, Dock, Fenster in anderen Spalten). `maximize_keep_focus`
+      lässt neue Tiled-Fenster im Hintergrund öffnen. Dazu der Bug-Fix: Klick-/Hover-Fokus ruft jetzt
+      `workspace.activate` auf, **bevor** das Layout läuft (`strip.active` blieb vorher veraltet, die Kamera
+      sprang zur alten Spalte zurück).
+- [x] **Modulare Workspaces**: `workspace_add`, `workspace_remove_last`, `workspace_last`,
+      `move_to_workspace_next/prev`; `workspace N` legt fehlende Workspaces an (bis 16);
+      `dynamic_workspaces` (niri-Stil); `workspace_back_and_forth`; ein Reload übernimmt eine geänderte
+      `workspace_count`. Nur das Ende des Arrays wächst/schrumpft, Workspace-Adressen bleiben stabil.
+- [x] **Config neu laden per Taste**: `reload_config` (Standard `Super+Shift+r`), im selben Manage-Durchlauf
+      nach der Aktions-Queue.
+- [x] **niri-Optionen**: `strut_*`, `center_single_column`, `focus_follows_mouse_scroll`, `warp_mouse_to_focus`,
+      `prefer_no_csd`, `spawn_at_startup`, `environment`; Befehle `set_column_width`,
+      `focus_window_or_workspace_up/down`, `focus_column_or_output_left/right`.
+- [x] `focus_up`/`focus_down` bei Floating-Fenstern: wechseln jetzt in stabiler Öffnungsreihenfolge (vorher
+      pendelten sie wegen des Hochholens nur zwischen den obersten zwei Fenstern).
+- [x] Schließt ein Hintergrundfenster, springt der Fokus nicht mehr; `focus_previous` und Menü-Fokus nehmen
+      omnipräsente Fenster mit; `move_to_workspace` behält die Spaltenbreite.
+
 ## Offen
 
 
@@ -22,9 +43,7 @@
 - [ ] Menü läuft ausschließlich über den ersten gebundenen `wl_seat`; bei mehreren Seats bekommen weitere
       keinen Zeiger/keine Tastatur fürs Menü.
 - [ ] **Perf (Messen)**: Es fehlt ein Benchmark im Repo (`zig build bench`); die Zahlen oben stammen aus einem
- lokalen Wegwerf-Test.
-- [ ] **`focus_up`/`focus_down` bei Floating-Fenstern** laufen scheinbar verkehrt herum (`focus_up` geht in der
-      Z-Reihenfolge nach unten, siehe `action.focusFloatingStep`); erst klären, was gewollt ist.
+      lokalen Wegwerf-Test.
 - [ ] `compatibility.zig`: Stubs (`libwmaker` per `dlopen`, WMakerrc-Parser, Zwischenablage). `registerHook` speichert
       jetzt wirklich (Test), `loadAttributes` liest höchstens 1 MiB und gibt bei Fehlern keinen Speicher mehr verloren.
 - [ ] Drag-Reordering von Spalten
@@ -41,4 +60,3 @@
 - [ ] **Fuzzing** der Parser (`plist`, `xpm`, `wm_menu`, `config`): die Schleifen sind begrenzt und getestet,
       ein Fuzz-Lauf fehlt.
 - [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).
-- [ ] after rofi/fuzzel closing window focus fix

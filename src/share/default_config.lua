@@ -18,6 +18,14 @@ min_window_size = 120
 center_focused_column = "on_overflow"   -- on_overflow | always | never
 new_window = "new_column"               -- new_column | stack
 focus_new_windows = true         -- a new window takes the keyboard focus (false: opens in the background)
+-- niri-style layout options
+strut_left = 0                   -- extra space kept free on each side of the work area (like niri's struts)
+strut_right = 0
+strut_top = 0
+strut_bottom = 0
+center_single_column = false     -- a lone column that does not fill the screen sits in the middle
+maximize_follow = true           -- the view stays locked on a maximized column (maximize_column)
+maximize_keep_focus = false      -- a new tiled window does not take the focus from a maximized window
 
 -- ---- look -------------------------------------------------------------------
 border_width = 2
@@ -38,12 +46,20 @@ menu_submenu_align = "right"       -- right | left: side of the parent a submenu
 workspace_count = 4
 workspace_wrap = true            -- workspace_next on the last one goes to the first
 clip_scroll_workspaces = true    -- the mouse wheel over the Clip switches workspace
+workspace_back_and_forth = false -- `workspace N` on the shown workspace goes back to the previous one
+dynamic_workspaces = false       -- niri style: always one empty workspace at the end, empty ones behind it vanish
+                                 -- (workspace_count is then the number that always exists)
+-- Workspaces are modular: bind "workspace_add" / "workspace_remove_last" to grow and shrink the list
+-- at run time, and `workspace 7` creates workspace 7 if it does not exist yet (up to 16).
 
 -- ---- floating / mouse -------------------------------------------------------
 drag_threshold = 24              -- px a tiled window is dragged before it floats
 floating_size = 0.6              -- default size of a fresh floating window
 mouse_mod = "Super"                -- Super+LMB moves, Super+RMB resizes
 focus_follows_mouse = false
+focus_follows_mouse_scroll = true -- with focus_follows_mouse: pointing at a window also scrolls the view to it
+warp_mouse_to_focus = false      -- the pointer jumps into a window that got the focus by keyboard
+prefer_no_csd = true             -- ask clients to leave out their own title bars
 
 -- ---- programs ---------------------------------------------------------------
 terminal = "alacritty"
@@ -52,6 +68,15 @@ browser = "firefox"
 
 -- ---- WindowMaker compatibility (WMRootMenu, WMWindowAttributes, WMState) ------
 enable_wmaker_compat = false
+
+-- ---- niri-style startup ------------------------------------------------------
+-- Programs started once at session start (not on a reload): a string is split
+-- like a command line, a table is the argv.
+--     spawn_at_startup = { "waybar", { "mako" }, "foot -e htop" }
+-- Environment variables for every program wmaker-wl starts:
+--     environment = { MOZ_ENABLE_WAYLAND = "1", QT_QPA_PLATFORM = "wayland" }
+spawn_at_startup = {}
+environment = {}
 
 -- ---- session ------------------------------------------------------------------
 -- Autostart works exactly like Window Maker's: on start, one shell script is
@@ -161,6 +186,7 @@ bind("Super+p", [[shell grim -g "$(slurp)" ~/Pictures/shot-$(date +%s).png]])
 -- session / window
 bind("Super+q", "close")
 bind("Super+Shift+e", "exit")
+bind("Super+Shift+r", "reload_config")   -- re-read config.lua (same as pkill -HUP wmaker-wl)
 bind("Super+t", "toggle_floating")
 bind("Super+f", "toggle_fullscreen")
 bind("Super+d", "maximize_column")   -- fills the work area, others are pushed aside
@@ -242,6 +268,17 @@ bind("Super+Shift+3", "move_to_workspace 3")
 bind("Super+Shift+4", "move_to_workspace 4")
 bind("Super+Page_Down", "workspace_next")
 bind("Super+Page_Up", "workspace_prev")
+bind("Super+grave", "workspace_last")                       -- back to the previous workspace
+bind("Super+Shift+Page_Down", "move_to_workspace_next")     -- takes the window along
+bind("Super+Shift+Page_Up", "move_to_workspace_prev")
+-- bind("Super+Ctrl+Page_Down", "workspace_add")            -- modular workspaces
+-- bind("Super+Ctrl+Page_Up", "workspace_remove_last")
+-- niri-style: at the end of a column, go on to the next/previous workspace / output
+-- bind("Super+Ctrl+j", "focus_window_or_workspace_down")
+-- bind("Super+Ctrl+k", "focus_window_or_workspace_up")
+-- bind("Super+Ctrl+h", "focus_column_or_output_left")
+-- bind("Super+Ctrl+l", "focus_column_or_output_right")
+-- bind("Super+Ctrl+r", "set_column_width 50%")
 
 -- A loop instead of eight lines, if you want more workspaces:
 -- workspace_count = 9

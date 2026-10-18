@@ -98,7 +98,7 @@ fn listener(obj: *river.SeatV1, event: river.SeatV1.Event, wm: *WindowManager) v
             if (wm.cfg.focus_follows_mouse) {
                 if (seat.hovered) |w| {
                     if (seat.op == .none) {
-                        action.requestFocus(wm, w);
+                        action.requestFocusFollow(wm, w, wm.cfg.focus_follows_mouse_scroll);
                     }
                 }
             }
@@ -391,17 +391,54 @@ pub fn finishOps(wm: *WindowManager) void {
 // ----------------------------------------------------------------------------
 
 /// Give keyboard focus to `win` (or clear it). Manage sequence only.
-pub fn focus(seat: *Seat, win: ?*Window) void {
+/// Returns whether the focus changed.
+pub fn focus(seat: *Seat, win: ?*Window) bool {
     if (win) |w| {
-        if (w.closed or w.workspace == null) return;
-        if (seat.focused == w) return;
+        if (w.closed or w.workspace == null) return false;
+        if (seat.focused == w) return false;
         seat.obj.focusWindow(w.obj);
         if (seat.focused != null and seat.focused != w) seat.previous = seat.focused;
         seat.focused = w;
+        return true;
     } else if (seat.focused != null) {
         seat.obj.clearFocus();
         seat.focused = null;
+        return true;
     }
+    return false;
+}
+
+/// `warp_mouse_to_focus`: put the pointer into the middle of the visible part
+/// of `w`, unless it is in the window already. pointer_warp needs version 3.
+pub fn warpToWindow(wm: *WindowManager, seat: *Seat, w: *Window) void {
+    if (wm.obj_version < 3) return;
+    const ws = w.workspace orelse return;
+    const t = w.target;
+    if (t.w <= 0 or t.h <= 0 or t.contains(seat.pointer_x, seat.pointer_y)) return;
+    const vis = warpPoint(t, ws.output.workArea()) orelse return;
+    seat.obj.pointerWarp(vis.x, vis.y);
+    seat.pointer_x = vis.x;
+    seat.pointer_y = vis.y;
+}
+
+/// The middle of the part of `t` that lies inside `work`; null if none does.
+pub fn warpPoint(t: Rect, work: Rect) ?struct { x: i32, y: i32 } {
+    const x0 = @max(t.x, work.x);
+    const y0 = @max(t.y, work.y);
+    const x1 = @min(t.right(), work.right());
+    const y1 = @min(t.bottom(), work.bottom());
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .x = x0 + @divTrunc(x1 - x0, 2), .y = y0 + @divTrunc(y1 - y0, 2) };
+}
+
+test "warpPoint aims at the visible part of a window" {
+    const work: Rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
+    const a = warpPoint(.{ .x = 100, .y = 100, .w = 200, .h = 200 }, work).?;
+    try std.testing.expectEqual(@as(i32, 200), a.x);
+    // half of it is off the left edge: the middle of the other half
+    const b = warpPoint(.{ .x = -200, .y = 100, .w = 400, .h = 200 }, work).?;
+    try std.testing.expectEqual(@as(i32, 100), b.x);
+    try std.testing.expect(warpPoint(.{ .x = 1200, .y = 0, .w = 100, .h = 100 }, work) == null);
 }
 
 // ----------------------------------------------------------------------------

@@ -139,6 +139,22 @@ pub const Explicit = struct {
     clip_auto_raise: bool = false,
 };
 
+/// One `environment = { NAME = "value" }` entry.
+pub const EnvVar = struct { name: []const u8, value: []const u8 };
+
+pub const max_startup_commands = 64;
+pub const max_env_vars = 64;
+
+/// A valid environment variable name: [A-Za-z_][A-Za-z0-9_]*, at most 128.
+pub fn validEnvName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128) return false;
+    for (name, 0..) |ch, i| {
+        const ok = std.ascii.isAlphabetic(ch) or ch == '_' or (i > 0 and std.ascii.isDigit(ch));
+        if (!ok) return false;
+    }
+    return true;
+}
+
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     config_file: []const u8 = "(built-in defaults)",
@@ -154,6 +170,21 @@ pub const Config = struct {
     min_window_size: i32 = 120,
     center_focused_column: CenterMode = .on_overflow,
     new_window: NewWindowMode = .new_column,
+
+    /// niri's `struts`: extra space kept free on each side of the work area.
+    strut_left: i32 = 0,
+    strut_right: i32 = 0,
+    strut_top: i32 = 0,
+    strut_bottom: i32 = 0,
+    /// niri's `always-center-single-column`: a lone column that does not fill
+    /// the work area sits in the middle instead of at the left edge.
+    center_single_column: bool = false,
+    /// While the active column is maximized (`maximize_column`) the view stays
+    /// locked on it, on every layout pass, not only when focus changes.
+    maximize_follow: bool = true,
+    /// A new tiled window does not take the focus from a maximized window
+    /// (it opens in the background, next to the maximized column).
+    maximize_keep_focus: bool = false,
 
     // ---- look -----------------------------------------------------------
     border_width: i32 = 2,
@@ -186,6 +217,13 @@ pub const Config = struct {
     workspace_wrap: bool = true,
     /// The mouse wheel over the Clip switches workspace.
     clip_scroll_workspaces: bool = true,
+    /// niri's `workspace-auto-back-and-forth`: `workspace N` for the workspace
+    /// that is shown goes back to the one before.
+    workspace_back_and_forth: bool = false,
+    /// niri-style dynamic workspaces: there is always one empty workspace at
+    /// the end, and empty ones behind it disappear. `workspace_count` is then
+    /// the number that always exists.
+    dynamic_workspaces: bool = false,
 
     // ---- floating / mouse -----------------------------------------------
     /// Pixels a tiled window must be dragged before it detaches into the
@@ -195,6 +233,14 @@ pub const Config = struct {
     /// Size of a fresh floating window as a fraction of the output.
     floating_size: f64 = 0.6,
     focus_follows_mouse: bool = false,
+    /// With `focus_follows_mouse`: focusing a window by pointing at it also
+    /// scrolls the view to it. false is niri's `max-scroll-amount = "0%"`.
+    focus_follows_mouse_scroll: bool = true,
+    /// niri's `warp-mouse-to-focus`: after a keyboard focus change the pointer
+    /// jumps into the newly focused window.
+    warp_mouse_to_focus: bool = false,
+    /// niri's `prefer-no-csd`: ask clients to leave out their own title bars.
+    prefer_no_csd: bool = true,
     /// Modifier for mouse move/resize (Mod+LMB / Mod+RMB).
     mouse_mod: Modifiers = .{ .mod4 = true },
 
@@ -202,6 +248,12 @@ pub const Config = struct {
     terminal: []const []const u8 = &.{"alacritty"},
     launcher: []const []const u8 = &.{"fuzzel"},
     browser: []const []const u8 = &.{"firefox"},
+
+    /// niri's `spawn-at-startup`: run once at session start (not on reload).
+    spawn_at_startup: []const []const []const u8 = &.{},
+    /// niri's `environment`: set in wmaker-wl's own environment, so every
+    /// program it starts inherits it.
+    environment: []const EnvVar = &.{},
 
     // ---- key bindings ---------------------------------------------------
     binds: []const Bind = &.{},
@@ -889,7 +941,7 @@ const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
 // The options, grouped by the kind of value they take. applyOption (Lua
 // value -> Config), pushOption (Config -> Lua value) and the typo check all
 // walk these same lists.
-const pixel_options = .{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset" };
+const pixel_options = .{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset", "strut_left", "strut_right", "strut_top", "strut_bottom" };
 const fraction_options = .{ "default_column_width", "width_step", "floating_size" };
 const colour_options = .{ "border_focused", "border_unfocused", "border_floating" };
 const bool_options = .{
@@ -909,6 +961,14 @@ const bool_options = .{
     "workspace_wrap",
     "clip_scroll_workspaces",
     "focus_follows_mouse",
+    "focus_follows_mouse_scroll",
+    "warp_mouse_to_focus",
+    "prefer_no_csd",
+    "center_single_column",
+    "maximize_follow",
+    "maximize_keep_focus",
+    "workspace_back_and_forth",
+    "dynamic_workspaces",
     "enable_wmaker_compat",
     "enable_autostart",
     "enable_dockapps",
@@ -917,7 +977,7 @@ const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "cli
 const font_options = .{ "font_menu_title", "font_menu", "font_dock" };
 const command_options = .{ "terminal", "launcher", "browser" };
 /// Options with their own kind of value.
-const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod" };
+const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment" };
 
 /// Every option name, for the typo check.
 const all_options = pixel_options ++ fraction_options ++ colour_options ++ bool_options ++ enum_options ++ font_options ++ command_options ++ special_options;
@@ -1041,6 +1101,54 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         return;
     }
 
+    if (eql(u8, key, "spawn_at_startup")) {
+        if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+        const n = lua.rawLen(L, -1);
+        if (n > max_startup_commands) return error.Invalid;
+        var list: std.ArrayList([]const []const u8) = .empty;
+        var i: usize = 1;
+        while (i <= n) : (i += 1) {
+            lua.rawGetI(L, -1, @intCast(i));
+            const argv = commandValue(ctx) catch |e| {
+                lua.pop(L, 1);
+                return e;
+            };
+            lua.pop(L, 1);
+            try list.append(a, argv);
+        }
+        cfg.spawn_at_startup = try list.toOwnedSlice(a);
+        return;
+    }
+
+    if (eql(u8, key, "environment")) {
+        if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+        var list: std.ArrayList(EnvVar) = .empty;
+        lua.pushNil(L);
+        while (lua.next(L, -2)) { //                      [tbl, key, value]
+            const good = lua.typeOf(L, -2) == .string and lua.typeOf(L, -1) == .string and list.items.len < max_env_vars;
+            const k = if (good) lua.toSlice(L, -2) else null;
+            const v = if (good) lua.toSlice(L, -1) else null;
+            if (k == null or v == null or !validEnvName(k.?) or std.mem.indexOfScalar(u8, v.?, 0) != null) {
+                lua.pop(L, 2);
+                return error.Invalid;
+            }
+            const entry: EnvVar = .{ .name = a.dupe(u8, k.?) catch {
+                lua.pop(L, 2);
+                return error.OutOfMemory;
+            }, .value = a.dupe(u8, v.?) catch {
+                lua.pop(L, 2);
+                return error.OutOfMemory;
+            } };
+            list.append(a, entry) catch {
+                lua.pop(L, 2);
+                return error.OutOfMemory;
+            };
+            lua.pop(L, 1); //                             [tbl, key]
+        }
+        cfg.environment = try list.toOwnedSlice(a);
+        return;
+    }
+
     if (eql(u8, key, "bind_layout")) {
         if (lua.toInteger(L, -1)) |n| {
             if (n < 0 or n >= max_bind_layouts) return error.Invalid;
@@ -1091,7 +1199,7 @@ fn presetOptions(ctx: *Ctx) std.mem.Allocator.Error!void {
 fn applyChangedTables(ctx: *Ctx) std.mem.Allocator.Error!void {
     const L = ctx.L;
     lua.pushRef(L, ctx.preset_ref); //               [preset]
-    inline for (.{ "width_presets", "workspace_names", "terminal", "launcher", "browser" }) |name| {
+    inline for (.{ "width_presets", "workspace_names", "terminal", "launcher", "browser", "spawn_at_startup", "environment" }) |name| {
         lua.pushGlobals(L);
         lua.rawGetString(L, -1, name); //            [preset, G, value]
         const assigned = lua.typeOf(L, -1) != lua.T_NIL;
@@ -1141,6 +1249,19 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
         for (cfg.width_presets, 1..) |w, i| {
             lua.pushNumber(L, w);
             lua.rawSetI(L, -2, @intCast(i));
+        }
+    } else if (comptime std.mem.eql(u8, name, "spawn_at_startup")) {
+        lua.newTable(L);
+        for (cfg.spawn_at_startup, 1..) |argv, i| {
+            pushStrings(L, argv, 0);
+            lua.rawSetI(L, -2, @intCast(i));
+        }
+    } else if (comptime std.mem.eql(u8, name, "environment")) {
+        lua.newTable(L);
+        for (cfg.environment) |e| {
+            lua.pushString(L, e.name);
+            lua.pushString(L, e.value);
+            lua.rawSet(L, -3);
         }
     } else if (comptime std.mem.eql(u8, name, "bind_layout")) {
         if (cfg.bind_layout) |n| lua.pushInteger(L, n) else lua.pushString(L, "current");
@@ -2237,4 +2358,114 @@ test "the built-in default config marks no option explicit" {
     var binds: std.ArrayList(Bind) = .empty;
     try parse(arena.allocator(), default_config_text, &cfg, &binds, "<built-in>");
     try std.testing.expectEqual(Explicit{}, cfg.explicit);
+}
+
+test "niri-style options parse, with their defaults" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    // defaults
+    try std.testing.expect(cfg.maximize_follow);
+    try std.testing.expect(!cfg.maximize_keep_focus);
+    try std.testing.expect(cfg.focus_follows_mouse_scroll);
+    try std.testing.expect(cfg.prefer_no_csd);
+    try std.testing.expect(!cfg.warp_mouse_to_focus);
+    try std.testing.expect(!cfg.dynamic_workspaces);
+    try std.testing.expectEqual(@as(i32, 0), cfg.strut_left);
+
+    try parseText(arena.allocator(), &cfg,
+        \\strut_left = 10
+        \\strut_right = 20
+        \\strut_top = 30
+        \\strut_bottom = 40
+        \\center_single_column = true
+        \\maximize_follow = false
+        \\maximize_keep_focus = true
+        \\workspace_back_and_forth = true
+        \\dynamic_workspaces = true
+        \\focus_follows_mouse_scroll = false
+        \\warp_mouse_to_focus = true
+        \\prefer_no_csd = false
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(i32, 10), cfg.strut_left);
+    try std.testing.expectEqual(@as(i32, 20), cfg.strut_right);
+    try std.testing.expectEqual(@as(i32, 30), cfg.strut_top);
+    try std.testing.expectEqual(@as(i32, 40), cfg.strut_bottom);
+    try std.testing.expect(cfg.center_single_column);
+    try std.testing.expect(!cfg.maximize_follow);
+    try std.testing.expect(cfg.maximize_keep_focus);
+    try std.testing.expect(cfg.workspace_back_and_forth);
+    try std.testing.expect(cfg.dynamic_workspaces);
+    try std.testing.expect(!cfg.focus_follows_mouse_scroll);
+    try std.testing.expect(cfg.warp_mouse_to_focus);
+    try std.testing.expect(!cfg.prefer_no_csd);
+
+    // bad values are refused, the old value stays
+    try parseText(arena.allocator(), &cfg,
+        \\strut_left = -5
+        \\strut_top = 99999999
+        \\maximize_follow = "yes"
+    );
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(i32, 10), cfg.strut_left);
+    try std.testing.expectEqual(@as(i32, 30), cfg.strut_top);
+}
+
+test "spawn_at_startup takes strings and argv tables" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\spawn_at_startup = { "waybar", { "mako", "--debug" }, "foot -e \"htop -d 5\"" }
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 3), cfg.spawn_at_startup.len);
+    try std.testing.expectEqualStrings("waybar", cfg.spawn_at_startup[0][0]);
+    try std.testing.expectEqual(@as(usize, 2), cfg.spawn_at_startup[1].len);
+    try std.testing.expectEqualStrings("htop -d 5", cfg.spawn_at_startup[2][2]);
+
+    // editing the table in place works, like for width_presets
+    try parseText(arena.allocator(), &cfg, "table.insert(spawn_at_startup, \"nm-applet\")\n");
+    try std.testing.expectEqual(@as(usize, 4), cfg.spawn_at_startup.len);
+
+    // one bad entry refuses the whole option
+    try parseText(arena.allocator(), &cfg, "spawn_at_startup = { \"ok\", {} }\n");
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 4), cfg.spawn_at_startup.len);
+}
+
+test "environment takes NAME = \"value\" and refuses anything else" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\environment = { MOZ_ENABLE_WAYLAND = "1", QT_QPA_PLATFORM = "wayland" }
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 2), cfg.environment.len);
+    var found = false;
+    for (cfg.environment) |e| {
+        if (std.mem.eql(u8, e.name, "QT_QPA_PLATFORM")) {
+            found = true;
+            try std.testing.expectEqualStrings("wayland", e.value);
+        }
+    }
+    try std.testing.expect(found);
+
+    // a bad name, a non-string value and a list are all refused; nothing changes
+    try parseText(arena.allocator(), &cfg, "environment = { [\"BAD NAME\"] = \"x\" }\n");
+    try parseText(arena.allocator(), &cfg, "environment = { GOOD = 5 }\n");
+    try parseText(arena.allocator(), &cfg, "environment = { \"a\", \"b\" }\n");
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 2), cfg.environment.len);
+
+    try std.testing.expect(validEnvName("PATH"));
+    try std.testing.expect(validEnvName("_X1"));
+    try std.testing.expect(!validEnvName("1X"));
+    try std.testing.expect(!validEnvName("A-B"));
+    try std.testing.expect(!validEnvName(""));
 }

@@ -338,6 +338,12 @@ pub fn moveToWorkspace(wm: *WindowManager, win: *Window, dest: *Workspace) !void
     const was_floating = win.mode == .floating or (win.mode == .fullscreen and win.restore == .floating);
     const rect = win.float_rect;
     const had_rect = win.has_float_rect;
+    // A tiled window keeps the width of its column when it stays on the same
+    // output (on another one the work areas differ: the default width fits).
+    const keep_width: i32 = if (!was_floating and src.output == dest.output)
+        (if (win.column) |c| (if (c.isMaximized()) c.unmaximized_width else c.width) else 0)
+    else
+        0;
 
     leaveFullscreen(win);
     unplace(wm, win);
@@ -348,6 +354,90 @@ pub fn moveToWorkspace(wm: *WindowManager, win: *Window, dest: *Workspace) !void
         win.has_float_rect = had_rect;
     } else {
         try placeTiled(wm, dest, win);
+        if (keep_width > 0) {
+            if (win.column) |c| if (c.count() == 1) {
+                c.width = keep_width;
+            };
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Modular workspaces: the number of workspaces of an output can change while
+// the session runs. Only the END of the array grows and shrinks, so the
+// address of a workspace (Strip and Column keep pointers to it) never changes.
+// ----------------------------------------------------------------------------
+
+/// First window still attached to `ws`, tiled or floating.
+fn anyWindowOn(ws: *Workspace) ?*Window {
+    if (ws.strip.columns.first()) |c| if (c.windows.first()) |w| return w;
+    return ws.floating.first();
+}
+
+/// Make `out` have `n` workspaces (1..max_workspaces). Growing adds empty
+/// ones. Shrinking moves the windows of the removed workspaces to the last
+/// one that stays. Returns false if nothing had to change.
+pub fn setWorkspaceCount(wm: *WindowManager, out: *Output, n_wanted: u32) bool {
+    const config = @import("config.zig");
+    const n = std.math.clamp(n_wanted, 1, config.max_workspaces);
+    if (n == out.workspace_count) return false;
+
+    if (n > out.workspace_count) {
+        var i = out.workspace_count;
+        while (i < n) : (i += 1) out.workspaces[i].init(out, i);
+        out.workspace_count = n;
+        return true;
+    }
+
+    const dest = &out.workspaces[n - 1];
+    var i = out.workspace_count;
+    while (i > n) {
+        i -= 1;
+        const src = &out.workspaces[i];
+        while (anyWindowOn(src)) |win| {
+            leaveFullscreen(win);
+            moveToWorkspace(wm, win, dest) catch {
+                // Could not allocate a column: the window is not lost, it is
+                // placed again by the next manage pass.
+                unplace(wm, win);
+                win.new = true;
+            };
+        }
+    }
+    out.workspace_count = n;
+    if (out.active >= n) out.active = n - 1;
+    if (out.prev_active) |p| if (p >= n or p == out.active) {
+        out.prev_active = null;
+    };
+    return true;
+}
+
+/// Append one workspace. False when the output already has the maximum.
+pub fn addWorkspace(wm: *WindowManager, out: *Output) bool {
+    return setWorkspaceCount(wm, out, out.workspace_count + 1);
+}
+
+/// Delete the last workspace (Window Maker's "Destroy Last"); its windows go
+/// to the one before it. False when only one workspace is left.
+pub fn removeLastWorkspace(wm: *WindowManager, out: *Output) bool {
+    if (out.workspace_count <= 1) return false;
+    return setWorkspaceCount(wm, out, out.workspace_count - 1);
+}
+
+/// `dynamic_workspaces`: keep exactly one empty workspace at the end, and drop
+/// the empty ones behind it. `min` workspaces always exist and the one that is
+/// shown is never dropped. Runs once per manage pass.
+pub fn maintainDynamic(wm: *WindowManager, out: *Output, min: u32) void {
+    const config = @import("config.zig");
+    // Something moved into the last workspace: there must be a fresh one.
+    if (out.workspace_count < config.max_workspaces and !out.workspaces[out.workspace_count - 1].isEmpty()) {
+        _ = setWorkspaceCount(wm, out, out.workspace_count + 1);
+    }
+    // Empty ones at the end, beyond the single spare one, go.
+    while (out.workspace_count > @max(1, min) and out.workspace_count >= 2) {
+        const last = out.workspace_count - 1;
+        if (out.active == last or !out.workspaces[last].isEmpty() or !out.workspaces[last - 1].isEmpty()) break;
+        _ = setWorkspaceCount(wm, out, last);
     }
 }
 
@@ -506,3 +596,4 @@ pub fn wsIndexOf(wm: *WindowManager, win: *Window) ?u32 {
     const ws = win.workspace orelse return null;
     return ws.index;
 }
+

@@ -1947,7 +1947,7 @@ pub const Ui = struct {
         if (ui.model) |*m| m.deinit();
         ui.model = null;
         ui.model_gen = wm.dock_gen;
-        ui.model = dock_mod.Model.init(ui.gpa(), wm.dockapps, wm.cfg.workspace_names, wm.cfg.workspace_count) catch |err| blk: {
+        ui.model = dock_mod.Model.init(ui.gpa(), wm.dockapps, wm.cfg.workspace_names, config_mod.max_workspaces) catch |err| blk: {
             std.log.err("dock: cannot build the model: {t}", .{err});
             break :blk null;
         };
@@ -2551,7 +2551,8 @@ pub const Ui = struct {
             .label = try ui.marked(cur == null, "All workspaces"),
             .kind = .{ .ui_cmd = .{ .set_workspace = .{ .ref = ref, .ws = null } } },
         });
-        const n = @min(ui.wm.cfg.workspace_count, max_move_rows);
+        const live: u32 = if (types.workingOutput(ui.wm)) |o| o.workspace_count else ui.wm.cfg.workspace_count;
+        const n = @min(live, max_move_rows);
         var i: u32 = 0;
         while (i < n) : (i += 1) {
             const label = if (m.workspaceName(i)) |name|

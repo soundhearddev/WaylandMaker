@@ -256,6 +256,11 @@ pub fn placeNew(wm: *WindowManager) void {
         };
 
         win.new = false;
+        // `maximize_keep_focus`: a window that is on a maximized column keeps
+        // the focus, the new tiled window opens beside it, unseen.
+        const hold = holdsFocus(wm, ws);
+        const prev_col = ws.strip.active;
+        const prev_win: ?*Window = if (prev_col) |c| c.focused else null;
         const floating = attrs.floating orelse
             (wantsFloating(win) or attrs.is("omnipresent") or attrs.is("keep_on_top"));
 
@@ -278,6 +283,12 @@ pub fn placeNew(wm: *WindowManager) void {
             }
         }
 
+        if (hold and !floating) {
+            ws.strip.active = prev_col;
+            if (prev_col) |c| c.focused = prev_win;
+            continue;
+        }
+
         if (!attrs.is("unfocusable")) {
             workspace.activate(win);
             // `focus_new_windows = false`: open in the background while some
@@ -295,6 +306,17 @@ pub fn placeNew(wm: *WindowManager) void {
             }
         }
     }
+}
+
+/// `maximize_keep_focus` applies: the focused tiled window of `ws` sits in a
+/// maximized column.
+fn holdsFocus(wm: *WindowManager, ws: *types.Workspace) bool {
+    if (!wm.cfg.maximize_keep_focus) return false;
+    const col = ws.strip.active orelse return false;
+    if (!col.isMaximized()) return false;
+    const s = wm.seats.first() orelse return false;
+    const f = s.focused orelse return false;
+    return !f.closed and f.column == col;
 }
 
 /// Output new windows go to: the one with the focused window, else first.
@@ -322,9 +344,23 @@ pub fn reap(wm: *WindowManager) void {
     }
 }
 
+/// A seat has `win` focused, or no seat has anything focused (then whatever
+/// is on the workspace is the best target).
+fn hadFocus(wm: *WindowManager, win: *Window) bool {
+    var any = false;
+    var it = wm.seats.first();
+    while (it) |s| : (it = types.nextSeat(s, wm)) {
+        if (s.focused == win) return true;
+        if (s.focused != null) any = true;
+    }
+    return !any or wm.focus_request == win;
+}
+
 fn destroy(wm: *WindowManager, win: *Window) void {
     const ws = win.workspace;
-    const was_focus_target = if (ws) |w| w.output.ws() == w else false;
+    // Only the window that HAD the focus hands it on. (Any window of the
+    // shown workspace used to: closing a background dialog moved the focus.)
+    const was_focus_target = if (ws) |w| w.output.ws() == w and hadFocus(wm, win) else false;
 
     workspace.unplace(wm, win);
     seatmod.forgetWindow(wm, win);
@@ -402,7 +438,9 @@ pub fn applyManage(wm: *WindowManager, win: *Window) void {
     if (win.mode == .fullscreen) return; // river owns fullscreen geometry
 
     // Server-side decorations are chosen once, before the first commit.
-    if (win.sent_tiled == null) win.obj.useSsd();
+    if (win.sent_tiled == null) {
+        if (cfg.prefer_no_csd) win.obj.useSsd() else win.obj.useCsd();
+    }
 
     // Tiled windows tell the client so (it drops rounded corners / shadows
     // and sizes to the slot); floating windows must NOT be told they are

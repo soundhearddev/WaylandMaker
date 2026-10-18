@@ -10,6 +10,9 @@
 
 const std = @import("std");
 
+/// The most workspaces an output can have (config.max_workspaces).
+const max_workspaces: u32 = 16;
+
 /// Commands that take no arguments (`close`, `focus_left`, ...), plus the
 /// `spawn_*` shortcuts. Every field of types.Command except `none` and the
 /// ones that take arguments.
@@ -43,6 +46,16 @@ pub const simple = [_][]const u8{
     "narrow_column",
     "workspace_next",
     "workspace_prev",
+    "workspace_last",
+    "workspace_add",
+    "workspace_remove_last",
+    "move_to_workspace_next",
+    "move_to_workspace_prev",
+    "focus_window_or_workspace_up",
+    "focus_window_or_workspace_down",
+    "focus_column_or_output_left",
+    "focus_column_or_output_right",
+    "reload_config",
     "minimize",
     "restore",
     "show_all",
@@ -59,7 +72,7 @@ pub const simple = [_][]const u8{
 };
 
 /// Commands that need arguments, and what kind.
-pub const Arg = enum { program, shell_text, workspace, two_numbers };
+pub const Arg = enum { program, shell_text, workspace, two_numbers, fraction };
 
 pub const with_args = [_]struct { name: []const u8, arg: Arg }{
     .{ .name = "spawn", .arg = .program },
@@ -68,6 +81,7 @@ pub const with_args = [_]struct { name: []const u8, arg: Arg }{
     .{ .name = "shexec", .arg = .shell_text },
     .{ .name = "workspace", .arg = .workspace },
     .{ .name = "move_to_workspace", .arg = .workspace },
+    .{ .name = "set_column_width", .arg = .fraction },
     .{ .name = "float_move", .arg = .two_numbers },
     .{ .name = "float_resize", .arg = .two_numbers },
 };
@@ -106,8 +120,17 @@ pub fn problem(action: []const u8, workspaces: u32) ?[]const u8 {
         switch (a.arg) {
             .program, .shell_text => return if (args.len == 0) "Action: this command needs a program or text after it" else null,
             .workspace => {
+                // Up to the maximum: workspaces that do not exist yet are created.
+                _ = workspaces;
                 const n = std.fmt.parseInt(u32, args, 10) catch return "Action: needs a workspace number";
-                return if (n < 1 or n > workspaces) "Action: workspace number out of range" else null;
+                return if (n < 1 or n > max_workspaces) "Action: workspace number out of range" else null;
+            },
+            .fraction => {
+                const pct = std.mem.endsWith(u8, args, "%");
+                const num = if (pct) args[0 .. args.len - 1] else args;
+                const v = std.fmt.parseFloat(f64, std.mem.trim(u8, num, " \t")) catch return "Action: needs a width like 0.5 or 50%";
+                const f = if (pct) v / 100.0 else v;
+                return if (!(f > 0 and f <= 1.0)) "Action: the width must be more than 0 and at most 1 (100%)" else null;
             },
             .two_numbers => {
                 var it = std.mem.tokenizeAny(u8, args, " \t");
@@ -141,7 +164,12 @@ test "known and problem agree with the documented commands" {
 
     try std.testing.expect(problem("workspace 3", 4) == null);
     try std.testing.expect(problem("workspace 0", 4) != null);
-    try std.testing.expect(problem("workspace 5", 4) != null);
+    try std.testing.expect(problem("workspace 5", 4) == null); // created when used
+    try std.testing.expect(problem("workspace 17", 4) != null);
+    try std.testing.expect(problem("set_column_width 50%", 4) == null);
+    try std.testing.expect(problem("set_column_width 0.25", 4) == null);
+    try std.testing.expect(problem("set_column_width 150%", 4) != null);
+    try std.testing.expect(problem("set_column_width", 4) != null);
     try std.testing.expect(problem("workspace x", 4) != null);
     try std.testing.expect(problem("move_to_workspace 2", 4) == null);
 

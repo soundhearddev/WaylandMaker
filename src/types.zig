@@ -242,6 +242,12 @@ pub const Column = struct {
     pub fn active(c: *Column) ?*Window {
         return c.focused orelse c.windows.first();
     }
+
+    /// `maximize_column` is on: the column fills the work area and remembers
+    /// the width it had before.
+    pub fn isMaximized(c: *const Column) bool {
+        return c.unmaximized_width != 0;
+    }
 };
 
 pub const Strip = struct {
@@ -250,6 +256,9 @@ pub const Strip = struct {
     active: ?*Column = null,
     /// Strip coordinate of the viewport's left edge.
     scroll_x: i32 = 0,
+    /// Extra shift to the right, set by layout when `center_single_column`
+    /// centres a lone column. 0 otherwise.
+    offset_x: i32 = 0,
     /// Work area width the column widths were last fitted to (0 = never);
     /// layout rescales the columns when it changes (Dock appears, a bar
     /// reserves space, ...).
@@ -313,10 +322,15 @@ pub const Output = struct {
     /// Space taken by wmaker-wl's own Dock (ui.zig keeps this current).
     /// Subtracted from the area windows may occupy, see `workArea`.
     reserved: Insets = .{},
+    /// The user's `strut_*` options (main.layoutAll keeps them current).
+    struts: Insets = .{},
 
     workspaces: [config.max_workspaces]Workspace = undefined,
     workspace_count: u32 = 0,
     active: u32 = 0,
+    /// The workspace that was shown before `active` (`workspace_last`,
+    /// `workspace_back_and_forth`); null until the first switch.
+    prev_active: ?u32 = null,
 
     pub fn ws(o: *Output) *Workspace {
         return &o.workspaces[o.active];
@@ -331,11 +345,12 @@ pub const Output = struct {
     pub fn workArea(o: *const Output) Rect {
         const base = o.usable orelse o.rect;
         const r = o.reserved;
+        const st = o.struts;
         return .{
-            .x = base.x + r.left,
-            .y = base.y + r.top,
-            .w = @max(1, base.w - r.left - r.right),
-            .h = @max(1, base.h - r.top - r.bottom),
+            .x = base.x + r.left + st.left,
+            .y = base.y + r.top + st.top,
+            .w = @max(1, base.w - r.left - r.right - st.left - st.right),
+            .h = @max(1, base.h - r.top - r.bottom - st.top - st.bottom),
         };
     }
 
@@ -482,6 +497,16 @@ pub const WindowManager = struct {
     pending_fullscreen: ?struct { win: *Window, on: bool } = null,
 
     quit: bool = false,
+
+    /// The `reload_config` command asked for a config reload. Executed in the
+    /// same manage sequence, after the queued actions (main.onManage): a
+    /// reload destroys and re-creates the key bindings, which is only legal
+    /// there, and must not run while the action queue is being worked off.
+    reload_pending: bool = false,
+    /// The focus request of this pass came from the pointer (click, hover),
+    /// not from the keyboard: `warp_mouse_to_focus` must not move the pointer
+    /// then. Cleared at the end of every manage pass.
+    focus_by_pointer: bool = false,
 };
 
 // ============================================================================
@@ -530,6 +555,9 @@ pub const Command = union(enum) {
     cycle_column_width,
     widen_column,
     narrow_column,
+    /// niri's set-column-width: the active column takes this fraction of the
+    /// work area (`set_column_width 0.5` or `set_column_width 50%`).
+    set_column_width: f64,
 
     float_move: struct { dx: i32, dy: i32 },
     float_resize: struct { dw: i32, dh: i32 },
@@ -537,7 +565,27 @@ pub const Command = union(enum) {
     workspace: u32,
     workspace_next,
     workspace_prev,
+    /// Back to the workspace that was shown before this one.
+    workspace_last,
+    /// Modular workspaces: append a new workspace / delete the last one (its
+    /// windows move to the one before it), like Window Maker's "New" and
+    /// "Destroy Last" in the workspace menu.
+    workspace_add,
+    workspace_remove_last,
     move_to_workspace: u32,
+    move_to_workspace_next,
+    move_to_workspace_prev,
+    /// niri's focus-window-or-workspace-up/down: the neighbouring window in the
+    /// column, or at its end the previous / next workspace.
+    focus_window_or_workspace_up,
+    focus_window_or_workspace_down,
+    /// niri's focus-column-or-monitor-left/right: the neighbouring column, or
+    /// at the edge of the strip the previous / next output.
+    focus_column_or_output_left,
+    focus_column_or_output_right,
+
+    /// Re-read config.lua now (what `pkill -HUP wmaker-wl` does).
+    reload_config,
 
     /// Window Maker's miniaturize / hide. See workspace.minimize.
     minimize,

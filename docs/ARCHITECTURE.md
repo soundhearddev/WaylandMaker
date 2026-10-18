@@ -67,6 +67,7 @@ Invariants (enforced in `workspace.zig`, checked in `model_test.zig`):
 
 - Column width: `w = f·(avail + gap) − gap`, so 1/2+1/2 and 1/3+1/3+1/3 fit exactly.
 - Windows in a column fill the height exactly; remaining pixels are distributed.
+- A maximized active column locks the viewport (`layout.lockMaximized`, `maximize_follow`) on every pass.
 - The viewport (`scroll_x`) is clamped on **every** layout pass; when focus changes, it follows the active column (`center_focused_column`).
 - Borders are outside the content area; the layout subtracts them from the slot.
 - Windows use the layer-shell `non_exclusive_area` so panels do not overlap them.
@@ -80,6 +81,14 @@ States: `idle → requested → running → ending → idle` (see `types.OpState
 - Releasing **before** `op_start_pointer`: river does not know about the operation and never sends `op_release`; the operation is cancelled immediately.
 - If a window dies during the operation: `running → ending`, so `op_end` is still sent and the pointer is not left grabbed.
 - Client requests (`pointer_move_requested`, etc.) go through the same state machine.
+
+## Focus and workspaces
+
+- `onManage` resolves the focus target and calls `workspace.activate` on it **before** the layout, so that a
+  click/hover (which only *requests* focus) updates `strip.active` and the view follows the right column.
+- Workspaces are modular: `workspace.setWorkspaceCount` grows or shrinks only the end of `Output.workspaces`
+  (addresses stay stable); `maintainDynamic` implements `dynamic_workspaces` once per manage pass.
+- `reload_config` only sets `wm.reload_pending`; `onManage` reloads after the queued actions ran.
 
 ## Configuration
 

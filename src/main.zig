@@ -199,6 +199,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (wm.ui) |u| u.deinit();
 
     std.log.info("wmaker-wl running (config: {s}; DockApps are icons: dockhost)", .{wm.cfg.config_file});
+    // niri-style `environment` first (the programs below inherit it), then
+    // `spawn_at_startup`; both once, a reload does not repeat the spawns.
+    applyEnvironment(wm.cfg.environment);
+    for (wm.cfg.spawn_at_startup) |argv| proc.spawn(wm, argv);
     // Window Maker's autostart: one script, run once, detached. Run through
     // /bin/sh so it works whether or not the file is marked executable; a
     // shebang line is just a `#` comment to sh and is harmless either way.
@@ -351,6 +355,8 @@ fn reloadConfig(wm: *WindowManager) void {
     var old_cfg = wm.cfg;
     wm.cfg = new_cfg;
     if (loadFromConfig(wm)) {
+        applyWorkspaceCount(wm, old_cfg.workspace_count);
+        applyEnvironment(wm.cfg.environment);
         old_cfg.deinit();
         rebind(wm);
         std.log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
@@ -362,6 +368,36 @@ fn reloadConfig(wm: *WindowManager) void {
         wm.cfg = old_cfg;
         _ = loadFromConfig(wm); // best effort; wm.commands defaults to &.{} below if even this fails
         rebind(wm);
+    }
+}
+
+/// A reload that changed `workspace_count` resizes every output; one that did
+/// not leaves alone the workspaces added or removed with commands since.
+fn applyWorkspaceCount(wm: *WindowManager, old_count: u32) void {
+    if (old_count == wm.cfg.workspace_count) return;
+    var it = wm.outputs.first();
+    while (it) |o| : (it = types.nextOutput(o, wm)) {
+        if (o.removed) continue;
+        _ = workspace.setWorkspaceCount(wm, o, wm.cfg.workspace_count);
+    }
+    wm.focus_request = null;
+    wm.follow_request = true;
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// `environment = { NAME = "value" }`: set in our own environment, which the
+/// programs we start inherit. A value that is too long is skipped.
+pub fn applyEnvironment(vars: []const config.EnvVar) void {
+    for (vars) |e| {
+        var nbuf: [160]u8 = undefined;
+        var vbuf: [4096]u8 = undefined;
+        const n = std.fmt.bufPrintZ(&nbuf, "{s}", .{e.name}) catch continue;
+        const v = std.fmt.bufPrintZ(&vbuf, "{s}", .{e.value}) catch {
+            std.log.warn("environment: the value of `{s}` is too long, skipped", .{e.name});
+            continue;
+        };
+        if (setenv(n.ptr, v.ptr, 1) != 0) std.log.warn("environment: cannot set `{s}`", .{e.name});
     }
 }
 
@@ -642,6 +678,14 @@ fn onManage(wm: *WindowManager) void {
     // 5. Key-binding actions queued since the last sequence.
     runPending(wm);
 
+    // 5b. `reload_config` asked for a reload. After the queue ran (the queue
+    //     must not be worked off while the config it was made from is
+    //     replaced) and in this same sequence (bindings are re-created).
+    if (wm.reload_pending) {
+        wm.reload_pending = false;
+        reloadConfig(wm);
+    }
+
     // 6. Client-requested fullscreen.
     if (wm.pending_fullscreen) |pf| {
         wm.pending_fullscreen = null;
@@ -657,11 +701,26 @@ fn onManage(wm: *WindowManager) void {
         }
     }
 
+    // 6a. Struts, and dynamic workspaces (an empty one at the end, no empty
+    //     ones behind it). After everything that moves windows around.
+    prepareOutputs(wm);
+
     // 6b. The Dock tiles of minimized windows: after the actions above, which
     //     are what minimize and restore windows (ui.sync() ran before them).
     if (wm.ui) |u| u.syncBars();
 
-    // 7. Layout. Geometry only; no requests yet.
+    // 7. Who gets the keyboard focus. Decided BEFORE the layout, and made the
+    //    active window of its workspace in our model: a click or a hover only
+    //    asks for focus, and without this `strip.active` stayed on the old
+    //    column, so the view scrolled back to it.
+    const focus_target = resolveFocus(wm);
+    // Whatever gets the focus is where the user is working now.
+    if (focus_target) |w| if (w.workspace) |ws| {
+        wm.active_output = ws.output;
+        workspace.activate(w);
+    };
+
+    // 7a. Layout. Geometry only; no requests yet.
     layoutAll(wm);
 
     // 7b. The minimize / restore animations: a restored window's final
@@ -673,11 +732,6 @@ fn onManage(wm: *WindowManager) void {
 
     // 8. Send management state (propose_dimensions, tiled, fullscreen) and
     //    rendering state (position, borders, visibility) in one pass.
-    const focus_target = resolveFocus(wm);
-    // Whatever gets the focus is where the user is working now.
-    if (focus_target) |w| if (w.workspace) |ws| {
-        wm.active_output = ws.output;
-    };
     var wit = wm.windows.first();
     while (wit) |w| : (wit = types.nextWindow(w, wm)) {
         window_mod.applyManage(wm, w);
@@ -692,7 +746,12 @@ fn onManage(wm: *WindowManager) void {
     const menu_open = if (wm.ui) |u| u.menuOpen() else false;
     if (!menu_open) {
         sit = wm.seats.first();
-        while (sit) |s| : (sit = types.nextSeat(s, wm)) seat_mod.focus(s, focus_target);
+        while (sit) |s| : (sit = types.nextSeat(s, wm)) {
+            const changed = seat_mod.focus(s, focus_target);
+            if (changed and wm.cfg.warp_mouse_to_focus and !wm.focus_by_pointer) {
+                if (focus_target) |w| seat_mod.warpToWindow(wm, s, w);
+            }
+        }
     }
 
     // 10. End a finished pointer operation. After layout so that the last
@@ -702,6 +761,7 @@ fn onManage(wm: *WindowManager) void {
     // 11. Consumed.
     wm.focus_request = null;
     wm.follow_request = false;
+    wm.focus_by_pointer = false;
 }
 
 fn runUiAction(wm: *WindowManager, req: types.UiAction) void {
@@ -716,7 +776,7 @@ fn runUiAction(wm: *WindowManager, req: types.UiAction) void {
                 return;
             }
             if (w.workspace == null) return;
-            if (w.workspace) |ws| ws.output.active = ws.index;
+            if (w.workspace) |ws| action.showWorkspace(wm, ws);
             workspace.activate(w);
             wm.focus_request = w;
             wm.follow_request = true;
@@ -772,6 +832,18 @@ fn resolveFocus(wm: *WindowManager) ?*types.Window {
     //    focused window is, even if that window just went away), so a second
     //    monitor does not suddenly steal focus onto the first.
     return workspace.defaultFocus((out orelse return null).ws());
+}
+
+/// Per-output housekeeping that has to be settled before layout: the
+/// `strut_*` options, and `dynamic_workspaces`.
+fn prepareOutputs(wm: *WindowManager) void {
+    const cfg = &wm.cfg;
+    var oit = wm.outputs.first();
+    while (oit) |out| : (oit = types.nextOutput(out, wm)) {
+        if (out.removed) continue;
+        out.struts = .{ .left = cfg.strut_left, .right = cfg.strut_right, .top = cfg.strut_top, .bottom = cfg.strut_bottom };
+        if (cfg.dynamic_workspaces) workspace.maintainDynamic(wm, out, cfg.workspace_count);
+    }
 }
 
 fn layoutAll(wm: *WindowManager) void {

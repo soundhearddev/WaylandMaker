@@ -1474,3 +1474,357 @@ test "a removed active output is never returned as the working output" {
     try std.testing.expect(types.workingOutput(&f.wm) == f.out);
     second.removed = false;
 }
+
+// ============================================================================
+// Camera follows a maximized window, modular workspaces, reload, niri options
+// ============================================================================
+
+fn testSeatFor(f: *Fixture) !*types.Seat {
+    const s = try std.testing.allocator.create(types.Seat);
+    s.* = .{ .obj = @ptrCast(&dummy_byte), .xkb_bindings = undefined, .pointer_bindings = undefined };
+    s.xkb_bindings.init();
+    s.pointer_bindings.init();
+    f.wm.seats.append(s);
+    return s;
+}
+
+fn dropSeat(s: *types.Seat) void {
+    types.unlink(&s.link);
+    std.testing.allocator.destroy(s);
+}
+
+test "the view stays on a maximized column, even when it drifts or the work area changes" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    const c = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    try workspace.placeTiled(&f.wm, f.cur(), b);
+    try workspace.placeTiled(&f.wm, f.cur(), c);
+    const strip = &f.cur().strip;
+    strip.active = b.column.?;
+    workspace.toggleMaximized(&f.wm, b.column.?);
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    const locked = strip.scroll_x;
+    try std.testing.expectEqual(b.column.?.x - f.wm.cfg.outer_gap, locked);
+
+    // A scroll command moves the view away; the next pass (no focus change!)
+    // puts it back.
+    layout.scrollBy(strip, 400, 1920, &f.wm.cfg);
+    layout.compute(f.cur(), &f.wm.cfg, false);
+    try std.testing.expectEqual(locked, strip.scroll_x);
+
+    // The Dock appears and takes 64px: the maximized column still fills the
+    // view and the view is still on it.
+    f.out.reserved = .{ .right = 64 };
+    layout.compute(f.cur(), &f.wm.cfg, false);
+    try std.testing.expectEqual(b.column.?.x - f.wm.cfg.outer_gap, strip.scroll_x);
+    try std.testing.expectEqual(f.out.workArea().w - 2 * f.wm.cfg.outer_gap, b.column.?.width);
+
+    // With maximize_follow = false the camera is free again.
+    f.wm.cfg.maximize_follow = false;
+    strip.scroll_x = 0;
+    layout.compute(f.cur(), &f.wm.cfg, false);
+    try std.testing.expectEqual(@as(i32, 0), strip.scroll_x);
+    try check(f);
+}
+
+test "maximize_keep_focus: a new tiled window opens beside a maximized one without taking the focus" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const window_mod = @import("window.zig");
+    const seat = try testSeatFor(f);
+    defer dropSeat(seat);
+
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    a.new = false; // placed by hand: placeNew must leave it alone
+    workspace.activate(a);
+    workspace.toggleMaximized(&f.wm, a.column.?);
+    seat.focused = a;
+
+    // default: the new window takes the focus
+    const b = try f.newWindow();
+    b.new = true;
+    window_mod.placeNew(&f.wm);
+    try std.testing.expect(f.wm.focus_request == b);
+    try std.testing.expect(f.cur().strip.active == b.column.?);
+    f.wm.focus_request = null;
+    seat.focused = a;
+    f.cur().strip.active = a.column.?;
+    a.column.?.focused = a;
+
+    f.wm.cfg.maximize_keep_focus = true;
+    const c = try f.newWindow();
+    c.new = true;
+    window_mod.placeNew(&f.wm);
+    try std.testing.expect(f.wm.focus_request == null);
+    try std.testing.expect(f.cur().strip.active == a.column.?);
+    try std.testing.expect(c.column != null and c.column.? != a.column.?);
+    try std.testing.expectEqual(@as(usize, 3), f.cur().strip.columnCount());
+    try check(f);
+}
+
+test "setWorkspaceCount grows with empty workspaces and shrinks by moving windows to the last one" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    try std.testing.expect(workspace.setWorkspaceCount(&f.wm, f.out, 5));
+    try std.testing.expectEqual(@as(u32, 5), f.out.workspace_count);
+    try std.testing.expect(f.out.workspaces[4].isEmpty());
+    try std.testing.expect(!workspace.setWorkspaceCount(&f.wm, f.out, 5)); // no change
+
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    try workspace.placeTiled(&f.wm, &f.out.workspaces[3], a);
+    workspace.placeFloating(&f.out.workspaces[4], b);
+    f.out.active = 4;
+
+    try std.testing.expect(workspace.setWorkspaceCount(&f.wm, f.out, 3));
+    try std.testing.expectEqual(@as(u32, 3), f.out.workspace_count);
+    try std.testing.expect(a.workspace == &f.out.workspaces[2]);
+    try std.testing.expect(b.workspace == &f.out.workspaces[2]);
+    try std.testing.expectEqual(@as(u32, 2), f.out.active); // the shown one was removed
+    try check(f);
+
+    // clamped to 1..max
+    try std.testing.expect(workspace.setWorkspaceCount(&f.wm, f.out, 0));
+    try std.testing.expectEqual(@as(u32, 1), f.out.workspace_count);
+    try std.testing.expect(workspace.setWorkspaceCount(&f.wm, f.out, 99));
+    try std.testing.expectEqual(@as(u32, config.max_workspaces), f.out.workspace_count);
+    try check(f);
+}
+
+test "workspace_add / workspace_remove_last, and workspace N creates the workspace" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const run = action_mod.run;
+    run(&f.wm, .workspace_add);
+    try std.testing.expectEqual(@as(u32, 3), f.out.workspace_count);
+
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, &f.out.workspaces[2], a);
+    run(&f.wm, .workspace_remove_last);
+    try std.testing.expectEqual(@as(u32, 2), f.out.workspace_count);
+    try std.testing.expect(a.workspace == &f.out.workspaces[1]); // moved to the one before
+
+    run(&f.wm, .{ .workspace = 6 }); // `workspace 7` does not exist yet
+    try std.testing.expectEqual(@as(u32, 7), f.out.workspace_count);
+    try std.testing.expectEqual(@as(u32, 6), f.out.active);
+
+    // never below one
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) run(&f.wm, .workspace_remove_last);
+    try std.testing.expectEqual(@as(u32, 1), f.out.workspace_count);
+    try check(f);
+}
+
+test "workspace_last goes back; workspace_back_and_forth makes `workspace N` do it too" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const run = action_mod.run;
+    run(&f.wm, .{ .workspace = 1 });
+    try std.testing.expectEqual(@as(u32, 1), f.out.active);
+    try std.testing.expectEqual(@as(?u32, 0), f.out.prev_active);
+    run(&f.wm, .workspace_last);
+    try std.testing.expectEqual(@as(u32, 0), f.out.active);
+    run(&f.wm, .workspace_last);
+    try std.testing.expectEqual(@as(u32, 1), f.out.active);
+
+    // On the shown workspace, `workspace 2` does nothing ...
+    run(&f.wm, .{ .workspace = 1 });
+    try std.testing.expectEqual(@as(u32, 1), f.out.active);
+    // ... unless workspace_back_and_forth is on.
+    f.wm.cfg.workspace_back_and_forth = true;
+    run(&f.wm, .{ .workspace = 1 });
+    try std.testing.expectEqual(@as(u32, 0), f.out.active);
+}
+
+test "dynamic workspaces: one empty one at the end, no empty ones behind it" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.wm.cfg.dynamic_workspaces = true;
+    const min: u32 = 2;
+    workspace.maintainDynamic(&f.wm, f.out, min);
+    try std.testing.expectEqual(@as(u32, 2), f.out.workspace_count); // last is empty already
+
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, &f.out.workspaces[1], a); // the last one gets used
+    workspace.maintainDynamic(&f.wm, f.out, min);
+    try std.testing.expectEqual(@as(u32, 3), f.out.workspace_count);
+    try std.testing.expect(f.out.workspaces[2].isEmpty());
+
+    workspace.unplace(&f.wm, a); // it closes again
+    workspace.maintainDynamic(&f.wm, f.out, min);
+    try std.testing.expectEqual(@as(u32, 2), f.out.workspace_count);
+
+    // the shown workspace is never dropped
+    try std.testing.expect(workspace.setWorkspaceCount(&f.wm, f.out, 4));
+    f.out.active = 3;
+    workspace.maintainDynamic(&f.wm, f.out, min);
+    try std.testing.expectEqual(@as(u32, 4), f.out.workspace_count);
+    try check(f);
+}
+
+test "move_to_workspace_next / _prev take the window along and keep its column width" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    a.column.?.width = 777;
+    workspace.activate(a);
+    const seat = try testSeatFor(f);
+    defer dropSeat(seat);
+    seat.focused = a;
+
+    action_mod.run(&f.wm, .move_to_workspace_next);
+    try std.testing.expectEqual(@as(u32, 1), f.out.active);
+    try std.testing.expect(a.workspace == &f.out.workspaces[1]);
+    try std.testing.expectEqual(@as(i32, 777), a.column.?.width);
+    try std.testing.expect(f.wm.focus_request == a);
+
+    action_mod.run(&f.wm, .move_to_workspace_prev);
+    try std.testing.expectEqual(@as(u32, 0), f.out.active);
+    try std.testing.expect(a.workspace == &f.out.workspaces[0]);
+
+    // no wrap: prev on the first workspace stays
+    f.wm.cfg.workspace_wrap = false;
+    action_mod.run(&f.wm, .move_to_workspace_prev);
+    try std.testing.expect(a.workspace == &f.out.workspaces[0]);
+    try check(f);
+}
+
+test "focus_up / focus_down step through floating windows in the order they were opened" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const seat = try testSeatFor(f);
+    defer dropSeat(seat);
+    const w0 = try f.newWindow();
+    const w1 = try f.newWindow();
+    const w2 = try f.newWindow();
+    for ([_]*Window{ w0, w1, w2 }) |w| {
+        w.workspace = f.cur();
+        workspace.placeFloating(f.cur(), w);
+    }
+    seat.focused = w0;
+    // Focusing raises the window; the walk must not depend on that.
+    const expect_order = [_]*Window{ w1, w2, w0, w1 };
+    for (expect_order) |want| {
+        action_mod.run(&f.wm, .focus_down);
+        try std.testing.expect(f.wm.focus_request == want);
+        seat.focused = f.wm.focus_request;
+    }
+    const back = [_]*Window{ w0, w2, w1 };
+    for (back) |want| {
+        action_mod.run(&f.wm, .focus_up);
+        try std.testing.expect(f.wm.focus_request == want);
+        seat.focused = f.wm.focus_request;
+    }
+    try check(f);
+}
+
+test "set_column_width, reload_config and the new commands parse" {
+    var cfg = try config.load(std.testing.io, std.testing.allocator);
+    defer cfg.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const w = try action_mod.parse(a, &cfg, "set_column_width 50%");
+    try std.testing.expectEqual(@as(f64, 0.5), w.set_column_width);
+    const w2 = try action_mod.parse(a, &cfg, "set_column_width 0.25");
+    try std.testing.expectEqual(@as(f64, 0.25), w2.set_column_width);
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "set_column_width"));
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "set_column_width 0"));
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "set_column_width 101%"));
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "set_column_width wide"));
+
+    try std.testing.expect((try action_mod.parse(a, &cfg, "reload_config")) == .reload_config);
+    try std.testing.expect((try action_mod.parse(a, &cfg, "workspace_last")) == .workspace_last);
+    // up to the maximum, not just workspace_count: created when used
+    try std.testing.expectEqual(@as(u32, 11), (try action_mod.parse(a, &cfg, "workspace 12")).workspace);
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "workspace 17"));
+    try std.testing.expectError(error.BadArguments, action_mod.parse(a, &cfg, "workspace 0"));
+
+    // The shipped config binds reload_config.
+    var bound = false;
+    for (cfg.binds) |b| {
+        if (std.mem.eql(u8, b.command, "reload_config")) bound = true;
+    }
+    try std.testing.expect(bound);
+}
+
+test "the reload_config command only asks for a reload (the manage pass does it)" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    try std.testing.expect(!f.wm.reload_pending);
+    action_mod.run(&f.wm, .reload_config);
+    try std.testing.expect(f.wm.reload_pending);
+}
+
+test "set_column_width sets the active column and ends maximize" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    workspace.toggleMaximized(&f.wm, a.column.?);
+    action_mod.run(&f.wm, .{ .set_column_width = 0.5 });
+    try std.testing.expect(!a.column.?.isMaximized());
+    try std.testing.expectEqual(layout.columnWidthFor(1920, 0.5, &f.wm.cfg), a.column.?.width);
+}
+
+test "struts shrink the work area the windows are laid out in" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    a.column.?.width = layout.columnWidthFor(1920, 1.0, &f.wm.cfg);
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    const base_x = a.target.x;
+    const base_y = a.target.y;
+    // The column keeps its share of the work area when that shrinks (layout
+    // rescales it), so a full-width column stays full-width.
+    f.out.struts = .{ .left = 100, .top = 40, .right = 60, .bottom = 20 };
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    try std.testing.expectEqual(base_x + 100, a.target.x);
+    try std.testing.expectEqual(base_y + 40, a.target.y);
+    try std.testing.expectEqual(@as(i32, 1920 - 100 - 60 - 2 * f.wm.cfg.outer_gap - 2 * f.wm.cfg.border_width), a.target.w);
+    try std.testing.expectEqual(@as(i32, 1080 - 40 - 20 - 2 * f.wm.cfg.outer_gap - 2 * f.wm.cfg.border_width), a.target.h);
+}
+
+test "center_single_column centres a lone narrow column, and only that" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    a.column.?.width = 600;
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    const left = a.target.x;
+    try std.testing.expectEqual(f.wm.cfg.outer_gap + f.wm.cfg.border_width, left);
+
+    f.wm.cfg.center_single_column = true;
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    const outer_l = a.target.x - f.wm.cfg.border_width;
+    const outer_r = 1920 - (a.target.x - f.wm.cfg.border_width + a.column.?.width);
+    try std.testing.expect(@abs(outer_l - outer_r) <= 1);
+
+    // two columns: back to the normal strip
+    const b = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), b);
+    layout.compute(f.cur(), &f.wm.cfg, true);
+    try std.testing.expectEqual(@as(i32, 0), f.cur().strip.offset_x);
+}
+
+test "clicking a window makes it the active one, so the view follows it (focus path)" {
+    // main.onManage activates the focus target before the layout; pin the order.
+    const src = @embedFile("main.zig");
+    const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
+    const body = src[body_start..body_end];
+    const resolve = std.mem.indexOf(u8, body, "resolveFocus(wm)").?;
+    const activate = std.mem.indexOf(u8, body, "workspace.activate(w)").?;
+    const lay = std.mem.indexOf(u8, body, "layoutAll(wm)").?;
+    try std.testing.expect(resolve < activate and activate < lay);
+    // and the reload runs after the queued actions
+    try std.testing.expect(std.mem.indexOf(u8, body, "reloadConfig(wm);\n    }").? > std.mem.indexOf(u8, body, "runPending(wm);").?);
+}

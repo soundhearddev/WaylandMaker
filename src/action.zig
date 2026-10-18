@@ -30,12 +30,19 @@ pub var global: ?*WindowManager = null;
 /// Ask for focus on `win`. Safe from event callbacks: it only records the
 /// wish and requests a manage sequence.
 pub fn requestFocus(wm: *WindowManager, win: *Window) void {
+    requestFocusFollow(wm, win, true);
+}
+
+/// `requestFocus`, with the choice whether the view scrolls to the window
+/// (`focus_follows_mouse_scroll = false` asks for no scrolling).
+pub fn requestFocusFollow(wm: *WindowManager, win: *Window, follow: bool) void {
     // Hovering or clicking a DockApp (the clock in the Dock) must not touch
     // the focus -- and not set follow_request either, which would scroll
     // the strip back to the focused window under the user's hands.
     if (win.attrs.is("unfocusable")) return;
     wm.focus_request = win;
-    wm.follow_request = true;
+    if (follow) wm.follow_request = true;
+    wm.focus_by_pointer = true;
     wm.obj.manageDirty();
 }
 
@@ -123,6 +130,8 @@ pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) 
     if (eql(u8, name, "workspace")) return .{ .workspace = try workspaceArg(rest, cfg) };
     if (eql(u8, name, "move_to_workspace")) return .{ .move_to_workspace = try workspaceArg(rest, cfg) };
 
+    if (eql(u8, name, "set_column_width")) return .{ .set_column_width = try fractionArg(rest) };
+
     if (eql(u8, name, "float_move")) {
         const p = try twoInts(rest);
         return .{ .float_move = .{ .dx = p[0], .dy = p[1] } };
@@ -138,8 +147,22 @@ pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) 
 /// Workspaces are 1-based in the config, 0-based internally.
 fn workspaceArg(s: []const u8, cfg: *const config.Config) ParseError!u32 {
     const n = std.fmt.parseInt(u32, s, 10) catch return error.BadArguments;
-    if (n < 1 or n > cfg.workspace_count) return error.BadArguments;
+    _ = cfg;
+    // Up to the maximum: a workspace that does not exist yet is created when
+    // the command runs (modular workspaces).
+    if (n < 1 or n > config.max_workspaces) return error.BadArguments;
     return n - 1;
+}
+
+/// `0.5` or `50%`: a fraction of the work area, more than 0 and at most 1.
+fn fractionArg(s: []const u8) ParseError!f64 {
+    const t = std.mem.trim(u8, s, " \t");
+    const pct = std.mem.endsWith(u8, t, "%");
+    const num = if (pct) t[0 .. t.len - 1] else t;
+    const v = std.fmt.parseFloat(f64, std.mem.trim(u8, num, " \t")) catch return error.BadArguments;
+    const f = if (pct) v / 100.0 else v;
+    if (!(f > 0 and f <= 1.0)) return error.BadArguments;
+    return f;
 }
 
 fn twoInts(s: []const u8) ParseError![2]i32 {
@@ -244,18 +267,17 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .focus_first_column => if (strip.columns.first()) |c| setActiveColumn(wm, strip, c),
         .focus_last_column => if (strip.columns.last()) |c| setActiveColumn(wm, strip, c),
 
-        // TODO: for floating windows `focus_up` steps DOWN the stack and
-        // `focus_down` steps UP (see `focusFloatingStep`, where "up" means
-        // toward the top). Looks inverted; check what is intended before
-        // changing it.
+        // Floating windows: previous / next in the order they were opened (a
+        // stable order: stepping through the z-order would only swap the top
+        // two windows, because focusing one raises it).
         .focus_up => if (focusedWindow(wm)) |w| {
             if (w.mode == .floating) {
-                focusFloatingStep(wm, w, .down);
+                focusFloatingStep(wm, w, false);
             } else if (types.prevWin(w)) |t| focusWindow(wm, t);
         },
         .focus_down => if (focusedWindow(wm)) |w| {
             if (w.mode == .floating) {
-                focusFloatingStep(wm, w, .up);
+                focusFloatingStep(wm, w, true);
             } else if (types.nextWin(w)) |t| focusWindow(wm, t);
         },
 
@@ -329,14 +351,58 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         },
 
         // ---- workspaces --------------------------------------------------------
-        .workspace => |i| switchWorkspace(wm, out, i),
+        .workspace => |i| {
+            // A workspace that does not exist yet is created (modular workspaces).
+            if (i >= out.workspace_count) _ = workspace.setWorkspaceCount(wm, out, i + 1);
+            if (i == out.active and cfg.workspace_back_and_forth) {
+                if (out.prev_active) |p| switchWorkspace(wm, out, p);
+            } else switchWorkspace(wm, out, i);
+        },
+        .workspace_last => if (out.prev_active) |p| switchWorkspace(wm, out, p),
+        .workspace_add => if (!workspace.addWorkspace(wm, out)) {
+            std.log.warn("workspace_add: already {d} workspaces", .{out.workspace_count});
+        },
+        .workspace_remove_last => if (workspace.removeLastWorkspace(wm, out)) {
+            wm.focus_request = workspace.defaultFocus(out.ws());
+            wm.follow_request = true;
+        },
+        .move_to_workspace_next, .move_to_workspace_prev => {
+            const fwd = cmd == .move_to_workspace_next;
+            const target = stepWorkspace(cfg, out, fwd) orelse return;
+            const w = focusedWindow(wm) orelse return;
+            workspace.moveToWorkspace(wm, w, &out.workspaces[target]) catch |err| {
+                std.log.err("move window to workspace failed: {t}", .{err});
+                return;
+            };
+            switchWorkspace(wm, out, target);
+            workspace.activate(w);
+            wm.focus_request = w;
+        },
+        .focus_window_or_workspace_up => if (focusedWindow(wm)) |w| {
+            if (w.mode != .floating and types.prevWin(w) != null) {
+                focusWindow(wm, types.prevWin(w).?);
+            } else if (stepWorkspace(cfg, out, false)) |t| switchWorkspace(wm, out, t);
+        },
+        .focus_window_or_workspace_down => if (focusedWindow(wm)) |w| {
+            if (w.mode != .floating and types.nextWin(w) != null) {
+                focusWindow(wm, types.nextWin(w).?);
+            } else if (stepWorkspace(cfg, out, true)) |t| switchWorkspace(wm, out, t);
+        },
+        .focus_column_or_output_left => if (strip.active != null and types.prevCol(strip.active.?) != null) {
+            focusColumn(wm, strip, types.prevCol);
+        } else focusOutput(wm, out, false),
+        .focus_column_or_output_right => if (strip.active != null and types.nextCol(strip.active.?) != null) {
+            focusColumn(wm, strip, types.nextCol);
+        } else focusOutput(wm, out, true),
+        .set_column_width => |f| if (strip.active) |col| {
+            col.unmaximized_width = 0;
+            col.width = layout.columnWidthFor(work.w, f, cfg);
+            wm.follow_request = true;
+        },
+        .reload_config => wm.reload_pending = true,
         // `workspace_wrap = false`: stop at the last / first workspace.
-        .workspace_next => if (cfg.workspace_wrap or out.active + 1 < out.workspace_count) {
-            switchWorkspace(wm, out, (out.active + 1) % out.workspace_count);
-        },
-        .workspace_prev => if (cfg.workspace_wrap or out.active > 0) {
-            switchWorkspace(wm, out, (out.active + out.workspace_count - 1) % out.workspace_count);
-        },
+        .workspace_next => if (stepWorkspace(cfg, out, true)) |t| switchWorkspace(wm, out, t),
+        .workspace_prev => if (stepWorkspace(cfg, out, false)) |t| switchWorkspace(wm, out, t),
         .move_to_workspace => |i| sendToWorkspace(wm, out, i),
     }
 }
@@ -461,13 +527,46 @@ fn focusColumn(wm: *WindowManager, strip: *Strip, step: *const fn (*types.Column
     setActiveColumn(wm, strip, target);
 }
 
-/// Floating windows are stacked bottom -> top; "up" moves toward the top.
-fn focusFloatingStep(wm: *WindowManager, w: *Window, dir: enum { up, down }) void {
-    const t = switch (dir) {
-        .up => types.nextFloating(w),
-        .down => types.prevFloating(w),
-    } orelse return;
+/// The floating window after (`forward`) or before `w` among the floating
+/// windows of its workspace, in the order they were opened, wrapping around.
+fn focusFloatingStep(wm: *WindowManager, w: *Window, forward: bool) void {
+    const ws = w.workspace orelse return;
+    var first: ?*Window = null;
+    var last: ?*Window = null;
+    var before: ?*Window = null;
+    var after: ?*Window = null;
+    var seen = false;
+    var it = wm.windows.first();
+    while (it) |o| : (it = types.nextWindow(o, wm)) {
+        if (o.workspace != ws or o.mode != .floating or o.closed or o.attrs.is("unfocusable")) {
+            if (o != w) continue;
+        }
+        if (first == null) first = o;
+        last = o;
+        if (o == w) {
+            seen = true;
+        } else if (!seen) {
+            before = o;
+        } else if (after == null) {
+            after = o;
+        }
+    }
+    const t = (if (forward) after orelse first else before orelse last) orelse return;
+    if (t == w) return;
     focusWindow(wm, t);
+}
+
+/// The workspace after / before the shown one (wrapping if `workspace_wrap`),
+/// or null at the end when it does not wrap, or with only one workspace.
+fn stepWorkspace(cfg: *const config.Config, out: *Output, forward: bool) ?u32 {
+    const n = out.workspace_count;
+    if (n < 2) return null;
+    if (forward) {
+        if (out.active + 1 < n) return out.active + 1;
+        return if (cfg.workspace_wrap) 0 else null;
+    }
+    if (out.active > 0) return out.active - 1;
+    return if (cfg.workspace_wrap) n - 1 else null;
 }
 
 fn nextPreset(work_w: i32, current: i32, cfg: *const config.Config) i32 {
@@ -491,6 +590,7 @@ fn resize(wm: *WindowManager, strip: *Strip, work_w: i32, step: f64, cfg: *const
 fn switchWorkspace(wm: *WindowManager, out: *Output, index: u32) void {
     if (index >= out.workspace_count or index == out.active) return;
     const from = out.ws();
+    out.prev_active = out.active;
     out.active = index;
     carryOmnipresent(wm, from, out.ws());
     wm.focus_request = workspace.defaultFocus(out.ws());
@@ -514,12 +614,18 @@ fn carryOmnipresent(wm: *WindowManager, from: *types.Workspace, to: *types.Works
 
 /// Focusing a window on another workspace must show that workspace.
 fn switchToWindowWorkspace(wm: *WindowManager, w: *Window) void {
-    _ = wm;
     const ws = w.workspace orelse return;
-    ws.output.active = ws.index;
+    switchWorkspace(wm, ws.output, ws.index);
+}
+
+/// Show the workspace `ws` is on its output (from the root menu, a Dock tile):
+/// the same switch as `workspace N`, so omnipresent windows come along.
+pub fn showWorkspace(wm: *WindowManager, ws: *types.Workspace) void {
+    switchWorkspace(wm, ws.output, ws.index);
 }
 
 fn sendToWorkspace(wm: *WindowManager, out: *Output, index: u32) void {
+    if (index >= out.workspace_count) _ = workspace.setWorkspaceCount(wm, out, index + 1);
     if (index >= out.workspace_count or index == out.active) return;
     const w = focusedWindow(wm) orelse return;
     workspace.moveToWorkspace(wm, w, &out.workspaces[index]) catch |err| {

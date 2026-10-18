@@ -122,6 +122,18 @@ pub fn revealColumn(strip: *Strip, col: *Column, view_w: i32, content_w: i32, mo
     clampScroll(strip, content_w, view_w);
 }
 
+/// Keep the view on a maximized active column: it fills the work area, so
+/// its left edge is the viewport's left edge, whatever `center_focused_column`
+/// says. Returns whether it did anything.
+pub fn lockMaximized(strip: *Strip, view_w: i32, cfg: *const config.Config) bool {
+    if (!cfg.maximize_follow) return false;
+    const col = strip.active orelse return false;
+    if (!col.isMaximized()) return false;
+    const content_w = assignColumnX(strip, cfg);
+    revealColumn(strip, col, view_w, content_w, .on_overflow, cfg);
+    return true;
+}
+
 /// Bring the active column of `strip` into view. Called whenever focus,
 /// column widths or the column list changed.
 pub fn followActive(strip: *Strip, view_w: i32, cfg: *const config.Config) void {
@@ -184,6 +196,10 @@ pub fn compute(ws: *Workspace, cfg: *const config.Config, follow: bool) void {
     } else {
         clampScroll(strip, content_w, work.w);
     }
+    // A maximized active column keeps the camera, whatever happened (a
+    // scroll command, a Dock that appeared, a window that opened elsewhere).
+    _ = lockMaximized(strip, work.w, cfg);
+    strip.offset_x = centeringOffset(strip.columnCount(), content_w, work.w, cfg);
 
     const col_top = work.y + cfg.outer_gap;
     const col_h = @max(1, work.h - 2 * cfg.outer_gap);
@@ -204,7 +220,7 @@ pub fn compute(ws: *Workspace, cfg: *const config.Config, follow: bool) void {
             if (idx < heights.extra) h_outer += 1;
             const bw = win.borderWidth(cfg); // NoBorder: the slot is all content
 
-            const outer_x = work.x + col.x - strip.scroll_x;
+            const outer_x = work.x + col.x - strip.scroll_x + strip.offset_x;
             win.target = .{
                 .x = outer_x + bw,
                 .y = y + bw,
@@ -217,6 +233,13 @@ pub fn compute(ws: *Workspace, cfg: *const config.Config, follow: bool) void {
 
     computeFloating(ws, cfg);
     computeFullscreen(ws);
+}
+
+/// `center_single_column`: how far a lone column that is narrower than the
+/// work area moves right to sit in the middle. 0 in every other case.
+pub fn centeringOffset(columns: usize, content_w: i32, view_w: i32, cfg: *const config.Config) i32 {
+    if (!cfg.center_single_column or columns != 1 or content_w >= view_w) return 0;
+    return @divTrunc(view_w - content_w, 2);
 }
 
 /// Floating windows keep their own rect (output-local), which layout only
@@ -391,4 +414,41 @@ test "columnWidthFor tiles flush" {
     // three thirds: 3*629 + 2*8 = 1903, within rounding of 1904
     const third = columnWidthFor(1920, 1.0 / 3.0, &cfg);
     try std.testing.expect(@abs(3 * third + 2 * 8 - 1904) <= 3);
+}
+
+test "lockMaximized pins the camera to a maximized active column" {
+    var cfg: config.Config = .{ .arena = undefined };
+    cfg.outer_gap = 8;
+    var ws: Workspace = undefined;
+    var strip: Strip = .{ .workspace = &ws, .columns = undefined };
+    strip.columns.init();
+    var a: Column = .{ .strip = &strip, .windows = undefined, .width = 500 };
+    var b: Column = .{ .strip = &strip, .windows = undefined, .width = 1904, .unmaximized_width = 500 };
+    var c: Column = .{ .strip = &strip, .windows = undefined, .width = 500 };
+    strip.columns.append(&a);
+    strip.columns.append(&b);
+    strip.columns.append(&c);
+    strip.active = &b;
+    strip.scroll_x = 300; // the camera drifted away
+    try std.testing.expect(lockMaximized(&strip, 1920, &cfg));
+    try std.testing.expectEqual(b.x - 8, strip.scroll_x);
+
+    cfg.maximize_follow = false;
+    strip.scroll_x = 300;
+    try std.testing.expect(!lockMaximized(&strip, 1920, &cfg));
+    try std.testing.expectEqual(@as(i32, 300), strip.scroll_x);
+
+    // not maximized: nothing to lock
+    cfg.maximize_follow = true;
+    b.unmaximized_width = 0;
+    try std.testing.expect(!lockMaximized(&strip, 1920, &cfg));
+}
+
+test "centeringOffset centres only a lone column that does not fill the view" {
+    var cfg: config.Config = .{ .arena = undefined };
+    try std.testing.expectEqual(@as(i32, 0), centeringOffset(1, 600, 1920, &cfg));
+    cfg.center_single_column = true;
+    try std.testing.expectEqual(@as(i32, 660), centeringOffset(1, 600, 1920, &cfg));
+    try std.testing.expectEqual(@as(i32, 0), centeringOffset(2, 600, 1920, &cfg));
+    try std.testing.expectEqual(@as(i32, 0), centeringOffset(1, 1920, 1920, &cfg));
 }
