@@ -707,7 +707,12 @@ fn onManage(wm: *WindowManager) void {
 
     // 6b. The Dock tiles of minimized windows: after the actions above, which
     //     are what minimize and restore windows (ui.sync() ran before them).
-    if (wm.ui) |u| u.syncBars();
+    //     First note which windows those were, while a restored window's
+    //     tile still exists; then the Dock follows.
+    if (wm.ui) |u| {
+        u.animCollect();
+        u.syncDock();
+    }
 
     // 7. Who gets the keyboard focus. Decided BEFORE the layout, and made the
     //    active window of its workspace in our model: a click or a hover only
@@ -982,9 +987,18 @@ test "onManage syncs the Dock tiles of minimized windows after the actions that 
     const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
     const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
     const body = src[body_start..body_end];
-    const again = std.mem.lastIndexOf(u8, body, "u.syncBars()").?;
+    const again = std.mem.lastIndexOf(u8, body, "u.syncDock()").?;
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runPending(wm)").?);
     try std.testing.expect(again > std.mem.indexOf(u8, body, "runUiAction(wm, req)").?);
+    // The animations: collected before the Dock changes (a restored window's
+    // tile is its starting point), launched after the layout (its end point),
+    // and remembered after the windows were shown or hidden.
+    const collect = std.mem.indexOf(u8, body, "u.animCollect()").?;
+    const layout_at = std.mem.indexOf(u8, body, "layoutAll(wm);").?;
+    try std.testing.expect(collect < again);
+    try std.testing.expect(layout_at > again);
+    try std.testing.expect(std.mem.indexOf(u8, body, "u.animLaunch()").? > layout_at);
+    try std.testing.expect(std.mem.indexOf(u8, body, "u.animRemember()").? > std.mem.indexOf(u8, body, "applyRender(wm, w, w == focus_target)").?);
 }
 
 test "applyDockState: the saved state does not override what config.lua names itself" {
