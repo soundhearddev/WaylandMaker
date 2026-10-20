@@ -359,6 +359,17 @@ const lua = @import("lua.zig");
 
 const default_config_text = @embedFile("share/default_config.lua");
 
+/// The built-in default config.lua (`wmaker-wl --print-config`).
+pub const builtin_text = default_config_text;
+
+/// `--config FILE`: read this file instead of the default config.lua.
+pub var config_path_override: ?[]const u8 = null;
+
+/// `--config-dir DIR`: wmaker-wl's own directory (config.lua, RootMenu,
+/// WMWindowAttributes, autostart) is DIR instead of
+/// $XDG_CONFIG_HOME/wmaker-wl. `--config` still wins for config.lua itself.
+pub var config_dir_override: ?[]const u8 = null;
+
 /// Load configuration. Only fails on out-of-memory: a broken or missing
 /// user file falls back to the built-in defaults (with warnings), so the
 /// session always starts.
@@ -403,7 +414,11 @@ fn warnLegacyConfig(io: std.Io, a: std.mem.Allocator, lua_path: []const u8) void
     } else |_| {}
 }
 
-fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
+pub fn userConfigPath(a: std.mem.Allocator) !?[]const u8 {
+    if (config_path_override) |p| return p;
+    if (config_dir_override) |d| {
+        return try std.fmt.allocPrint(a, "{s}/config.lua", .{std.mem.trimEnd(u8, d, "/")});
+    }
     if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
         const dir = std.mem.span(x);
         if (dir.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl/config.lua", .{dir});

@@ -17,3 +17,4 @@ pub const wm_files = @import("wm_files.zig");
 pub const proc = @import("process.zig");
 pub const ui = @import("ui.zig");
 pub const plist = @import("plist.zig");
+pub const version = @import("version.zig");

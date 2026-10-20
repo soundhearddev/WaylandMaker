@@ -19,6 +19,7 @@
 //   * management requests are only made from onManage().
 
 const std = @import("std");
+const builtin = @import("builtin");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const river = wayland.client.river;
@@ -65,6 +66,7 @@ test {
     _ = @import("wm_dock.zig");
     _ = @import("dock.zig");
     _ = @import("appicon.zig");
+    _ = @import("svg.zig");
     _ = @import("xpm.zig");
     _ = @import("fileutil.zig");
     _ = @import("fuzz_test.zig");
@@ -89,6 +91,54 @@ fn countingLog(
 ) void {
     if (level == .warn or level == .err) problems +%= 1;
     std.log.defaultLog(level, scope, format, args);
+}
+
+const usage =
+    \\usage: wmaker-wl [OPTION]
+    \\
+    \\A Wayland window manager for river: `river -c wmaker-wl` (river >= 0.4).
+    \\Without an option it starts the session.
+    \\
+    \\  -h, --help          show this text and exit
+    \\  -V, --version       show the version and exit
+    \\      --config FILE   read FILE instead of the default config.lua
+    \\      --config-dir DIR
+    \\                      use DIR instead of ~/.config/wmaker-wl for config.lua,
+    \\                      RootMenu, WMWindowAttributes and autostart
+    \\      --check         read config.lua, the key bindings, the root menu,
+    \\                      WMWindowAttributes, WMState and the autostart path,
+    \\                      report what is wrong and exit (0: fine, 1: problems);
+    \\                      needs no river
+    \\      --paths         list the files wmaker-wl reads (and which exist), exit
+    \\      --print-config  print the built-in default config.lua and exit, e.g.
+    \\                      wmaker-wl --print-config > ~/.config/wmaker-wl/config.lua
+    \\
+    \\A running session reloads its files on `pkill -HUP wmaker-wl`.
+    \\
+;
+
+/// Print to stdout (not the log): for the output of options that are meant
+/// to be read or piped.
+fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [1024]u8 = undefined;
+    var fw = std.Io.File.stdout().writer(io, &buf);
+    try fw.interface.print(fmt, args);
+    try fw.interface.flush();
+}
+
+fn usageError(comptime fmt: []const u8, args: anytype) noreturn {
+    std.debug.print("wmaker-wl: " ++ fmt ++ "\n\ntry `wmaker-wl --help`\n", args);
+    std.process.exit(2);
+}
+
+/// `wmaker-wl --paths`
+fn showPaths(io: std.Io, gpa: std.mem.Allocator) !void {
+    var cfg = try config.load(io, gpa);
+    defer cfg.deinit();
+    var buf: [1024]u8 = undefined;
+    var fw = std.Io.File.stdout().writer(io, &buf);
+    try wm_files.printPaths(&fw.interface, io, cfg.arena.allocator(), &cfg);
+    try fw.interface.flush();
 }
 
 /// `wmaker-wl --check`: read everything the session would read (config.lua,
@@ -116,12 +166,51 @@ pub fn main(init: std.process.Init) !void {
 
     config.runner = action.runFromLua;
 
+    var check_only = false;
+    var show_paths = false;
+    var print_config = false;
     var args = init.minimal.args.iterate();
     _ = args.skip(); // argv[0]
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--check")) return checkConfig(io, gpa);
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            return stdoutPrint(io, "{s}", .{usage});
+        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+            return stdoutPrint(io, "wmaker-wl {s} (built with zig {s})\n", .{ root.version.version, builtin.zig_version_string });
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            check_only = true;
+        } else if (std.mem.eql(u8, arg, "--paths")) {
+            show_paths = true;
+        } else if (std.mem.eql(u8, arg, "--print-config")) {
+            print_config = true;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            config.config_path_override = args.next() orelse usageError("--config needs a file", .{});
+        } else if (std.mem.startsWith(u8, arg, "--config=")) {
+            config.config_path_override = arg["--config=".len..];
+        } else if (std.mem.eql(u8, arg, "--config-dir")) {
+            config.config_dir_override = args.next() orelse usageError("--config-dir needs a directory", .{});
+        } else if (std.mem.startsWith(u8, arg, "--config-dir=")) {
+            config.config_dir_override = arg["--config-dir=".len..];
+        } else {
+            usageError("unknown argument `{s}`", .{arg});
+        }
     }
 
+    if (print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
+    if (show_paths) return showPaths(io, gpa);
+
+    // A file named with --config must exist: silently falling back to the
+    // defaults would look like "my config is not loaded".
+    if (config.config_path_override) |p| {
+        const text = std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, gpa, .limited(1 << 20)) catch |err| {
+            std.debug.print("wmaker-wl: cannot read {s}: {t}\n", .{ p, err });
+            std.process.exit(1);
+        };
+        gpa.free(text);
+    }
+
+    if (check_only) return checkConfig(io, gpa);
+
+    std.log.info("wmaker-wl {s}", .{root.version.version});
     ignoreSigchld();
 
     const wm = try gpa.create(WindowManager);

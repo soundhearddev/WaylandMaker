@@ -33,6 +33,7 @@ const config = @import("config.zig");
 const dockapp = @import("dockapp.zig");
 const xpm = @import("xpm.zig");
 const appicon = @import("appicon.zig");
+const svg = @import("svg.zig");
 const types = @import("types.zig");
 const wdock = @import("wm_dock.zig");
 
@@ -64,7 +65,6 @@ pub fn setSize(size: i32) void {
 pub const arrow: i32 = 16;
 
 const font_logo: [:0]const u8 = "Sans Bold 22";
-const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
@@ -863,8 +863,8 @@ const icon_dirs = [_][]const u8{
 
 /// The icon of `app`: its `icon` key (a path, or a name looked up in
 /// `icon_dirs`), or else the program's own name. PNG and XPM (Window Maker's
-/// own format, see xpm.zig); anything else (SVG) just means "no icon", and
-/// the tile shows the first letter of the name instead.
+/// own format, see xpm.zig) and SVG (through librsvg, see svg.zig); a tile
+/// without an icon shows `drawPlaceholder`.
 fn loadIcon(gpa: std.mem.Allocator, app: dockapp.DockApp) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -881,12 +881,12 @@ fn loadIcon(gpa: std.mem.Allocator, app: dockapp.DockApp) ?gfx.Icon {
     }
 
     // A name: strip an extension someone wrote anyway, then search every
-    // directory for a PNG, then an XPM.
+    // directory for a PNG, then an SVG, then an XPM.
     var stem = wanted;
-    inline for (.{ ".png", ".xpm" }) |ext| {
+    inline for (.{ ".png", ".svg", ".xpm" }) |ext| {
         if (std.mem.endsWith(u8, stem, ext)) stem = stem[0 .. stem.len - ext.len];
     }
-    inline for (.{ ".png", ".xpm" }) |ext| {
+    inline for (.{ ".png", ".svg", ".xpm" }) |ext| {
         for (icon_dirs) |dir| {
             const path = std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dir, stem }) catch continue;
             if (loadFile(gpa, path)) |icon| return icon;
@@ -901,6 +901,7 @@ fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
         defer pm.deinit(gpa);
         return gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels);
     }
+    if (std.ascii.endsWithIgnoreCase(path, ".svg")) return svg.load(path, svg.render_size);
     return gfx.Icon.loadPng(path);
 }
 
@@ -1049,34 +1050,42 @@ fn drawAppTile(cv: *gfx.Canvas, x: i32, y: i32, slot: *const Slot, hot: bool) vo
     if (slot.icon) |icon| {
         cv.drawIcon(icon, x + off, y + off, icon_size);
     } else {
-        // No icon: the first character of the name, large.
-        var letter: [8]u8 = @splat(0);
-        letter[0] = '?';
-        const name = slot.app.name;
-        var n: usize = 1;
-        if (name.len > 0) {
-            const len = std.unicode.utf8ByteSequenceLength(name[0]) catch 1;
-            n = @min(@as(usize, len), name.len, 4);
-            @memcpy(letter[0..n], name[0..n]);
-        }
-        const s: [:0]const u8 = letter[0..n :0];
-        drawCentered(cv, s, x, y + 14, tile, font_letter, col_text);
+        drawPlaceholder(cv, x + off, y + off, icon_size);
     }
     // Only an entry that can be started says "not running" (a hand-made
     // entry without a command has nothing to show).
     if (!slot.running and slot.app.command.len > 0) drawNotRunning(cv, x, y);
     if (slot.gi.omnipresent) drawOmnipresent(cv, x, y);
     if (slot.launching) drawLaunching(cv, x, y);
-    if (slot.app.mini_window != 0) drawMinimizedMark(cv, x, y);
 }
 
-/// What tells a minimized window's tile from an application's: the flat bar
-/// of a minimize button in the lower left corner (the place of the "not
-/// running" dots, which such a tile never has).
-fn drawMinimizedMark(cv: *gfx.Canvas, x: i32, y: i32) void {
-    cv.fillRect(x + 6, y + tile - 10, 16, 5, col_dark);
-    cv.fillRect(x + 5, y + tile - 11, 16, 5, col_light);
-    cv.fillRect(x + 6, y + tile - 10, 14, 3, col_tile_to);
+/// What a tile shows when no icon can be found at all (no icon theme, or only
+/// SVG icons and no librsvg): a small window in the Dock's own colours. Never
+/// a letter. (x, y) is the top left of the `size` x `size` icon area.
+pub fn drawPlaceholder(cv: *gfx.Canvas, x: i32, y: i32, size: i32) void {
+    const m = @divTrunc(size, 8);
+    const gx = x + m;
+    const gy = y + m + @divTrunc(m, 2);
+    const gw = size - 2 * m;
+    const gh = size - 3 * m;
+    if (gw < 12 or gh < 12) return;
+    const bar = @max(@divTrunc(gh, 4), 4);
+
+    cv.fillRect(gx + 2, gy + 2, gw, gh, col_dark); // shadow
+    cv.fillRect(gx, gy, gw, gh, col_tile_from); // the window
+    cv.vGradient(gx + 1, gy + 1, gw - 2, bar, col_logo_from, col_logo_to); // its title bar
+    cv.bevel(gx, gy, gw, gh, col_light, col_dark);
+
+    // Three lines of "text" in it, the last one shorter.
+    const gap = @max(m, 3);
+    const full = gw - 2 * gap;
+    var ly = gy + bar + gap;
+    var i: i32 = 0;
+    while (i < 3 and ly + 2 <= gy + gh - 2) : (i += 1) {
+        const len = if (i == 2) @divTrunc(full * 2, 3) else full;
+        cv.fillRect(gx + gap, ly, len, 2, col_tile_to);
+        ly += gap;
+    }
 }
 
 /// The empty slot a dragged tile will drop into: a recessed tile.

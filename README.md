@@ -36,7 +36,24 @@ It runs on top of the built-in `src/share/default_config.lua`, so you only write
   `clip_auto_raise`) win over that saved state; everything you leave out follows the saved state. To let the mouse
   decide again, delete the line from `config.lua`.
 
+## Command line
+
+```
+wmaker-wl [OPTION]      without an option: start the session (river -c wmaker-wl)
+  -h, --help            show the options
+  -V, --version         show the version
+      --config FILE     read FILE instead of the default config.lua
+      --config-dir DIR  use DIR instead of ~/.config/wmaker-wl (config.lua, RootMenu, WMWindowAttributes, autostart)
+      --check           check config.lua, key bindings, root menu, window attributes, WMState (exit 0: fine, 1: problems)
+      --paths           list the files wmaker-wl reads and which of them exist
+      --print-config    print the built-in default config.lua (a template: wmaker-wl --print-config > config.lua)
+```
+
+An unknown option is an error (exit 2) and does not start a session.
+
 ## Build
+
+Optional at run time: `librsvg` (`librsvg-2.so.2`), without it SVG-only icons are replaced by a placeholder tile.
 
 Requires Zig **0.16.0**, `libwayland-dev`, `libxkbcommon-dev`, and, for the root menu's cairo/pango
 rendering, `libcairo2-dev`, `libpango1.0-dev`, and `libglib2.0-dev` 
@@ -46,4 +63,3 @@ zig build
 zig build test
 river -c ./zig-out/bin/wmaker-wl
 ```
-

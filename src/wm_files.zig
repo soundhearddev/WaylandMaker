@@ -48,6 +48,7 @@ pub fn userRoot(a: std.mem.Allocator) !?[]const u8 {
 
 /// wmaker-wl's own directory: $XDG_CONFIG_HOME/wmaker-wl, else ~/.config/wmaker-wl.
 pub fn ownDir(a: std.mem.Allocator) !?[]const u8 {
+    if (config.config_dir_override) |d| return try a.dupe(u8, std.mem.trimEnd(u8, d, "/"));
     if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
         const s = std.mem.span(x);
         if (s.len > 0) return try std.fmt.allocPrint(a, "{s}/wmaker-wl", .{s});
@@ -131,6 +132,39 @@ pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]c
         },
     }
     return list.toOwnedSlice(a);
+}
+
+/// `wmaker-wl --paths`: every file the session looks at, grouped, in the
+/// order it is tried, with `[x]` for the ones that exist. Reads nothing into
+/// the session; the first existing file of a group is the one that is used.
+pub fn printPaths(w: *std.Io.Writer, io: std.Io, a: std.mem.Allocator, cfg: *const config.Config) !void {
+    const own = try ownDir(a);
+    const root = if (cfg.enable_wmaker_compat) try userRoot(a) else null;
+
+    try w.writeAll("[x] exists, [ ] not there; in a group the first existing file is used\n");
+
+    try w.writeAll("\nconfig:\n");
+    if (try config.userConfigPath(a)) |p| try showPath(w, io, a, p);
+
+    try w.writeAll("\nroot menu:\n");
+    for (try candidates(a, .root_menu, own, root)) |p| try showPath(w, io, a, p);
+
+    try w.writeAll("\nwindow attributes:\n");
+    for (try candidates(a, .window_attributes, own, root)) |p| try showPath(w, io, a, p);
+
+    try w.writeAll("\nautostart:\n");
+    for (try candidates(a, .autostart, own, root)) |p| try showPath(w, io, a, p);
+
+    try w.writeAll("\nDock / Clip state (WMState):\n");
+    if (cfg.dock_save_state) {
+        if (try statePath(a)) |p| try showPath(w, io, a, p);
+    }
+    for (try candidates(a, .dockapps, own, root)) |p| try showPath(w, io, a, p);
+}
+
+fn showPath(w: *std.Io.Writer, io: std.Io, a: std.mem.Allocator, p: []const u8) !void {
+    const there = readCandidate(io, a, p) != null;
+    try w.print("  [{s}] {s}\n", .{ if (there) "x" else " ", p });
 }
 
 /// Read one candidate file. A missing file is normal (not every candidate

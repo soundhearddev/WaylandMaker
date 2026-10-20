@@ -169,11 +169,18 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
     // Minimized windows: one tile each, in the order they were minimized.
     var live: std.ArrayList(u64) = .empty;
     defer live.deinit(wm.gpa);
+    // False when `live` could not be filled completely (out of memory): the
+    // tiles are then not pruned against a list that is missing windows, which
+    // would drop the tiles of windows that are still minimized.
+    var live_complete = true;
     if (wm.cfg.mini_dock) {
         var mit = wm.windows.first();
         while (mit) |w| : (mit = types.nextWindow(w, wm)) {
             if (!w.minimized or w.closed or w.min_order == 0) continue;
-            live.append(wm.gpa, w.min_order) catch break;
+            live.append(wm.gpa, w.min_order) catch {
+                live_complete = false;
+                break;
+            };
             if (m.miniSlotFor(w.min_order) != null) continue;
             const raw: []const u8 = w.app_id orelse w.title orelse "window";
             const name = cutUtf8(raw, 64);
@@ -188,7 +195,7 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
             }
         }
     }
-    if (m.pruneMinimized(live.items)) changed = true;
+    if (live_complete and m.pruneMinimized(live.items)) changed = true;
 
     var ids: std.ArrayList([]const u8) = .empty;
     defer ids.deinit(wm.gpa);
