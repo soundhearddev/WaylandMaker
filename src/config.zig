@@ -2511,3 +2511,64 @@ test "environment takes NAME = \"value\" and refuses anything else" {
     try std.testing.expect(!validEnvName("A-B"));
     try std.testing.expect(!validEnvName(""));
 }
+
+test "--config and --config-dir decide which config.lua is read, --config wins" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    defer {
+        config_path_override = null;
+        config_dir_override = null;
+    }
+
+    config_dir_override = "/some/dir/";
+    try std.testing.expectEqualStrings("/some/dir/config.lua", (try userConfigPath(a)).?);
+    config_dir_override = "/some/dir";
+    try std.testing.expectEqualStrings("/some/dir/config.lua", (try userConfigPath(a)).?);
+
+    config_path_override = "/elsewhere/my.lua";
+    try std.testing.expectEqualStrings("/elsewhere/my.lua", (try userConfigPath(a)).?);
+}
+
+test "load reads the file --config names" {
+    const io = std.testing.io;
+    const base = try std.fmt.allocPrint(std.testing.allocator, "/tmp/wmaker-wl-cfgopt-test-{d}", .{std.c.getpid()});
+    defer std.testing.allocator.free(base);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/chosen.lua", .{base});
+    defer std.testing.allocator.free(path);
+    try std.Io.Dir.cwd().createDirPath(io, base);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "gap = 13\nborder_width = 5\n" });
+    defer config_path_override = null;
+    config_path_override = path;
+
+    var cfg = try load(io, std.testing.allocator);
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings(path, cfg.config_file);
+    try std.testing.expectEqual(@as(i32, 13), cfg.gap);
+    try std.testing.expectEqual(@as(i32, 5), cfg.border_width);
+}
+
+test "builtin_text is the shipped default config.lua (what --print-config prints) and means the defaults" {
+    try std.testing.expect(builtin_text.len > 100);
+    try std.testing.expect(std.mem.indexOf(u8, builtin_text, "bind(") != null);
+    const io = std.testing.io;
+    const base = try std.fmt.allocPrint(std.testing.allocator, "/tmp/wmaker-wl-printcfg-test-{d}", .{std.c.getpid()});
+    defer std.testing.allocator.free(base);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.lua", .{base});
+    defer std.testing.allocator.free(path);
+    try std.Io.Dir.cwd().createDirPath(io, base);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = builtin_text });
+    defer config_path_override = null;
+    config_path_override = path;
+
+    // `wmaker-wl --print-config > config.lua` gives a config that means the defaults.
+    var cfg = try load(io, std.testing.allocator);
+    defer cfg.deinit();
+    var defaults: Config = .{ .arena = .init(std.testing.allocator) };
+    defer defaults.deinit();
+    try std.testing.expectEqualStrings(path, cfg.config_file);
+    try std.testing.expectEqual(defaults.gap, cfg.gap);
+    try std.testing.expectEqual(defaults.border_width, cfg.border_width);
+}

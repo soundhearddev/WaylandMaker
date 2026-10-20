@@ -4027,6 +4027,33 @@ test "animation: a restored window starts on its Dock tile" {
     try std.testing.expect(!f.ui.animHolding(w));
 }
 
+test "animation: the tile of a restored window is gone after the Dock sync, so collecting must come first" {
+    const apps = dockTestApps();
+    const f = try Fx.create(&apps);
+    defer f.destroy();
+    const w = try f.addWindow("foot");
+    w.anim_min = true; // minimized at the end of the last sequence
+    w.minimized = false; // restored since
+    w.min_order = 7;
+    _ = f.dockBar();
+    _ = try f.ui.model.?.attachWindow("foot", "foot", 7);
+    _ = f.dockBar();
+
+    // The order main.onManage keeps: collect, then sync the Dock.
+    const tile_box = f.ui.miniTileBox(7).?;
+    f.ui.animCollect();
+    try std.testing.expectEqual(@as(usize, 1), f.ui.anim_req_n);
+    try std.testing.expectEqual(tile_box, f.ui.anim_req[0].from);
+    f.ui.anim_req_n = 0;
+
+    // The sync removes the tile of a window that is not minimized any more...
+    _ = dockhost.syncModel(f.ui.wm, &f.ui.model.?);
+    try std.testing.expect(f.ui.miniTileBox(7) == null);
+    // ...so collecting afterwards could no longer start the animation on it.
+    f.ui.animCollect();
+    try std.testing.expect(f.ui.anim_req_n == 0 or !std.meta.eql(f.ui.anim_req[0].from, tile_box));
+}
+
 test "animation: a window coming back is held until it is forgotten or the animation ends" {
     const apps = dockTestApps();
     const f = try Fx.create(&apps);

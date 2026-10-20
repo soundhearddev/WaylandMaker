@@ -102,6 +102,50 @@ pub fn load(path: [:0]const u8, size: i32) ?gfx.Icon {
     return .{ .surface = surface, .w = size, .h = size };
 }
 
+/// A red 16 x 16 square, for the tests here and in appicon.zig.
+pub const test_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" fill="#ff0000"/></svg>
+;
+
+/// Write `text` to `path` (tests only).
+pub fn writeTestFile(path: [:0]const u8, text: []const u8) !void {
+    const fh = std.c.fopen(path.ptr, "wb") orelse return error.CannotWrite;
+    defer _ = std.c.fclose(fh);
+    if (std.c.fwrite(text.ptr, 1, text.len, fh) != text.len) return error.CannotWrite;
+}
+
+test "load: an SVG is drawn at render_size when librsvg is there, else it is not found" {
+    var buf: [96:0]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&buf, "/tmp/wmaker-wl-svg-test-{d}.svg", .{std.c.getpid()});
+    try writeTestFile(path, test_svg);
+    defer _ = std.c.unlink(path.ptr);
+
+    if (!available()) {
+        // Nothing to draw it with: null, never a made-up icon.
+        try std.testing.expect(load(path, render_size) == null);
+        return;
+    }
+    var ic = load(path, render_size) orelse return error.SvgNotDrawn;
+    defer ic.deinit();
+    try std.testing.expectEqual(render_size, ic.w);
+    try std.testing.expectEqual(render_size, ic.h);
+
+    // The red square fills the whole picture: the middle is opaque red.
+    const data = c.cairo_image_surface_get_data(ic.surface) orelse return error.NoPixels;
+    const stride: usize = @intCast(c.cairo_image_surface_get_stride(ic.surface));
+    const mid: usize = @intCast(@divTrunc(render_size, 2));
+    const pixel = (data + (mid * stride + mid * 4))[0..4];
+    try std.testing.expectEqual(@as(u32, 0xffff0000), std.mem.readInt(u32, pixel, .little));
+}
+
+test "load: something that is no SVG gives null, with or without librsvg" {
+    var buf: [96:0]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&buf, "/tmp/wmaker-wl-svg-bad-{d}.svg", .{std.c.getpid()});
+    try writeTestFile(path, "this is not an svg at all");
+    defer _ = std.c.unlink(path.ptr);
+    try std.testing.expect(load(path, render_size) == null);
+}
+
 test "load: a file that is not there gives null, with or without librsvg" {
     try std.testing.expect(load("/nonexistent/wmaker-wl-test.svg", 64) == null);
     try std.testing.expect(load("/nonexistent/wmaker-wl-test.svg", 0) == null);

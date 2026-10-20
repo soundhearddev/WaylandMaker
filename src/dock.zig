@@ -1785,3 +1785,74 @@ test "nextLaunchExpiry: none, then the time left, then due -- and expireLaunchin
     try std.testing.expect(m.expireLaunching(1151, 100));
     try std.testing.expectEqual(@as(?u32, null), m.nextLaunchExpiry(1151, 100));
 }
+
+test "drawPlaceholder: a small window in the Dock's colours (never a letter), and safe at any size" {
+    const side: i32 = 48;
+    const data = try std.testing.allocator.alloc(u8, @intCast(side * side * 4));
+    defer std.testing.allocator.free(data);
+    @memset(data, 0);
+    var cv = try gfx.Canvas.initForData(data.ptr, side, side, side * 4);
+    defer cv.deinit();
+
+    drawPlaceholder(&cv, 0, 0, side);
+    cv.flush();
+    // The middle of the window is opaque, the corner of the icon area is untouched.
+    try std.testing.expectEqual(@as(u32, 0xff), px(data, side * 4, 24, 24) >> 24);
+    try std.testing.expectEqual(@as(u32, 0), px(data, side * 4, 1, 1));
+    // A dark title bar over a light body.
+    try std.testing.expect((px(data, side * 4, 24, 12) & 0xff) < 0x80);
+    try std.testing.expect((px(data, side * 4, 8, 35) & 0xff) > 0xa0);
+
+    // Too small to be a window: nothing is drawn, and nothing breaks.
+    const small = try std.testing.allocator.alloc(u8, @intCast(side * side * 4));
+    defer std.testing.allocator.free(small);
+    @memset(small, 0);
+    var cv2 = try gfx.Canvas.initForData(small.ptr, side, side, side * 4);
+    defer cv2.deinit();
+    for ([_]i32{ -5, 0, 1, 8, 14 }) |s| drawPlaceholder(&cv2, 0, 0, s);
+    cv2.flush();
+    for (small) |b| try std.testing.expectEqual(@as(u8, 0), b);
+}
+
+test "a tile without an icon shows the placeholder, and a minimized window's tile has no mark in its corner" {
+    const apps = [_]dockapp.DockApp{.{ .name = "definitely-no-such-icon-plain", .command = &.{}, .y = 1 }};
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 4);
+    defer m.deinit();
+    const mini_idx = try m.attachWindow("definitely-no-such-icon-mini", "definitely-no-such-icon-mini", 7);
+
+    const dock = m.scr.dock.?;
+    const cells = cellsOf(dock, false, false);
+    const w = tile;
+    const h = tile * cells.rows();
+    const data = try std.testing.allocator.alloc(u8, @intCast(w * h * 4));
+    defer std.testing.allocator.free(data);
+    @memset(data, 0xff);
+    var cv = try gfx.Canvas.initForData(data.ptr, w, h, w * 4);
+    defer cv.deinit();
+    drawBar(&cv, &m, .{ .dock = dock, .cells = cells });
+    cv.flush();
+
+    const plain = cellPx(cells, 0, rowOf(&m, "definitely-no-such-icon-plain").?);
+    const mini = cellPx(cells, 0, m.slot(mini_idx).?.gi.yindex);
+
+    // No icon: the placeholder's dark title bar crosses the icon area, at its
+    // left and at its right end (a letter could not be in both places).
+    const off = @divTrunc(tile - icon_size, 2);
+    const m8 = @divTrunc(icon_size, 8);
+    const bar_y = off + m8 + @divTrunc(m8, 2) + 3;
+    const left_x = off + m8 + 3;
+    const right_x = off + icon_size - m8 - 3;
+    try std.testing.expect((px(data, w * 4, plain[0] + left_x, plain[1] + bar_y) & 0xff) < 0x80);
+    try std.testing.expect((px(data, w * 4, plain[0] + right_x, plain[1] + bar_y) & 0xff) < 0x80);
+
+    // The corner where the old "minimized" bar sat (left of the icon area, so
+    // whatever icon the tile has cannot be in the way) is drawn exactly like
+    // the same corner of an ordinary tile.
+    const spots = [_][2]i32{ .{ 5, tile - 11 }, .{ 6, tile - 9 }, .{ 7, tile - 7 }, .{ 6, tile - 6 } };
+    for (spots) |sp| {
+        try std.testing.expectEqual(
+            px(data, w * 4, plain[0] + sp[0], plain[1] + sp[1]),
+            px(data, w * 4, mini[0] + sp[0], mini[1] + sp[1]),
+        );
+    }
+}

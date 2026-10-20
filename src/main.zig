@@ -117,6 +117,57 @@ const usage =
     \\
 ;
 
+/// What the command line asks for.
+const Cli = struct {
+    check_only: bool = false,
+    show_paths: bool = false,
+    print_config: bool = false,
+    config_path: ?[]const u8 = null,
+    config_dir: ?[]const u8 = null,
+};
+
+const Parsed = union(enum) {
+    /// Start (or `--check`, `--paths`, `--print-config`).
+    run: Cli,
+    help,
+    version,
+    /// An argument that is no option.
+    unknown: []const u8,
+    /// An option that needs a value and has none (the option).
+    needs_value: []const u8,
+};
+
+/// Read the command line. `args` is anything with a `next()` that gives the
+/// next argument or null (the process' arguments, or a list in a test).
+/// `--help` and `--version` win over everything before them.
+fn parseArgs(args: anytype) Parsed {
+    var cli: Cli = .{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            return .help;
+        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+            return .version;
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            cli.check_only = true;
+        } else if (std.mem.eql(u8, arg, "--paths")) {
+            cli.show_paths = true;
+        } else if (std.mem.eql(u8, arg, "--print-config")) {
+            cli.print_config = true;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            cli.config_path = args.next() orelse return .{ .needs_value = "--config" };
+        } else if (std.mem.startsWith(u8, arg, "--config=")) {
+            cli.config_path = arg["--config=".len..];
+        } else if (std.mem.eql(u8, arg, "--config-dir")) {
+            cli.config_dir = args.next() orelse return .{ .needs_value = "--config-dir" };
+        } else if (std.mem.startsWith(u8, arg, "--config-dir=")) {
+            cli.config_dir = arg["--config-dir=".len..];
+        } else {
+            return .{ .unknown = arg };
+        }
+    }
+    return .{ .run = cli };
+}
+
 /// Print to stdout (not the log): for the output of options that are meant
 /// to be read or piped.
 fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
@@ -166,37 +217,20 @@ pub fn main(init: std.process.Init) !void {
 
     config.runner = action.runFromLua;
 
-    var check_only = false;
-    var show_paths = false;
-    var print_config = false;
     var args = init.minimal.args.iterate();
     _ = args.skip(); // argv[0]
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            return stdoutPrint(io, "{s}", .{usage});
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            return stdoutPrint(io, "wmaker-wl {s} (built with zig {s})\n", .{ root.version.version, builtin.zig_version_string });
-        } else if (std.mem.eql(u8, arg, "--check")) {
-            check_only = true;
-        } else if (std.mem.eql(u8, arg, "--paths")) {
-            show_paths = true;
-        } else if (std.mem.eql(u8, arg, "--print-config")) {
-            print_config = true;
-        } else if (std.mem.eql(u8, arg, "--config")) {
-            config.config_path_override = args.next() orelse usageError("--config needs a file", .{});
-        } else if (std.mem.startsWith(u8, arg, "--config=")) {
-            config.config_path_override = arg["--config=".len..];
-        } else if (std.mem.eql(u8, arg, "--config-dir")) {
-            config.config_dir_override = args.next() orelse usageError("--config-dir needs a directory", .{});
-        } else if (std.mem.startsWith(u8, arg, "--config-dir=")) {
-            config.config_dir_override = arg["--config-dir=".len..];
-        } else {
-            usageError("unknown argument `{s}`", .{arg});
-        }
-    }
+    const cli = switch (parseArgs(&args)) {
+        .run => |parsed_cli| parsed_cli,
+        .help => return stdoutPrint(io, "{s}", .{usage}),
+        .version => return stdoutPrint(io, "wmaker-wl {s} (built with zig {s})\n", .{ root.version.version, builtin.zig_version_string }),
+        .unknown => |bad_arg| usageError("unknown argument `{s}`", .{bad_arg}),
+        .needs_value => |bad_opt| usageError("{s} needs a value", .{bad_opt}),
+    };
+    config.config_path_override = cli.config_path;
+    config.config_dir_override = cli.config_dir;
 
-    if (print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
-    if (show_paths) return showPaths(io, gpa);
+    if (cli.print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
+    if (cli.show_paths) return showPaths(io, gpa);
 
     // A file named with --config must exist: silently falling back to the
     // defaults would look like "my config is not loaded".
@@ -208,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
         gpa.free(text);
     }
 
-    if (check_only) return checkConfig(io, gpa);
+    if (cli.check_only) return checkConfig(io, gpa);
 
     std.log.info("wmaker-wl {s}", .{root.version.version});
     ignoreSigchld();
@@ -1100,4 +1134,109 @@ test "applyDockState: the saved state does not override what config.lua names it
     try std.testing.expectEqual(config.ClipCorner.top_left, cfg.clip_corner);
     // not named: the saved state is used
     try std.testing.expectEqual(config.DockEdge.left, cfg.dock_edge);
+}
+
+// ----------------------------------------------------------------------------
+// Command line tests
+// ----------------------------------------------------------------------------
+
+const TestArgs = struct {
+    items: []const []const u8,
+    i: usize = 0,
+
+    fn next(t: *TestArgs) ?[]const u8 {
+        if (t.i >= t.items.len) return null;
+        const item = t.items[t.i];
+        t.i += 1;
+        return item;
+    }
+};
+
+fn parseTest(items: []const []const u8) Parsed {
+    var t: TestArgs = .{ .items = items };
+    return parseArgs(&t);
+}
+
+test "command line: no argument starts the session, nothing else is switched on" {
+    switch (parseTest(&.{})) {
+        .run => |cli| {
+            try std.testing.expect(!cli.check_only and !cli.show_paths and !cli.print_config);
+            try std.testing.expect(cli.config_path == null and cli.config_dir == null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "command line: --help and --version (long and short) are answered, whatever comes with them" {
+    try std.testing.expect(parseTest(&.{"--help"}) == .help);
+    try std.testing.expect(parseTest(&.{"-h"}) == .help);
+    try std.testing.expect(parseTest(&.{"--version"}) == .version);
+    try std.testing.expect(parseTest(&.{"-V"}) == .version);
+    try std.testing.expect(parseTest(&.{ "--check", "--version" }) == .version);
+    // The very bug this was written for: `wmaker-wl --version` started the whole session.
+    try std.testing.expect(parseTest(&.{"--version"}) != .run);
+}
+
+test "command line: --check, --paths and --print-config combine" {
+    switch (parseTest(&.{ "--check", "--paths", "--print-config" })) {
+        .run => |cli| try std.testing.expect(cli.check_only and cli.show_paths and cli.print_config),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "command line: --config and --config-dir, with a space or an equals sign" {
+    switch (parseTest(&.{ "--config", "a.lua", "--config-dir", "/d" })) {
+        .run => |cli| {
+            try std.testing.expectEqualStrings("a.lua", cli.config_path.?);
+            try std.testing.expectEqualStrings("/d", cli.config_dir.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{ "--config=b.lua", "--config-dir=/e" })) {
+        .run => |cli| {
+            try std.testing.expectEqualStrings("b.lua", cli.config_path.?);
+            try std.testing.expectEqualStrings("/e", cli.config_dir.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "command line: a missing value and an unknown argument are reported, not ignored" {
+    switch (parseTest(&.{"--config"})) {
+        .needs_value => |opt| try std.testing.expectEqualStrings("--config", opt),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{ "--check", "--config-dir" })) {
+        .needs_value => |opt| try std.testing.expectEqualStrings("--config-dir", opt),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{ "--check", "--bogus" })) {
+        .unknown => |arg| try std.testing.expectEqualStrings("--bogus", arg),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{"somefile"})) {
+        .unknown => |arg| try std.testing.expectEqualStrings("somefile", arg),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "command line: the help text names every option parseArgs knows" {
+    for ([_][]const u8{ "-h", "--help", "-V", "--version", "--check", "--paths", "--print-config", "--config", "--config-dir" }) |opt| {
+        try std.testing.expect(std.mem.indexOf(u8, usage, opt) != null);
+    }
+}
+
+test "main() takes its options from parseArgs and prints help and version on stdout" {
+    const src = @embedFile("main.zig");
+    const start = std.mem.indexOf(u8, src, "pub fn main(init: std.process.Init) !void {").?;
+    const end = std.mem.indexOfPos(u8, src, start, "\n}\n").?;
+    const body = src[start..end];
+    const parse_at = std.mem.indexOf(u8, body, "parseArgs(&args)").?;
+    // Options are handled before anything is loaded or connected.
+    try std.testing.expect(parse_at < std.mem.indexOf(u8, body, "config.load(").?);
+    try std.testing.expect(parse_at < std.mem.indexOf(u8, body, "ignoreSigchld()").?);
+    try std.testing.expect(std.mem.indexOf(u8, body, ".help => return stdoutPrint(io") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ".version => return stdoutPrint(io") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "config.config_path_override = cli.config_path") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "config.config_dir_override = cli.config_dir") != null);
 }

@@ -424,3 +424,39 @@ test "saveDockState writes atomically and loadDockApps prefers it" {
     try std.testing.expect(none.state == null);
     try std.testing.expect(none.isEmpty());
 }
+
+test "--config-dir moves wmaker-wl's own directory, and --paths lists what is read from there" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const base = try std.fmt.allocPrint(a, "/tmp/wmaker-wl-paths-test-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer config.config_dir_override = null;
+
+    config.config_dir_override = base;
+    try std.testing.expectEqualStrings(base, (try ownDir(a)).?);
+    // A trailing slash makes no difference.
+    config.config_dir_override = try std.fmt.allocPrint(a, "{s}/", .{base});
+    try std.testing.expectEqualStrings(base, (try ownDir(a)).?);
+
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+
+    // Nothing there yet: every file of ours is listed, none of them exists.
+    var out: std.Io.Writer.Allocating = .init(a);
+    try printPaths(&out.writer, io, a, &cfg);
+    for ([_][]const u8{ "config.lua", "RootMenu", "WMWindowAttributes" }) |name| {
+        const line = try std.fmt.allocPrint(a, "  [ ] {s}/{s}\n", .{ base, name });
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+    }
+
+    // Once a config.lua is there, it is the one marked as existing.
+    try std.Io.Dir.cwd().createDirPath(io, base);
+    const cfg_path = try std.fmt.allocPrint(a, "{s}/config.lua", .{base});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "gap = 3\n" });
+    var again: std.Io.Writer.Allocating = .init(a);
+    try printPaths(&again.writer, io, a, &cfg);
+    const found = try std.fmt.allocPrint(a, "  [x] {s}\n", .{cfg_path});
+    try std.testing.expect(std.mem.indexOf(u8, again.written(), found) != null);
+}

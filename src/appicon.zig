@@ -399,3 +399,97 @@ test "load: no icon theme at all gives null, never a made-up icon" {
     try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, "foo"));
     try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, null));
 }
+
+test "load: SVG icons are used when librsvg is there; a big PNG beats an SVG, a small one does not" {
+    const gpa = std.testing.allocator;
+    var root_buf: [64:0]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/wmaker-appicon-svg-test-{d}", .{std.c.getpid()});
+
+    const dirs_to_make = [_][]const u8{
+        "",
+        "/icons",
+        "/icons/hicolor",
+        "/icons/hicolor/scalable",
+        "/icons/hicolor/scalable/apps",
+        "/icons/hicolor/48x48",
+        "/icons/hicolor/48x48/apps",
+        "/icons/hicolor/48x48/mimetypes",
+        "/icons/hicolor/16x16",
+        "/icons/hicolor/16x16/apps",
+        "/pixmaps",
+        "/apps",
+    };
+    const pngs = [_]struct { path: []const u8, side: c_int }{
+        .{ .path = "/icons/hicolor/48x48/apps/both.png", .side = 4 },
+        .{ .path = "/icons/hicolor/16x16/apps/small.png", .side = 3 },
+        .{ .path = "/icons/hicolor/48x48/mimetypes/application-x-executable.png", .side = 8 },
+    };
+    const svgs = [_][]const u8{
+        "/icons/hicolor/scalable/apps/vec.svg",
+        "/icons/hicolor/scalable/apps/both.svg",
+        "/icons/hicolor/scalable/apps/small.svg",
+    };
+
+    var made: usize = 0;
+    defer {
+        var i = made;
+        while (i > 0) : (i -= 1) {
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, dirs_to_make[i - 1] }) catch continue;
+            _ = std.c.rmdir(p.ptr);
+        }
+    }
+    for (dirs_to_make) |d| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, d });
+        _ = std.c.mkdir(p.ptr, 0o755);
+        made += 1;
+    }
+    var written: [pngs.len + svgs.len]bool = @splat(false);
+    defer {
+        for (pngs, 0..) |f, i| {
+            if (!written[i]) continue;
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path }) catch continue;
+            _ = std.c.unlink(p.ptr);
+        }
+        for (svgs, 0..) |f, i| {
+            if (!written[pngs.len + i]) continue;
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f }) catch continue;
+            _ = std.c.unlink(p.ptr);
+        }
+    }
+    for (pngs, 0..) |f, i| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path });
+        try testPng(p, f.side);
+        written[i] = true;
+    }
+    for (svgs, 0..) |f, i| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f });
+        try svg.writeTestFile(p, svg.test_svg);
+        written[pngs.len + i] = true;
+    }
+
+    var icons_buf: [128]u8 = undefined;
+    var pix_buf: [128]u8 = undefined;
+    var apps_buf: [128]u8 = undefined;
+    const apps = [_][]const u8{try std.fmt.bufPrint(&apps_buf, "{s}/apps", .{root})};
+    const s: Search = .{ .dirs = .{
+        .icons = try std.fmt.bufPrint(&icons_buf, "{s}/icons", .{root}),
+        .pixmaps = try std.fmt.bufPrint(&pix_buf, "{s}/pixmaps", .{root}),
+        .desktop = &apps,
+    } };
+
+    const have_svg = svg.available();
+    // Only an SVG: drawn if librsvg is there, else the theme's placeholder (8).
+    try std.testing.expectEqual(if (have_svg) @as(i32, svg.render_size) else @as(i32, 8), widthOf(gpa, s, "vec"));
+    // A PNG of a usable size (48) wins over the SVG, with or without librsvg.
+    try std.testing.expectEqual(@as(i32, 4), widthOf(gpa, s, "both"));
+    // A small PNG (16) only after the SVG.
+    try std.testing.expectEqual(if (have_svg) @as(i32, svg.render_size) else @as(i32, 3), widthOf(gpa, s, "small"));
+    // Nothing at all: the theme's placeholder.
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "no-such-program"));
+}
