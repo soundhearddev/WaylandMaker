@@ -236,6 +236,9 @@ pub const Settings = struct {
     focus_follows_mouse: bool = false,
     mouse_mod: MouseMods = .{},
 
+    // ---- animations (the spring / easing settings stay in config.lua)
+    animations: bool = true,
+
     // ---- programs (one line each, as in the file)
     terminal: Text = .{},
     launcher: Text = .{},
@@ -506,7 +509,7 @@ const bool_keys = .{
     "dock_enabled",           "dock_on_top",          "dock_reserve_space", "clip_enabled",
     "clip_on_top",            "clip_collapsed",       "focus_new_windows",  "workspace_wrap",
     "clip_scroll_workspaces", "dock_auto_raise",      "dock_single_click",  "dock_save_state",
-    "clip_auto_collapse",     "clip_auto_raise",
+    "clip_auto_collapse",     "clip_auto_raise",      "animations",
 };
 
 const number_keys = .{
@@ -748,7 +751,7 @@ pub const keys = [_][]const u8{
     "clip_enabled",        "clip_corner",          "clip_on_top",            "clip_collapsed",
     "focus_new_windows",   "workspace_wrap",       "clip_scroll_workspaces", "dock_auto_raise",
     "dock_single_click",   "dock_save_state",      "clip_auto_collapse",     "clip_auto_raise",
-    "font_menu_title",     "font_menu",            "font_dock",
+    "font_menu_title",     "font_menu",            "font_dock",              "animations",
 };
 
 pub fn keyIndex(key: []const u8) ?usize {

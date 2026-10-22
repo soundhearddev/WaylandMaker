@@ -531,7 +531,7 @@ pub fn expelRight(wm: *WindowManager, strip: *Strip) bool {
 // Column width
 // ----------------------------------------------------------------------------
 
-/// niri's maximize-column: the column takes the whole work area (inside the
+/// Maximize column: the column takes the whole work area (inside the
 /// gaps); calling it again restores the previous width.
 pub fn toggleMaximized(wm: *WindowManager, col: *Column) void {
     if (col.unmaximized_width != 0) {
@@ -596,4 +596,3 @@ pub fn wsIndexOf(wm: *WindowManager, win: *Window) ?u32 {
     const ws = win.workspace orelse return null;
     return ws.index;
 }
-

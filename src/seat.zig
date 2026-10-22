@@ -236,8 +236,8 @@ pub fn beginOp(wm: *WindowManager, seat: *Seat, op: types.PointerOp, win: ?*Wind
     seat.op_dy = 0;
     seat.op_detached = false;
 
-    // Which corner a resize pulls on: the one nearest the pointer, like
-    // niri. A client-requested resize overrides this with the real handle.
+    // Which corner a resize pulls on: the one nearest the pointer.
+    // A client-requested resize overrides this with the real handle.
     const t = w.target;
     seat.op_resize_left = seat.pointer_x < t.x + @divTrunc(t.w, 2);
     seat.op_resize_top = seat.pointer_y < t.y + @divTrunc(t.h, 2);

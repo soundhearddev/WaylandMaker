@@ -18,14 +18,24 @@ min_window_size = 120
 center_focused_column = "on_overflow"   -- on_overflow | always | never
 new_window = "new_column"               -- new_column | stack
 focus_new_windows = true         -- a new window takes the keyboard focus (false: opens in the background)
--- niri-style layout options
-strut_left = 0                   -- extra space kept free on each side of the work area (like niri's struts)
+-- ---- space and view -----------------------------------------------------------
+strut_left = 0                   -- extra space kept free on each side of the work area
 strut_right = 0
 strut_top = 0
 strut_bottom = 0
 center_single_column = false     -- a lone column that does not fill the screen sits in the middle
 maximize_follow = true           -- the view stays locked on a maximized column (maximize_column)
 maximize_keep_focus = false      -- a new tiled window does not take the focus from a maximized window
+
+-- ---- animations ---------------------------------------------------------------
+-- A spring is "spring DAMPING_RATIO STIFFNESS EPSILON" (ratio 0.1 .. 10, 1 = no
+-- overshoot; stiffness >= 1; epsilon 0.00001 .. 0.1: where it counts as arrived).
+-- An easing is "CURVE DURATION_MS" with CURVE = linear | ease-out-quad |
+-- ease-out-cubic | ease-out-expo. "off" turns that one animation off.
+animations = true                -- false: everything jumps
+anim_slowdown = 1.0              -- 2.0 = everything runs at half speed, 0.5 = twice as fast
+anim_window_movement = "spring 1.0 800 0.0001"   -- a tiled window moves (scroll, a column opens/closes/resizes)
+anim_window_open = "ease-out-expo 150"           -- a new window is uncovered from its middle
 
 -- ---- look -------------------------------------------------------------------
 border_width = 2
@@ -47,7 +57,7 @@ workspace_count = 4
 workspace_wrap = true            -- workspace_next on the last one goes to the first
 clip_scroll_workspaces = true    -- the mouse wheel over the Clip switches workspace
 workspace_back_and_forth = false -- `workspace N` on the shown workspace goes back to the previous one
-dynamic_workspaces = false       -- niri style: always one empty workspace at the end, empty ones behind it vanish
+dynamic_workspaces = false       -- always one empty workspace at the end, empty ones behind it vanish
                                  -- (workspace_count is then the number that always exists)
 -- Workspaces are modular: bind "workspace_add" / "workspace_remove_last" to grow and shrink the list
 -- at run time, and `workspace 7` creates workspace 7 if it does not exist yet (up to 16).
@@ -69,7 +79,7 @@ browser = "firefox"
 -- ---- WindowMaker compatibility (WMRootMenu, WMWindowAttributes, WMState) ------
 enable_wmaker_compat = false
 
--- ---- niri-style startup ------------------------------------------------------
+-- ---- startup -----------------------------------------------------------------
 -- Programs started once at session start (not on a reload): a string is split
 -- like a command line, a table is the argv.
 --     spawn_at_startup = { "waybar", { "mako" }, "foot -e htop" }
@@ -273,7 +283,7 @@ bind("Super+Shift+Page_Down", "move_to_workspace_next")     -- takes the window 
 bind("Super+Shift+Page_Up", "move_to_workspace_prev")
 -- bind("Super+Ctrl+Page_Down", "workspace_add")            -- modular workspaces
 -- bind("Super+Ctrl+Page_Up", "workspace_remove_last")
--- niri-style: at the end of a column, go on to the next/previous workspace / output
+-- at the end of a column, go on to the next/previous workspace / output
 -- bind("Super+Ctrl+j", "focus_window_or_workspace_down")
 -- bind("Super+Ctrl+k", "focus_window_or_workspace_up")
 -- bind("Super+Ctrl+h", "focus_column_or_output_left")

@@ -65,6 +65,7 @@ pub fn setSize(size: i32) void {
 pub const arrow: i32 = 16;
 
 const font_logo: [:0]const u8 = "Sans Bold 22";
+const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
@@ -1631,7 +1632,7 @@ test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
     o.struts = .{};
     try std.testing.expectEqual(o.rect, o.workArea());
 
-    // niri's struts come on top of both.
+    // The struts come on top of both.
     o.struts = .{ .left = 10, .top = 20 };
     try std.testing.expectEqual(types.Rect{ .x = 10, .y = 20, .w = 990, .h = 780 }, o.workArea());
     o.struts = .{};

@@ -37,6 +37,7 @@
 const std = @import("std");
 const wayland = @import("wayland");
 const config = @import("config.zig");
+const animation = @import("animation.zig");
 const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
@@ -177,6 +178,25 @@ pub const Window = struct {
     sent_fullscreen: ?*Output = null,
     /// Last clip box sent (window-relative; null = never sent / none).
     sent_clip: ?Rect = null,
+
+    // ---- animation (window.zig: `visualState`) --------------------------------
+    /// Where the window was drawn last. While it travels this is not `target`.
+    shown_x: i32 = 0,
+    shown_y: i32 = 0,
+    /// `shown_*` hold a real position (false after being hidden, so a window
+    /// that comes back does not fly in from where it was).
+    has_shown: bool = false,
+    /// The workspace `shown_*` belongs to; another one means a jump, not a move.
+    anim_ws: ?*Workspace = null,
+    /// Where the running movement is going (a different `target` restarts it).
+    goal_x: i32 = 0,
+    goal_y: i32 = 0,
+    anim_x: ?animation.Animation = null,
+    anim_y: ?animation.Animation = null,
+    /// The window has been uncovered once (or the opening animation was off).
+    opened: bool = false,
+    /// 0 -> 1 while a new window is uncovered.
+    open_anim: ?animation.Animation = null,
 
     /// Column the window was in before it was "consumed"/detached, used
     /// only to restore floating -> tiled placement (see workspace.zig).
@@ -498,6 +518,13 @@ pub const WindowManager = struct {
 
     quit: bool = false,
 
+    /// Time of the animations (animation.zig), read once per manage / render
+    /// sequence by `window.tickClock`.
+    clock: animation.Clock = .{},
+    /// Something is still moving: the event loop asks for a new manage
+    /// sequence every frame until nothing is.
+    anim_active: bool = false,
+
     /// The `reload_config` command asked for a config reload. Executed in the
     /// same manage sequence, after the queued actions (main.onManage): a
     /// reload destroys and re-creates the key bindings, which is only legal
@@ -555,7 +582,7 @@ pub const Command = union(enum) {
     cycle_column_width,
     widen_column,
     narrow_column,
-    /// niri's set-column-width: the active column takes this fraction of the
+    /// The active column takes this fraction of the
     /// work area (`set_column_width 0.5` or `set_column_width 50%`).
     set_column_width: f64,
 
@@ -575,11 +602,11 @@ pub const Command = union(enum) {
     move_to_workspace: u32,
     move_to_workspace_next,
     move_to_workspace_prev,
-    /// niri's focus-window-or-workspace-up/down: the neighbouring window in the
+    /// The neighbouring window in the
     /// column, or at its end the previous / next workspace.
     focus_window_or_workspace_up,
     focus_window_or_workspace_down,
-    /// niri's focus-column-or-monitor-left/right: the neighbouring column, or
+    /// The neighbouring column, or
     /// at the edge of the strip the previous / next output.
     focus_column_or_output_left,
     focus_column_or_output_right,

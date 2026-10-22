@@ -62,6 +62,7 @@
 const std = @import("std");
 const wayland = @import("wayland");
 const xkb = @import("xkbcommon");
+const animation = @import("animation.zig");
 const river = wayland.client.river;
 
 pub const Modifiers = river.SeatV1.Modifiers;
@@ -171,12 +172,12 @@ pub const Config = struct {
     center_focused_column: CenterMode = .on_overflow,
     new_window: NewWindowMode = .new_column,
 
-    /// niri's `struts`: extra space kept free on each side of the work area.
+    /// Extra space kept free on each side of the work area.
     strut_left: i32 = 0,
     strut_right: i32 = 0,
     strut_top: i32 = 0,
     strut_bottom: i32 = 0,
-    /// niri's `always-center-single-column`: a lone column that does not fill
+    /// A lone column that does not fill
     /// the work area sits in the middle instead of at the left edge.
     center_single_column: bool = false,
     /// While the active column is maximized (`maximize_column`) the view stays
@@ -185,6 +186,18 @@ pub const Config = struct {
     /// A new tiled window does not take the focus from a maximized window
     /// (it opens in the background, next to the maximized column).
     maximize_keep_focus: bool = false,
+
+    // ---- animations (animation.zig) --------------------------------------------
+    /// Master switch. false: windows jump, as before.
+    animations: bool = true,
+    /// Every animation runs this many times slower (2 = half speed); useful
+    /// to see what they do. Smaller than 1 = faster.
+    anim_slowdown: f64 = 1.0,
+    /// A tiled window that moves (a column opens or closes next to it, the
+    /// view scrolls, a column is resized): how it travels to its new place.
+    anim_window_movement: animation.Spec = animation.Spec.default_movement,
+    /// A window that opens: how it is uncovered.
+    anim_window_open: animation.Spec = animation.Spec.default_open,
 
     // ---- look -----------------------------------------------------------
     border_width: i32 = 2,
@@ -217,10 +230,10 @@ pub const Config = struct {
     workspace_wrap: bool = true,
     /// The mouse wheel over the Clip switches workspace.
     clip_scroll_workspaces: bool = true,
-    /// niri's `workspace-auto-back-and-forth`: `workspace N` for the workspace
-    /// that is shown goes back to the one before.
+    /// `workspace N` for the workspace that is shown goes back to the one
+    /// before.
     workspace_back_and_forth: bool = false,
-    /// niri-style dynamic workspaces: there is always one empty workspace at
+    /// Dynamic workspaces: there is always one empty workspace at
     /// the end, and empty ones behind it disappear. `workspace_count` is then
     /// the number that always exists.
     dynamic_workspaces: bool = false,
@@ -234,12 +247,12 @@ pub const Config = struct {
     floating_size: f64 = 0.6,
     focus_follows_mouse: bool = false,
     /// With `focus_follows_mouse`: focusing a window by pointing at it also
-    /// scrolls the view to it. false is niri's `max-scroll-amount = "0%"`.
+    /// scrolls the view to it. false: the view stays where it is.
     focus_follows_mouse_scroll: bool = true,
-    /// niri's `warp-mouse-to-focus`: after a keyboard focus change the pointer
+    /// After a keyboard focus change the pointer
     /// jumps into the newly focused window.
     warp_mouse_to_focus: bool = false,
-    /// niri's `prefer-no-csd`: ask clients to leave out their own title bars.
+    /// Ask clients to leave out their own title bars.
     prefer_no_csd: bool = true,
     /// Modifier for mouse move/resize (Mod+LMB / Mod+RMB).
     mouse_mod: Modifiers = .{ .mod4 = true },
@@ -249,9 +262,9 @@ pub const Config = struct {
     launcher: []const []const u8 = &.{"fuzzel"},
     browser: []const []const u8 = &.{"firefox"},
 
-    /// niri's `spawn-at-startup`: run once at session start (not on reload).
+    /// Run once at session start (not on reload).
     spawn_at_startup: []const []const []const u8 = &.{},
-    /// niri's `environment`: set in wmaker-wl's own environment, so every
+    /// Set in wmaker-wl's own environment, so every
     /// program it starts inherits it.
     environment: []const EnvVar = &.{},
 
@@ -979,6 +992,7 @@ const bool_options = .{
     "focus_follows_mouse_scroll",
     "warp_mouse_to_focus",
     "prefer_no_csd",
+    "animations",
     "center_single_column",
     "maximize_follow",
     "maximize_keep_focus",
@@ -992,7 +1006,7 @@ const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "cli
 const font_options = .{ "font_menu_title", "font_menu", "font_dock" };
 const command_options = .{ "terminal", "launcher", "browser" };
 /// Options with their own kind of value.
-const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment" };
+const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment", "anim_slowdown", "anim_window_movement", "anim_window_open" };
 
 /// Every option name, for the typo check.
 const all_options = pixel_options ++ fraction_options ++ colour_options ++ bool_options ++ enum_options ++ font_options ++ command_options ++ special_options;
@@ -1164,6 +1178,20 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         return;
     }
 
+    if (eql(u8, key, "anim_slowdown")) {
+        const v = lua.toNumber(L, -1) orelse return error.Invalid;
+        if (!(v > 0 and v <= 1000)) return error.Invalid;
+        cfg.anim_slowdown = v;
+        return;
+    }
+
+    if (eql(u8, key, "anim_window_movement") or eql(u8, key, "anim_window_open")) {
+        const s = lua.toSlice(L, -1) orelse return error.Invalid;
+        const spec = animation.Spec.parse(s) orelse return error.Invalid;
+        if (eql(u8, key, "anim_window_movement")) cfg.anim_window_movement = spec else cfg.anim_window_open = spec;
+        return;
+    }
+
     if (eql(u8, key, "bind_layout")) {
         if (lua.toInteger(L, -1)) |n| {
             if (n < 0 or n >= max_bind_layouts) return error.Invalid;
@@ -1278,6 +1306,12 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
             lua.pushString(L, e.value);
             lua.rawSet(L, -3);
         }
+    } else if (comptime std.mem.eql(u8, name, "anim_slowdown")) {
+        lua.pushNumber(L, cfg.anim_slowdown);
+    } else if (comptime std.mem.eql(u8, name, "anim_window_movement") or std.mem.eql(u8, name, "anim_window_open")) {
+        var buf: [96]u8 = undefined;
+        const spec = if (comptime std.mem.eql(u8, name, "anim_window_movement")) cfg.anim_window_movement else cfg.anim_window_open;
+        lua.pushString(L, spec.format(&buf));
     } else if (comptime std.mem.eql(u8, name, "bind_layout")) {
         if (cfg.bind_layout) |n| lua.pushInteger(L, n) else lua.pushString(L, "current");
     } else if (comptime std.mem.eql(u8, name, "mouse_mod")) {
@@ -2402,7 +2436,7 @@ test "the built-in default config marks no option explicit" {
     try std.testing.expectEqual(Explicit{}, cfg.explicit);
 }
 
-test "niri-style options parse, with their defaults" {
+test "layout and workspace options parse, with their defaults" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };

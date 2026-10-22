@@ -31,6 +31,8 @@ pub const max_tiles: usize = 16;
 /// Clip's tiles in the screen corners).
 const edge_margin_tiles: i32 = 2;
 
+const font_letter: [:0]const u8 = "Sans Bold 20";
+
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 const col_text = gfx.Color.rgb(0x000000);
 
@@ -161,7 +163,10 @@ fn drawTile(cv: *gfx.Canvas, x: i32, y: i32, w: *const types.Window, icon: ?gfx.
     if (icon) |ic| {
         cv.drawIcon(ic, ix, iy, side);
     } else {
-        dock.drawPlaceholder(cv, ix, iy, side);
+        // No icon known for this application: its first letter, large.
+        var letter_buf: [8:0]u8 = undefined;
+        const src: []const u8 = w.app_id orelse w.title orelse "";
+        dock.drawCentered(cv, firstChar(&letter_buf, src), x, y + 6, dock.tile, font_letter, col_text);
     }
 
     // The title below, cut so it fits the tile.

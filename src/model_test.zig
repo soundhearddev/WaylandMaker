@@ -1088,6 +1088,7 @@ test "everything wlprefs writes is read back by the compositor with the same val
     s.dock_save_state = !base.dock_save_state;
     s.clip_auto_collapse = !base.clip_auto_collapse;
     s.clip_auto_raise = !base.clip_auto_raise;
+    s.animations = !base.animations;
     s.font_menu_title.set("Sans Bold 11");
     s.font_menu.set("Sans 11");
     s.font_dock.set("Sans 9");
@@ -1552,7 +1553,7 @@ test "a removed active output is never returned as the working output" {
 }
 
 // ============================================================================
-// Camera follows a maximized window, modular workspaces, reload, niri options
+// Camera follows a maximized window, modular workspaces, reload, layout options
 // ============================================================================
 
 fn testSeatFor(f: *Fixture) !*types.Seat {

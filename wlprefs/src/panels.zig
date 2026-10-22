@@ -388,6 +388,7 @@ pub fn windowHandling(c: *Ctx, ox: i32, oy: i32, s: *Settings) void {
     if (c.radio(ox + 40, oy + 58, "new column on right", nw == .new_column)) nw = .new_column;
     if (c.radio(ox + 250, oy + 58, "stack in column", nw == .stack)) nw = .stack;
     s.new_window = nw;
+    c.checkbox(ox + 40, oy + 80, "Animate windows (opening, moving)", &s.animations);
 
     c.frame(ox + 20, oy + 108, 480, 116, "Gaps & Sizes");
     c.stepInt(ox + 40, oy + 130, "Gap between windows:", &s.gap, 0, 64, 1);

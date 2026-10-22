@@ -25,6 +25,7 @@ const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const seatmod = @import("seat.zig");
 const dockhost = @import("dockhost.zig");
+const animation = @import("animation.zig");
 
 const Window = types.Window;
 const WindowManager = types.WindowManager;
@@ -476,6 +477,7 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
     // animation of its frame is over (Window Maker maps it afterwards).
     const held = if (wm.ui) |u| u.animHolding(win) else false;
     if (held or !isVisible(win)) {
+        stopAnimations(win);
         if (win.visible != false) {
             win.obj.hide();
             win.visible = false;
@@ -489,16 +491,20 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
 
     if (win.mode == .fullscreen) {
         // river positions it. Borders are not drawn in fullscreen.
+        stopAnimations(win);
+        if (win.ready) win.opened = true; // leaving fullscreen is not an opening
         if (focused) win.node.placeTop();
         return;
     }
 
     // Position. Sent only on change; a tiled window's position changes on
-    // every scroll step, a floating one on every drag step.
-    if (win.target.x != win.sent_x or win.target.y != win.sent_y) {
-        win.node.setPosition(win.target.x, win.target.y);
-        win.sent_x = win.target.x;
-        win.sent_y = win.target.y;
+    // every scroll step, a floating one on every drag step. While a window
+    // travels (animation.zig) this is where it is now, not `target`.
+    const vis = visualState(wm, win);
+    if (vis.x != win.sent_x or vis.y != win.sent_y) {
+        win.node.setPosition(vis.x, vis.y);
+        win.sent_x = vis.x;
+        win.sent_y = vis.y;
     }
 
     // Borders (rendering state). Colours come from config.
@@ -518,21 +524,166 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
         win.sent_border = shown;
     }
 
-    applyClip(wm, win);
+    applyClip(wm, win, .{ .x = vis.x, .y = vis.y, .w = win.target.w, .h = win.target.h }, vis.reveal);
 
     if (focused) win.node.placeTop();
+}
+
+// ----------------------------------------------------------------------------
+// Animations
+// ----------------------------------------------------------------------------
+//
+// The layout only knows where a window belongs (`target`); what is shown is
+// decided here, in the one place that sends the position. Two animations:
+//
+//   movement  a tiled window whose `target` changed travels to it, on a
+//             spring (`anim_window_movement`). This covers a column that makes
+//             room for a new one, the gap a closed window leaves, scrolling the
+//             view and resizing a column. It starts where the window is NOW, so
+//             a new target in mid-flight turns around without a jump.
+//   open      a window that appears is uncovered from its middle
+//             (`anim_window_open`), by growing its clip box. river has no
+//             opacity or scale for a window, so this is what the protocol
+//             allows.
+//
+// A window that closes cannot be animated: river has already dropped its
+// surface when `closed` arrives. Its neighbours still close the gap (movement).
+//
+// What does not animate: windows that appear on a workspace switch (they
+// jump, like before), floating windows (they follow the pointer when dragged),
+// and anything while a pointer drag is going on.
+
+pub const Visual = struct { x: i32, y: i32, reveal: f64 };
+
+/// Feed the animation clock; once per manage / render sequence, before the
+/// windows are looked at (all animations of a sequence see the same moment).
+pub fn tickClock(wm: *WindowManager) void {
+    wm.clock.setSlowdown(wm.cfg.anim_slowdown);
+    const ts = std.Io.Clock.awake.now(wm.io);
+    wm.clock.advance(@intCast(@max(0, ts.toMilliseconds())));
+}
+
+/// Forget everything about how the window moved (it is hidden, or river
+/// owns its geometry): the next time it is shown it appears where it belongs.
+fn stopAnimations(win: *Window) void {
+    win.anim_x = null;
+    win.anim_y = null;
+    win.open_anim = null;
+    win.has_shown = false;
+}
+
+/// A pointer drag is going on that must not be smoothed: the window being
+/// dragged follows the pointer, and while a column is resized by hand its
+/// neighbours follow the edge.
+fn dragBlocks(wm: *WindowManager, win: *const Window) bool {
+    var it = wm.seats.first();
+    while (it) |s| : (it = types.nextSeat(s, wm)) {
+        if (s.op_state == .idle) continue;
+        if (s.op_window == win or s.op == .resize) return true;
+    }
+    return false;
+}
+
+/// One axis: restart towards `want` when the destination changed (from where
+/// the window is now), and give the position for this moment.
+fn axis(spec: animation.Spec, anim: *?animation.Animation, shown: i32, goal: *i32, want: i32, now: f64) i32 {
+    if (want != goal.*) {
+        goal.* = want;
+        anim.* = animation.Animation.init(spec, @floatFromInt(shown), @floatFromInt(want), 0, now);
+    }
+    if (anim.*) |a| {
+        if (!a.isDone(now)) return @intFromFloat(@round(a.valueAt(now)));
+        anim.* = null;
+    }
+    return want;
+}
+
+/// Where `win` is drawn at this moment, and how much of it is uncovered.
+/// Also keeps `wm.anim_active` up to date.
+pub fn visualState(wm: *WindowManager, win: *Window) Visual {
+    const cfg = &wm.cfg;
+    const now = wm.clock.now();
+    var vis: Visual = .{ .x = win.target.x, .y = win.target.y, .reveal = 1.0 };
+
+    // ---- movement
+    const travels = cfg.animations and !cfg.anim_window_movement.isOff() and
+        win.mode == .tiled and win.has_shown and win.anim_ws == win.workspace and !dragBlocks(wm, win);
+    if (travels) {
+        vis.x = axis(cfg.anim_window_movement, &win.anim_x, win.shown_x, &win.goal_x, win.target.x, now);
+        vis.y = axis(cfg.anim_window_movement, &win.anim_y, win.shown_y, &win.goal_y, win.target.y, now);
+    } else {
+        win.anim_x = null;
+        win.anim_y = null;
+        win.goal_x = win.target.x;
+        win.goal_y = win.target.y;
+    }
+    win.shown_x = vis.x;
+    win.shown_y = vis.y;
+    win.has_shown = true;
+    win.anim_ws = win.workspace;
+
+    // ---- open: wait for the first content, so the animation is not spent
+    // on a window that has nothing to show yet.
+    if (!win.opened and win.ready) {
+        win.opened = true;
+        if (cfg.animations and wm.obj_version >= 2) {
+            win.open_anim = animation.Animation.init(cfg.anim_window_open, 0.0, 1.0, 0.0, now);
+        }
+    }
+    if (win.open_anim) |a| {
+        if (a.isDone(now) or !cfg.animations) {
+            win.open_anim = null;
+        } else {
+            vis.reveal = std.math.clamp(a.valueAt(now), 0.0, 1.0);
+        }
+    }
+
+    if (win.anim_x != null or win.anim_y != null or win.open_anim != null) wm.anim_active = true;
+    return vis;
+}
+
+/// The part of the window to show, relative to its top left corner: the
+/// work area cuts what scrolled under the Dock (null: nothing to cut), and
+/// while a window opens only the middle `reveal` (0..1) of its frame is
+/// uncovered (content plus `bw` of border). Never a 0 size: that would turn
+/// clipping off.
+pub fn visibleBox(vis: types.Rect, bw: i32, work: ?types.Rect, reveal: f64) ?types.Rect {
+    const cut: ?types.Rect = if (work) |w| clipBox(vis, bw, w) else null;
+    if (reveal >= 1.0) return cut;
+
+    const p = std.math.clamp(reveal, 0.0, 1.0);
+    const fw = vis.w + 2 * bw;
+    const fh = vis.h + 2 * bw;
+    const rw: i32 = @max(1, @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(fw)) * p))));
+    const rh: i32 = @max(1, @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(fh)) * p))));
+    var box: types.Rect = .{
+        .x = -bw + @divTrunc(fw - rw, 2),
+        .y = -bw + @divTrunc(fh - rh, 2),
+        .w = rw,
+        .h = rh,
+    };
+
+    if (cut) |c| {
+        const x0 = @max(box.x, c.x);
+        const y0 = @max(box.y, c.y);
+        const x1 = @min(box.x + box.w, c.x + c.w);
+        const y1 = @min(box.y + box.h, c.y + c.h);
+        if (x1 <= x0 or y1 <= y0) return .{ .x = vis.w + bw + 16, .y = vis.h + bw + 16, .w = 1, .h = 1 };
+        box = .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+    }
+    return box;
 }
 
 /// Clip a tiled window to the work area, so a column scrolled sideways
 /// slides *under the edge of the work area* (next to the Dock) instead of
 /// under the Dock. Floating windows are not clipped. river_window_v1
 /// set_clip_box needs version 2; without it nothing is clipped.
-fn applyClip(wm: *WindowManager, win: *Window) void {
+fn applyClip(wm: *WindowManager, win: *Window, vis: types.Rect, reveal: f64) void {
     if (wm.obj_version < 2) return;
     const ws = win.workspace orelse return;
 
-    var want: ?types.Rect = null;
-    if (win.mode == .tiled) want = clipBox(win.target, win.borderWidth(&wm.cfg), ws.output.workArea());
+    const work: ?types.Rect = if (win.mode == .tiled) ws.output.workArea() else null;
+    const want = visibleBox(vis, win.borderWidth(&wm.cfg), work, reveal);
 
     if (std.meta.eql(want, win.sent_clip)) return;
     if (want) |b| {
@@ -605,4 +756,66 @@ test "channel scales 8 bit to 32 bit" {
     try std.testing.expectEqual(@as(u32, 0xffffffff), channel(0xff));
     try std.testing.expectEqual(@as(u32, 0), channel(0));
     try std.testing.expectEqual(@as(u32, 0x80808080), channel(0x80));
+}
+
+test "axis: a new destination starts from where the window is, arrives exactly" {
+    const spec = animation.Spec.default_movement;
+    var anim: ?animation.Animation = null;
+    var goal: i32 = 0;
+
+    // Same destination as before: no animation.
+    try std.testing.expectEqual(@as(i32, 0), axis(spec, &anim, 0, &goal, 0, 0));
+    try std.testing.expect(anim == null);
+
+    // A column makes room: the window is to go to x = 400.
+    try std.testing.expectEqual(@as(i32, 0), axis(spec, &anim, 0, &goal, 400, 1000));
+    try std.testing.expect(anim != null);
+    const mid = axis(spec, &anim, 0, &goal, 400, 1100);
+    try std.testing.expect(mid > 0 and mid < 400);
+
+    // The destination changes in mid-flight: it goes on from `mid`, no jump.
+    const turned = axis(spec, &anim, mid, &goal, 100, 1100);
+    try std.testing.expectEqual(mid, turned);
+    try std.testing.expectEqual(@as(i32, 100), goal);
+
+    // Long after: there, and nothing is running any more.
+    try std.testing.expectEqual(@as(i32, 100), axis(spec, &anim, turned, &goal, 100, 5000));
+    try std.testing.expect(anim == null);
+
+    // "off": the destination is taken at once.
+    var none: ?animation.Animation = null;
+    var g2: i32 = 0;
+    try std.testing.expectEqual(@as(i32, 300), axis(.off, &none, 0, &g2, 300, 0));
+    try std.testing.expect(none == null);
+}
+
+test "visibleBox: fully open = the work area cut only; opening = a growing middle" {
+    const work: types.Rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
+    const win: types.Rect = .{ .x = 100, .y = 100, .w = 400, .h = 200 };
+
+    // Fully open and inside the work area: nothing to clip.
+    try std.testing.expectEqual(@as(?types.Rect, null), visibleBox(win, 2, work, 1.0));
+    // No work area (a floating window): same.
+    try std.testing.expectEqual(@as(?types.Rect, null), visibleBox(win, 2, null, 1.0));
+
+    // Half open: half the frame (404 x 204 with the border), in the middle.
+    const half = visibleBox(win, 2, null, 0.5).?;
+    try std.testing.expectEqual(@as(i32, 202), half.w);
+    try std.testing.expectEqual(@as(i32, 102), half.h);
+    try std.testing.expectEqual(@as(i32, -2 + 101), half.x);
+    try std.testing.expectEqual(@as(i32, -2 + 51), half.y);
+
+    // Never 0 x 0 (that would switch clipping off).
+    const first = visibleBox(win, 2, null, 0.0).?;
+    try std.testing.expect(first.w >= 1 and first.h >= 1);
+
+    // Opening AND scrolled under the Dock: the intersection of both.
+    const dock_work: types.Rect = .{ .x = 150, .y = 0, .w = 850, .h = 800 };
+    const both = visibleBox(win, 2, dock_work, 0.5).?;
+    try std.testing.expect(both.x >= 150 - win.x);
+    try std.testing.expect(both.w >= 1 and both.h >= 1);
+
+    // Opening completely outside the work area: the harmless 1 x 1 box.
+    const out = visibleBox(.{ .x = 2000, .y = 0, .w = 100, .h = 100 }, 0, work, 0.5).?;
+    try std.testing.expectEqual(@as(i32, 1), out.w);
 }

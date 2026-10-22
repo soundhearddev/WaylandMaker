@@ -322,7 +322,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (wm.ui) |u| u.deinit();
 
     std.log.info("wmaker-wl running (config: {s}; DockApps are icons: dockhost)", .{wm.cfg.config_file});
-    // niri-style `environment` first (the programs below inherit it), then
+    // `environment` first (the programs below inherit it), then
     // `spawn_at_startup`; both once, a reload does not repeat the spawns.
     applyEnvironment(wm.cfg.environment);
     for (wm.cfg.spawn_at_startup) |argv| proc.spawn(wm, argv);

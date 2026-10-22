@@ -250,7 +250,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
             wm.follow_request = true;
         },
 
-        // Like niri's maximize-column: the focused window's column takes the
+        // Maximize column: the focused window's column takes the
         // whole work area (inside the gaps); its neighbours are pushed off
         // to the sides. Not fullscreen. Pressing again restores the width.
         // A floating window has no column, so this does nothing for it.

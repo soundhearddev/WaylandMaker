@@ -1733,9 +1733,9 @@ pub const Ui = struct {
             },
             else => &.{
                 "wmaker-wl is free software,",
-                "licensed under the 0BSD license:",
-                "use, copy, modify and distribute it",
-                "with or without fee.",
+                "licensed under the GNU GPL,",
+                "version 3.",
+                "It comes with no warranty.",
                 "",
                 "Modelled on Window Maker (GPL),",
                 "by Alfredo K. Kojima, Dan Pascu et al.",
@@ -4329,7 +4329,7 @@ test "the Info panel names the version and the config file; Legal states the lic
     try std.testing.expectEqualStrings("Legal", legal.title);
     var mentions_licence = false;
     for (legal.rows) |r| {
-        if (std.mem.indexOf(u8, r.label, "0BSD") != null) mentions_licence = true;
+        if (std.mem.indexOf(u8, r.label, "GPL") != null) mentions_licence = true;
     }
     try std.testing.expect(mentions_licence);
 }
