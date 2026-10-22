@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The commands a `bind =` line can name, as wmaker-wl's action.zig parses
 // them. wlprefs uses this to refuse an action the compositor would reject

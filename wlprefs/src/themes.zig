@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The themes `theme("NAME")` can load, for the list on the Appearance page.
 //

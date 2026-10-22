@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Tests for the data model. They run without a compositor: workspace.zig
 // never sends Wayland requests, so the river object pointers inside Window

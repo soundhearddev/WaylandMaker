@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Everything wlprefs does to files and processes, kept free of Wayland and
 // cairo so it can be tested on its own.

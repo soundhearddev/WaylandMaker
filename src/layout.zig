@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Pure geometry: no Wayland calls, no allocation. Given the data model and
 // a work area, this fills in `Window.target` for every window. main.zig

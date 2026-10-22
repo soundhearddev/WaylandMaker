@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The state behind the window: the file as it was read, the settings as
 // they were then (`base`), and the settings as the user has them now

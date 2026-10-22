@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // "Menu Preferences" page -- visual port of upstream
 // WPrefs.app/MenuPreferences.c's createPanel(): same frames, same

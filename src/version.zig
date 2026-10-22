@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The version shown in the Info panel. Keep in step with build.zig.zon.
 

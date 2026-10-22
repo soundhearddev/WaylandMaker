@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // LEGACY STUB -- not used by the running window manager. Only `root.zig`
 // imports it; the real implementations live in wm_attr.zig (attributes),

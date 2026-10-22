@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The settings pages of wlprefs. Each page maps a WPrefs.app section onto
 // the config.lua keys wmaker-wl really has (docs/WMPREFS.md). A section

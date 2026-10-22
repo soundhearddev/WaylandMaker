@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The key bindings the compositor will actually have, for the read-only
 // "Keyboard Shortcut Preferences" page: wmaker-wl's shipped defaults, then

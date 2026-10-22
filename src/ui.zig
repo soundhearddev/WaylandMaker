@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Desktop UI: root menu and window list, drawn with cairo/pango into
 // river shell surfaces.

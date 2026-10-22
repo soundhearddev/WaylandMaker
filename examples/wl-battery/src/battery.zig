@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Pure battery maths: raw sysfs numbers in, display values out.
 // No libc, no Wayland, no file access -> fully unit-testable.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Fuzzing of everything that reads a file or a string somebody else wrote:
 // the property lists (root menu, WMState, WMWindowAttributes), XPM icons,

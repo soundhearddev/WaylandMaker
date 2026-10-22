@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // `wlprefs --check`: look at config.lua the way the settings window would,
 // say what is wrong with it, and leave with an exit code a script can use.

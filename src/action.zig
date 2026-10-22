@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Commands: parsing of the text in `bind = Key, command args` and their
 // execution. run() is only ever called from inside a manage sequence, so

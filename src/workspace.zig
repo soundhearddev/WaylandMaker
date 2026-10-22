@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Every structural change to the window tree lives here, so the
 // invariants documented in types.zig hold by construction. No Wayland

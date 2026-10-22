@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // XPM3 reader, for Dock and Clip tile icons. Window Maker's own icons and
 // nearly every DockApp ship as .xpm, which cairo cannot read.

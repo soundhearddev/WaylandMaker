@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The strip of minimized windows (Window Maker's "miniwindows" / icon yard):
 // one tile per minimized window, in a row at the bottom edge of the primary

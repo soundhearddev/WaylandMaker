@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wlprefs entry point: connect, bind globals, create the window, pump the
 // Wayland event loop until the window is closed.

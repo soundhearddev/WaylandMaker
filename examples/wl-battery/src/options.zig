@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Command line of wl-battery. Pure, so it can be tested without a compositor.
 //

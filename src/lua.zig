@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // What config.zig needs of Lua, on top of ziglua (the `zlua` package, see
 // build.zig.zon): Lua 5.4 is compiled from source and linked statically, no

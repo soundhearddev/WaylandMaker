@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Cairo/Pango drawing into a wl_shm-backed ARGB32 buffer.
 // No Wayland types here, so it can be unit-tested without a compositor.

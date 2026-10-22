@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The icon of an application window (for the Dock tile of a minimized
 // window, dock.zig). Nothing is drawn here: every icon is a file of the

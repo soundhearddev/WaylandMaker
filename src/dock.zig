@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The Dock (Window Maker's "WMDock"), the Clip ("WMClip") and the Drawers:
 // model, geometry and drawing. No Wayland types in here, like gfx.zig, so

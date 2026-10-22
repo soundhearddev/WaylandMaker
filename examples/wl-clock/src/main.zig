@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wl-clock: a DockApp for wmaker-wl, and a template for writing your own.
 //

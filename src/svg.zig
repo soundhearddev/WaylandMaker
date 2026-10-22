@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // SVG icons, drawn by librsvg. Almost every modern icon theme (Adwaita,
 // Papirus, breeze, ...) ships its application icons as SVG only, which cairo

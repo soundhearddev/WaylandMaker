@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wmaker-wl: a scrollable-tiling window manager client for river.
 //

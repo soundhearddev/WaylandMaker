@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Reads /sys/class/power_supply and turns it into a battery.Info.
 //

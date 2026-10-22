@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wl-battery: a battery DockApp for wmaker-wl, based on wl-clock.
 //

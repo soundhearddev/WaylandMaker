@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // river_window_v1: events, and the two functions that turn our model into
 // protocol requests:

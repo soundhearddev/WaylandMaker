@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Icons wlprefs wants beyond the 16 section icons (those are Window Maker's
 // own WPrefs artwork, see Category.icon() in root.zig).

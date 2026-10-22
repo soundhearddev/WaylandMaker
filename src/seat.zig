@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // river_seat_v1: lifecycle, key/pointer bindings and the interactive
 // pointer operation (move / resize) state machine.

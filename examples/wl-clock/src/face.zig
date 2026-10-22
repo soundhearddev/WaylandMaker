@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The clock's face: one square ARGB tile, drawn by hand into a pixel array
 // at whatever side the Dock tile has (16..256 px, wmaker-wl's `dock_size`).

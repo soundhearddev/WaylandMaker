@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wlprefs settings layer: read, edit and write wmaker-wl's config.lua.
 //

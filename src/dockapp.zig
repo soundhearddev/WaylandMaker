@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // DockApps: the DATA side of the Dock and the Clip (drawing and clicks live
 // in dock.zig and ui.zig): what is docked, in which order, and how a running

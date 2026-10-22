@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Window Maker's miniaturize / deminiaturize animation, ported from
 // window-maker/wmaker `src/actions.c` (`animateResize`, `animateResizeZoom`,

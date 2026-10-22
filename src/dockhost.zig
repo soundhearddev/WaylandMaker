@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // dockhost: how DockApps live in the compositor. The one place that decides
 // anything about them.

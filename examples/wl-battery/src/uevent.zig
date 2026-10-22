@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Kernel uevents for the power_supply subsystem (netlink, no root needed).
 // The kernel sends one when the battery or the AC adapter changes, so a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // wdock: the logic of Window Maker's dock.c (WDock / WAppIcon), ported 1:1
 // and with everything that touches X11 or a widget removed: slot arithmetic,

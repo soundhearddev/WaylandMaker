@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Old-style (NeXTSTEP / GNUstep) property lists: the file format of every
 // Window Maker configuration file (WindowMaker, WMRootMenu, WMWindowAttributes,

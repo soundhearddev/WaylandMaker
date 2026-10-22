@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // Reading a small file completely. Shared by the XPM icon loader, the icon
 // theme lookup and OPEN_MENU's menu files.

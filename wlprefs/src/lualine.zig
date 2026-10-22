@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: GPL-3.0
 //
 // The little bit of Lua that wlprefs understands: ONE LINE of config.lua.
 //
