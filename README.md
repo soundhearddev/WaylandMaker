@@ -1,69 +1,96 @@
-# WaylandMaker (`wmaker-wl`)
+# WaylandMaker
 
-Window Maker brought to the modern age: a scrolling column layout in the NeXTSTEP look, with window animations, using River as backend.
+A Wayland window manager that tries to feel like [Window Maker](https://www.windowmaker.org/).
+It runs as the window-management client of [river](https://codeberg.org/river/river)
+(`river_window_management_v1`); river does compositing and input, this project does layout, focus,
+the root menu, the Dock and the Clip.
 
-## Default Keybindings
+Windows are laid out in a horizontally scrolling strip of columns (the niri / PaperWM idea), in a
+NeXTSTEP-style look. The parts of Window Maker I care about most are kept as they were: the root menu,
+Dock, Clip and DockApps, and the `WMRootMenu`, `WMWindowAttributes` and `WMState` files.
 
-| Key | Action |
-|---|---|
-| `Super+Return` / `a` / `b` | Terminal / Launcher / Browser |
-| `Super+h l j k` / Arrow keys | Focus |
-| `Super+Shift+h l` | Move column |
-| `Super+[` / `]` | Scroll view |
-| `Super+r`, `-`, `=` | Column width |
-| `Super+t` | Tiling ↔ Floating |
-| `Super+f` | Fullscreen |
-| `Super+1…4` (+Shift) | Switch workspace / Move window |
-| `Super` + Left/Right mouse | Move / Resize window |
-| `Super+q` / `Super+Shift+e` | Close window / Exit |
-| `Super+n` / `Super+Shift+n` / `Super+Shift+m` | Minimize / Restore last / Dock tiles of minimized windows on-off |
 
-## Animations
+## Build
 
-Windows slide to their new place (scrolling, a column opens, closes or is resized) and a new window is uncovered from its middle. The curves are ported from niri. Options in `config.lua`: `animations`, `anim_slowdown`, `anim_window_movement`, `anim_window_open` (see `src/share/default_config.lua`). The closing window itself is not animated: river drops it before the compositor can.
+Needs Zig **0.16.0** and the development files for wayland, xkbcommon, cairo, pango and glib
+(on Debian: `libwayland-dev libxkbcommon-dev libcairo2-dev libpango1.0-dev libglib2.0-dev`).
+Lua 5.4 is built from source as a Zig dependency, so no system Lua is needed. `librsvg` is loaded at
+run time if present; without it, icons that only exist as SVG show a placeholder tile.
 
-Keybindings can be changed in `~/.config/wmaker-wl/config.lua` (template: `src/share/default_config.lua`).
+```sh
+zig build                                # wmaker-wl and wlprefs into zig-out/bin
+zig build test                           # unit tests, no compositor needed
+zig build run                            # starts river with wmaker-wl
+river -c ./zig-out/bin/wmaker-wl         # the same, by hand
+```
+
+Nix and Scheme files are provided for Nix and Guix users.
 
 ## Configuration
 
-The config is a **Lua script**: `$XDG_CONFIG_HOME/wmaker-wl/config.lua`, else `~/.config/wmaker-wl/config.lua`.
-It runs on top of the built-in `src/share/default_config.lua`, so you only write what you want to change:
+The config is a Lua script: `$XDG_CONFIG_HOME/wmaker-wl/config.lua`, else
+`~/.config/wmaker-wl/config.lua`. It runs on top of the built-in
+[`src/share/default_config.lua`](src/share/default_config.lua), so you only write what you want to change.
+To start from a full copy: `wmaker-wl --print-config > ~/.config/wmaker-wl/config.lua`.
 
-- Every global you set is an option; an unknown name or a bad value is a warning in the log (typos do not go
-  unnoticed), a Lua error ends the script at that line and keeps what ran before it. The session always starts.
-- `include("FILE")` and `theme("NAME")` (`Themes/NAME.lua`) work as described in `default_config.lua`.
-- Reload without restarting: `pkill -HUP wmaker-wl`.
-- The old `config.conf` (`key = value`) is **not read any more**; wmaker-wl logs a warning if one is still lying around.
-- Dock/Clip: what you change with the mouse is saved in `$XDG_STATE_HOME/wmaker-wl/WMState`
-  (`~/.local/state/wmaker-wl/WMState`). Options that **your `config.lua` names itself** (`dock_edge`, `dock_offset`,
-  `dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`,
-  `clip_auto_raise`) win over that saved state; everything you leave out follows the saved state. To let the mouse
-  decide again, delete the line from `config.lua`.
+## Default key bindings
+
+| Key | Action |
+|---|---|
+| `Super+Return` / `a` / `b` | terminal / launcher / browser |
+| `Super+h j k l`, arrow keys | focus left / down / up / right |
+| `Super+Shift+h l`, `Shift+arrows` | move column |
+| `Super+Shift+j k` | move window down / up within its column |
+| `Super+,` / `Super+.` | stack the window into the column on its left / push it out into a new column on its right |
+| `Super+[` / `]` | scroll the view |
+| `Super+c` | center column |
+| `Super+r`, `-`, `=` | cycle, narrow, widen the column |
+| `Super+d` | maximize column |
+| `Super+t` | toggle tiling / floating |
+| `Super+f` | fullscreen |
+| `Super+1…4`, `Shift` to take the window along | workspace |
+| `Super+Page_Up` / `Page_Down` | previous / next workspace |
+| `Super+n`, `Super+Shift+n` | minimize, restore the last minimized window |
+| `Super+Alt+Left` / `Right` | focus previous / next monitor (`Shift` moves the window) |
+| `Super` + left / right mouse button | move / resize a window |
+| `Super+q` | close window |
+| `Super+Shift+e` | exit |
 
 ## Command line
 
 ```
-wmaker-wl [OPTION]      without an option: start the session (river -c wmaker-wl)
-  -h, --help            show the options
-  -V, --version         show the version
-      --config FILE     read FILE instead of the default config.lua
-      --config-dir DIR  use DIR instead of ~/.config/wmaker-wl (config.lua, RootMenu, WMWindowAttributes, autostart)
-      --check           check config.lua, key bindings, root menu, window attributes, WMState (exit 0: fine, 1: problems)
-      --paths           list the files wmaker-wl reads and which of them exist
-      --print-config    print the built-in default config.lua (a template: wmaker-wl --print-config > config.lua)
+wmaker-wl [OPTION]       without an option: start the session
+  -h, --help             show the options
+  -V, --version          show the version
+      --config FILE      read FILE instead of the default config.lua
+      --config-dir DIR   use DIR instead of ~/.config/wmaker-wl
+      --check            check config.lua, key bindings, root menu, window attributes and WMState
+                         (exit 0: fine, 1: problems)
+      --paths            list the files wmaker-wl reads and which of them exist
+      --print-config     print the built-in default config.lua
+      --log SPEC         log filter, e.g. info,anim=debug (same as WMAKER_LOG)
 ```
 
-An unknown option is an error (exit 2) and does not start a session.
+An unknown option is an error and does not start a session.
 
-## Build
+## Documentation
 
-Optional at run time: `librsvg` (`librsvg-2.so.2`), without it SVG-only icons are replaced by a placeholder tile.
+| | |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the code is organised and the rules it follows with river |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | what is taken from Window Maker, and what is not |
+| [docs/DOCKAPPS.md](docs/DOCKAPPS.md) | Dock, Clip, Drawers, writing a DockApp |
+| [docs/MONITORS.md](docs/MONITORS.md) | multiple monitors and hotplug |
+| [docs/WMPREFS.md](docs/WMPREFS.md) | `wlprefs`, the settings window |
+| [docs/DEBUGGING.md](docs/DEBUGGING.md) | logging, state dump, tests, benchmark |
+| [docs/TODO.md](docs/TODO.md) | open work |
 
-Requires Zig **0.16.0**, `libwayland-dev`, `libxkbcommon-dev`, and, for the root menu's cairo/pango
-rendering, `libcairo2-dev`, `libpango1.0-dev`, and `libglib2.0-dev` 
+`examples/` has two small DockApps, `wl-clock` and `wl-battery`, which also serve as templates.
 
-```sh
-zig build
-zig build test
-river -c ./zig-out/bin/wmaker-wl
-```
+## Credits and license
+
+Window Maker is the model for almost everything visible here, and much of the Dock logic follows its
+`dock.c`. [wlmaker](https://github.com/phkaeser/wlmaker) was a reference for menu names and dimensions.
+The animation curves come from [niri](https://github.com/YaLTeR/niri).
+
+GPL-3.0, see [LICENSE](LICENSE).

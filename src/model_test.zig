@@ -28,13 +28,13 @@ const WindowManager = types.WindowManager;
 
 var dummy_byte: u8 = 0;
 
-const Fixture = struct {
+pub const Fixture = struct {
     wm: WindowManager,
     out: *Output,
     wins: [8]*Window = undefined,
     used: usize = 0,
 
-    fn init() !*Fixture {
+    pub fn init() !*Fixture {
         const a = std.testing.allocator;
         const f = try a.create(Fixture);
         f.* = .{
@@ -66,7 +66,7 @@ const Fixture = struct {
         return f;
     }
 
-    fn deinit(f: *Fixture) void {
+    pub fn deinit(f: *Fixture) void {
         const a = std.testing.allocator;
         // Free columns still alive.
         for (0..f.out.workspace_count) |i| {
@@ -86,7 +86,7 @@ const Fixture = struct {
         a.destroy(f);
     }
 
-    fn newWindow(f: *Fixture) !*Window {
+    pub fn newWindow(f: *Fixture) !*Window {
         const w = try std.testing.allocator.create(Window);
         w.* = .{ .obj = @ptrCast(&dummy_byte), .node = @ptrCast(&dummy_byte) };
         w.ready = true;
@@ -97,7 +97,7 @@ const Fixture = struct {
         return w;
     }
 
-    fn cur(f: *Fixture) *Workspace {
+    pub fn cur(f: *Fixture) *Workspace {
         return f.out.ws();
     }
 };
@@ -1429,7 +1429,7 @@ test "hide_others minimizes other applications only; hide_app the focused one's"
 // ----------------------------------------------------------------------------
 
 /// A second output next to the fixture's first one.
-fn addSecondOutput(f: *Fixture) !*Output {
+pub fn addSecondOutput(f: *Fixture) !*Output {
     const a = std.testing.allocator;
     const out = try a.create(Output);
     out.* = .{ .obj = @ptrCast(&dummy_byte) };
@@ -1440,7 +1440,7 @@ fn addSecondOutput(f: *Fixture) !*Output {
     return out;
 }
 
-fn destroySecondOutput(out: *Output) void {
+pub fn destroySecondOutput(out: *Output) void {
     const a = std.testing.allocator;
     for (0..out.workspace_count) |i| {
         const ws = &out.workspaces[i];

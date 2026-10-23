@@ -37,12 +37,11 @@ const c = @cImport({
 });
 
 test {
-    _ = battery;
-    _ = face;
-    _ = options;
-    _ = scale;
-    _ = sysfs;
-    _ = uevent;
+    _ = @import("battery.zig");
+    _ = @import("face.zig");
+    _ = @import("options.zig");
+    _ = @import("scale.zig");
+    _ = @import("uevent.zig");
 }
 
 /// linux/input-event-codes.h BTN_LEFT.

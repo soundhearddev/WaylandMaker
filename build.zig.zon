@@ -1,6 +1,6 @@
 .{
     .name = .wmaker_wl,
-    .version = "0.2.1",
+    .version = "0.3.0",
     .fingerprint = 0xa5a98cf56f86884e,
     .minimum_zig_version = "0.16.0",
 
@@ -29,5 +29,6 @@
         "protocol",
         "wlprefs",
         "examples",
+        "tools",
     },
 }

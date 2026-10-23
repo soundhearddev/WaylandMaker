@@ -226,6 +226,17 @@ pub const Config = struct {
 
     // ---- workspaces -----------------------------------------------------
     workspace_count: u32 = 4,
+    /// Order of the monitors for `focus_output_next` and friends: `position`
+    /// (left to right) or `connection` (the order they were announced in).
+    output_order: monitors.Order = .position,
+    /// A change of the monitors counts after this many ms without another
+    /// one (hot-plugging announces them one after the other).
+    monitor_settle_ms: u32 = 400,
+    /// `monitor("DP-1", { ... })` and `monitor_profile{ ... }`, see monitors.zig.
+    /// Appended to while config.lua (and what it includes) runs; the strings
+    /// live in the config arena.
+    monitor_rules: std.ArrayList(monitors.Rule) = .empty,
+    monitor_profiles: std.ArrayList(monitors.Profile) = .empty,
     /// workspace_next on the last workspace goes to the first, and
     /// workspace_prev on the first goes to the last. false: they stop.
     workspace_wrap: bool = true,
@@ -369,6 +380,7 @@ pub const Config = struct {
     }
 };
 
+const monitors = @import("monitors.zig");
 const lua = @import("lua.zig");
 
 const default_config_text = @embedFile("share/default_config.lua");
@@ -606,6 +618,8 @@ pub fn parseWith(
         lua.register(L, "bind", cBind);
         lua.register(L, "unbind", cUnbind);
         lua.register(L, "include", cInclude);
+        lua.register(L, "monitor", cMonitor);
+        lua.register(L, "monitor_profile", cMonitorProfile);
         lua.register(L, "theme", cTheme);
         lua.register(L, "run", cRun);
         lua.register(L, "spawn", cSpawn);
@@ -748,6 +762,176 @@ fn bindFunction(ctx: *Ctx, combo: []const u8) i32 {
         error.Invalid => ctx.warnAt("bad bind: `{s}`", .{combo}),
     };
     ctx.callbacks += 1;
+    return 0;
+}
+
+// ---- monitor(), monitor_profile() ---------------------------------------------
+
+const monitor_keys = [_][]const u8{ "enabled", "primary", "workspaces", "start_workspace", "restore_windows", "on_connect", "on_disconnect" };
+const profile_keys = [_][]const u8{ "name", "needs", "exact", "run" };
+
+/// Warn about keys of the table at `idx` that are not in `known` (a typo in
+/// a monitor rule would otherwise silently do nothing).
+fn warnUnknownKeys(ctx: *Ctx, idx: i32, known: []const []const u8, what: []const u8) void {
+    const L = ctx.L;
+    lua.pushNil(L);
+    while (lua.next(L, idx)) {
+        const k = lua.toSlice(L, -2);
+        var ok = false;
+        if (k) |name| for (known) |kn| {
+            if (std.mem.eql(u8, name, kn)) ok = true;
+        };
+        if (!ok) ctx.warnAt("{s}: unknown key `{s}`", .{ what, k orelse "(not a string)" });
+        lua.pop(L, 1);
+    }
+}
+
+fn optBool(L: *lua.State, idx: i32, key: []const u8) error{Invalid}!?bool {
+    lua.rawGetString(L, idx, key);
+    defer lua.pop(L, 1);
+    if (lua.typeOf(L, -1) == lua.T_NIL) return null;
+    return lua.toBool(L, -1) orelse error.Invalid;
+}
+
+/// A whole number from 1 to `max`, as the 0-based index.
+fn optIndex(L: *lua.State, idx: i32, key: []const u8, max: u32) error{Invalid}!?u32 {
+    lua.rawGetString(L, idx, key);
+    defer lua.pop(L, 1);
+    if (lua.typeOf(L, -1) == lua.T_NIL) return null;
+    const v = lua.toInteger(L, -1) orelse return error.Invalid;
+    if (v < 1 or v > max) return error.Invalid;
+    return @intCast(v - 1);
+}
+
+/// A command (string or table of strings) in field `key`; empty when absent.
+fn optCommand(ctx: *Ctx, idx: i32, key: []const u8) ParseError![]const []const u8 {
+    const L = ctx.L;
+    lua.rawGetString(L, idx, key);
+    defer lua.pop(L, 1);
+    if (lua.typeOf(L, -1) == lua.T_NIL) return &.{};
+    return commandValue(ctx);
+}
+
+/// `monitor("DP-1", { primary = true, workspaces = 6 })`: what to do with the
+/// monitors a name matches (connector, "make model", or part of the
+/// description; "*" is every monitor). See monitors.zig.
+fn cMonitor(L: *lua.State) i32 {
+    const ctx = active orelse return 0;
+    const match = lua.toSlice(L, 1);
+    if (match == null or match.?.len == 0 or lua.typeOf(L, 2) != lua.T_TABLE) {
+        ctx.warnAt("monitor() takes a name and a table: monitor(\"DP-1\", {{ primary = true }})", .{});
+        return 0;
+    }
+    warnUnknownKeys(ctx, 2, &monitor_keys, "monitor()");
+    var rule: monitors.Rule = .{ .match = ctx.a.dupe(u8, match.?) catch {
+        ctx.oom = true;
+        return 0;
+    } };
+    const bad = struct {
+        fn at(c: *Ctx, key: []const u8) i32 {
+            c.warnAt("monitor(): `{s}` has a wrong value, the rule is ignored", .{key});
+            return 0;
+        }
+    }.at;
+    rule.enabled = (optBool(L, 2, "enabled") catch return bad(ctx, "enabled")) orelse true;
+    rule.primary = (optBool(L, 2, "primary") catch return bad(ctx, "primary")) orelse false;
+    rule.restore_windows = (optBool(L, 2, "restore_windows") catch return bad(ctx, "restore_windows")) orelse true;
+    rule.workspaces = optIndex(L, 2, "workspaces", max_workspaces) catch return bad(ctx, "workspaces");
+    if (rule.workspaces) |w| rule.workspaces = w + 1; // a count, not an index
+    rule.start_workspace = optIndex(L, 2, "start_workspace", max_workspaces) catch return bad(ctx, "start_workspace");
+    rule.on_connect = optCommand(ctx, 2, "on_connect") catch |e| {
+        if (e == error.OutOfMemory) ctx.oom = true else _ = bad(ctx, "on_connect");
+        return 0;
+    };
+    rule.on_disconnect = optCommand(ctx, 2, "on_disconnect") catch |e| {
+        if (e == error.OutOfMemory) ctx.oom = true else _ = bad(ctx, "on_disconnect");
+        return 0;
+    };
+    if (ctx.cfg.monitor_rules.items.len >= monitors.max_rules) {
+        ctx.warnAt("monitor(): at most {d} rules", .{monitors.max_rules});
+        return 0;
+    }
+    ctx.cfg.monitor_rules.append(ctx.a, rule) catch {
+        ctx.oom = true;
+    };
+    return 0;
+}
+
+/// `monitor_profile{ name = "docked", needs = {"eDP-1", "DP-1"}, run = "kanshictl switch docked" }`:
+/// run a command when this set of monitors is connected (and nothing more
+/// specific fits).
+fn cMonitorProfile(L: *lua.State) i32 {
+    const ctx = active orelse return 0;
+    if (lua.typeOf(L, 1) != lua.T_TABLE) {
+        ctx.warnAt("monitor_profile() takes a table: monitor_profile{{ name = \"docked\", needs = {{\"eDP-1\", \"DP-1\"}}, run = \"...\" }}", .{});
+        return 0;
+    }
+    warnUnknownKeys(ctx, 1, &profile_keys, "monitor_profile()");
+
+    lua.rawGetString(L, 1, "name");
+    const name_src = lua.toSlice(L, -1);
+    const name = ctx.a.dupe(u8, name_src orelse "(unnamed)") catch {
+        ctx.oom = true;
+        return 0;
+    };
+    lua.pop(L, 1);
+
+    lua.rawGetString(L, 1, "needs");
+    if (lua.typeOf(L, -1) != lua.T_TABLE) {
+        lua.pop(L, 1);
+        ctx.warnAt("monitor_profile `{s}`: `needs` must be a list of monitor names", .{name});
+        return 0;
+    }
+    const n = lua.rawLen(L, -1);
+    if (n == 0 or n > monitors.max_needs) {
+        lua.pop(L, 1);
+        ctx.warnAt("monitor_profile `{s}`: `needs` takes 1 to {d} names", .{ name, monitors.max_needs });
+        return 0;
+    }
+    var needs: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        lua.rawGetI(L, -1, @intCast(i));
+        const t = lua.toSlice(L, -1);
+        if (t == null or t.?.len == 0) {
+            lua.pop(L, 2);
+            ctx.warnAt("monitor_profile `{s}`: `needs` holds names (strings)", .{name});
+            return 0;
+        }
+        needs.append(ctx.a, ctx.a.dupe(u8, t.?) catch {
+            ctx.oom = true;
+            return 0;
+        }) catch {
+            ctx.oom = true;
+            return 0;
+        };
+        lua.pop(L, 1);
+    }
+    lua.pop(L, 1);
+
+    const exact = (optBool(L, 1, "exact") catch {
+        ctx.warnAt("monitor_profile `{s}`: `exact` must be true or false", .{name});
+        return 0;
+    }) orelse false;
+    const run = optCommand(ctx, 1, "run") catch |e| {
+        if (e == error.OutOfMemory) ctx.oom = true else ctx.warnAt("monitor_profile `{s}`: `run` is not a command", .{name});
+        return 0;
+    };
+    if (ctx.cfg.monitor_profiles.items.len >= monitors.max_profiles) {
+        ctx.warnAt("monitor_profile(): at most {d} profiles", .{monitors.max_profiles});
+        return 0;
+    }
+    ctx.cfg.monitor_profiles.append(ctx.a, .{
+        .name = name,
+        .needs = needs.toOwnedSlice(ctx.a) catch {
+            ctx.oom = true;
+            return 0;
+        },
+        .exact = exact,
+        .run = run,
+    }) catch {
+        ctx.oom = true;
+    };
     return 0;
 }
 
@@ -1003,11 +1187,11 @@ const bool_options = .{
     "enable_autostart",
     "enable_dockapps",
 };
-const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align" };
+const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align", "output_order" };
 const font_options = .{ "font_menu_title", "font_menu", "font_dock" };
 const command_options = .{ "terminal", "launcher", "browser" };
 /// Options with their own kind of value.
-const special_options = .{ "dock_size", "workspace_count", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment", "anim_slowdown", "anim_window_movement", "anim_window_open" };
+const special_options = .{ "dock_size", "workspace_count", "monitor_settle_ms", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment", "anim_slowdown", "anim_window_movement", "anim_window_open" };
 
 /// Every option name, for the typo check.
 const all_options = pixel_options ++ fraction_options ++ colour_options ++ bool_options ++ enum_options ++ font_options ++ command_options ++ special_options;
@@ -1086,6 +1270,13 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         const v = lua.toInteger(L, -1) orelse return error.Invalid;
         if (v < 1 or v > max_workspaces) return error.Invalid;
         cfg.workspace_count = @intCast(v);
+        return;
+    }
+
+    if (eql(u8, key, "monitor_settle_ms")) {
+        const v = lua.toInteger(L, -1) orelse return error.Invalid;
+        if (v < 0 or v > 10_000) return error.Invalid;
+        cfg.monitor_settle_ms = @intCast(v);
         return;
     }
 
@@ -1273,6 +1464,8 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
         lua.pushInteger(L, cfg.dock_size);
     } else if (comptime std.mem.eql(u8, name, "workspace_count")) {
         lua.pushInteger(L, cfg.workspace_count);
+    } else if (comptime std.mem.eql(u8, name, "monitor_settle_ms")) {
+        lua.pushInteger(L, cfg.monitor_settle_ms);
     } else if (comptime inList(fraction_options, name)) {
         lua.pushNumber(L, @field(cfg, name));
     } else if (comptime inList(colour_options, name)) {
@@ -2606,4 +2799,72 @@ test "builtin_text is the shipped default config.lua (what --print-config prints
     try std.testing.expectEqualStrings(path, cfg.config_file);
     try std.testing.expectEqual(defaults.gap, cfg.gap);
     try std.testing.expectEqual(defaults.border_width, cfg.border_width);
+}
+
+// ---- monitor(), monitor_profile() tests -------------------------------------------
+
+test "monitor() and monitor_profile() fill the rule and profile lists" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(),
+        &cfg,
+        \\monitor("DP-1", { primary = true, workspaces = 6, start_workspace = 2 })
+        \\monitor("eDP-1", { enabled = false, restore_windows = false, on_connect = "notify-send hi", on_disconnect = {"a", "b"} })
+        \\monitor_profile{ name = "docked", needs = {"eDP-1", "DP-1"}, exact = true, run = "kanshictl switch docked" }
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 2), cfg.monitor_rules.items.len);
+    const r0 = cfg.monitor_rules.items[0];
+    try std.testing.expectEqualStrings("DP-1", r0.match);
+    try std.testing.expect(r0.primary and r0.enabled);
+    try std.testing.expectEqual(@as(?u32, 6), r0.workspaces);
+    try std.testing.expectEqual(@as(?u32, 1), r0.start_workspace);
+    const r1 = cfg.monitor_rules.items[1];
+    try std.testing.expect(!r1.enabled and !r1.restore_windows);
+    try std.testing.expectEqual(@as(usize, 2), r1.on_connect.len);
+    try std.testing.expectEqual(@as(usize, 2), r1.on_disconnect.len);
+    try std.testing.expectEqual(@as(usize, 1), cfg.monitor_profiles.items.len);
+    const p = cfg.monitor_profiles.items[0];
+    try std.testing.expectEqualStrings("docked", p.name);
+    try std.testing.expect(p.exact);
+    try std.testing.expectEqual(@as(usize, 2), p.needs.len);
+    try std.testing.expectEqualStrings("DP-1", p.needs[1]);
+    try std.testing.expectEqual(@as(usize, 3), p.run.len);
+}
+
+test "monitor(): typos and wrong values are warnings and add no rule" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(),
+        &cfg,
+        \\monitor("DP-1", { primray = true })
+        \\monitor("DP-2", { workspaces = 0 })
+        \\monitor("DP-3", { primary = "yes" })
+        \\monitor("", { primary = true })
+        \\monitor("DP-4")
+        \\monitor_profile{ name = "x" }
+        \\monitor_profile{ name = "y", needs = {} }
+        \\monitor_profile{ name = "z", needs = {1} }
+    );
+    // A typo warns but the rest of that rule still counts; the others are refused.
+    try std.testing.expectEqual(@as(usize, 1), cfg.monitor_rules.items.len);
+    try std.testing.expectEqual(@as(usize, 0), cfg.monitor_profiles.items.len);
+    try std.testing.expect(cfg.parse_warnings >= 8);
+}
+
+test "output_order and monitor_settle_ms are options, bad values are refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg, "output_order = \"connection\"\nmonitor_settle_ms = 150\n");
+    try std.testing.expectEqual(monitors.Order.connection, cfg.output_order);
+    try std.testing.expectEqual(@as(u32, 150), cfg.monitor_settle_ms);
+    try parseText(arena.allocator(), &cfg, "output_order = \"sideways\"\nmonitor_settle_ms = -5\n");
+    try std.testing.expectEqual(monitors.Order.connection, cfg.output_order);
+    try std.testing.expectEqual(@as(u32, 150), cfg.monitor_settle_ms);
 }

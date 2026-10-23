@@ -27,6 +27,7 @@
 // `.debug` (nothing is dropped at compile time) and this file decides.
 
 const std = @import("std");
+const trace = @import("trace.zig");
 
 pub const Level = enum(u8) { off, err, warn, info, debug };
 
@@ -137,6 +138,8 @@ pub fn logFn(
     args: anytype,
 ) void {
     if (level == .warn or level == .err) problems +%= 1;
+    // The flight recorder keeps what the filter drops (see trace.zig).
+    trace.record(level, scope, format, args);
     if (!active.allows(level, @tagName(scope))) return;
     std.log.defaultLog(level, scope, format, args);
 }

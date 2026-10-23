@@ -1,149 +1,185 @@
-# wmaker-wl – Architecture
+# Architecture
 
-`wmaker-wl` is a window-manager client for [river](https://codeberg.org/river/river) using `river_window_management_v1`. river handles compositing and input; wmaker-wl handles layout, focus, interaction, and the root menu.
+`wmaker-wl` is a client of river's `river_window_management_v1` protocol. river composites and handles
+input; this program decides where windows go, what has focus, and draws the menus, Dock and Clip. This
+page is a map of the source.
 
-## Files
+## Source layout
 
-| File | Purpose | Sends Wayland requests? |
+Everything is in `src/` unless noted. "Wayland" means the file sends requests to the compositor.
+
+| File | What it does | Wayland |
 |---|---|---|
-| `config.zig` + `default_config.lua` | Settings and keybindings, single source of truth | no |
-| `types.zig` | Data model and invariants | no |
-| `layout.zig` | Pure geometry (columns, scrolling, floating) | no |
-| `workspace.zig` | All window-tree mutations | no |
-| `action.zig` | Parse and execute commands | only `close` |
-| `window.zig` | Window events, `applyManage`, `applyRender` | yes |
-| `seat.zig` | Bindings, focus, mouse operations | yes |
-| `output.zig` | Outputs, layer-shell work area | yes |
-| `main.zig` | Startup, registry, manage/render loop | yes |
-| `plist.zig` | Window Maker/GNUstep property-list parser | no |
-| `wm_menu.zig` | Root menu model, Plist and text format, depth/item/warning limits | no |
-| `wm_attr.zig` | `WMWindowAttributes`: per-`app_id` rules | no |
-| `wm_files.zig` | Search paths and loading Window Maker files | no |
-| `process.zig` | Spawns commands (`EXEC`/`SHEXEC`, autostart) detached from the WM; logs every started command at `info` | no |
-| `log.zig` | Run-time log filter: `std_options.logFn`, `WMAKER_LOG` / `--log` (`info,anim=debug`), per-scope levels, counts warnings and errors for `--check`. Every file logs through its own scope (`std.log.scoped(.window)`); the scopes are listed in the README | no |
-| `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient (vertical, diagonal), polygon, bevel, text, measure, PNG icons | no |
-| `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
-| `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling; owns the Dock and Clip surfaces, their clicks, and puts DockApp windows into their tile | yes |
-| `anim.zig` | Window Maker's miniaturize animation (`actions.c`: zoom, twist, flip) ported loop for loop with the same constants and `float` arithmetic (checked point for point against the original C); produces the pictures, draws them as outlines. `ui.zig` shows them on a transparent surface (`animCollect` / `animLaunch` / `animStep`) | no |
-| `animation.zig` | Window animations: spring and easing curves, clock and the parsed `Spec` of `anim_window_movement` / `anim_window_open`; no Wayland types, unit-tested. `window.zig` (`visualState`, `axis`, `visibleBox`) decides what is shown per window; `main.zig` reads the clock once per manage / render sequence (`tickClock`) and `runLoop` asks for a frame every 16 ms while `wm.anim_active` (`animWaitMs`, `animTimer`) | no |
-| `appicon.zig` | The system icon of an application window, for the Dock tile of a minimized window: an icon named like the app_id in the installed icon themes (PNG/XPM), else the `Icon=` of its `.desktop` file, else the theme's own placeholder (`application-x-executable`, ...); nothing is drawn by wmaker-wl | no |
-| `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
-| `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |
-| `compatibility.zig` | Unused legacy stub, not imported anywhere except `root.zig` | no |
-| `root.zig` | Re-exports the core modules so `main.zig` and tests can reach them by name (not all: `dock`, `shm`, `fsmenu`, `xpm`, `wm_menu`, `wm_attr` are tested via `main.zig` instead) | no |
-| `model_test.zig` | Invariant tests without a compositor | – |
+| `types.zig` | data model, commands, invariants | no |
+| `layout.zig` | geometry: columns, scrolling, floating | no |
+| `workspace.zig` | every change to the window tree | no |
+| `action.zig` | parses and runs commands (key bindings, menu entries) | only `close` |
+| `window.zig` | window events, `applyManage`, `applyRender` | yes |
+| `seat.zig` | key bindings, focus, mouse move/resize | yes |
+| `output.zig` | outputs, layer-shell work area | yes |
+| `monitors.zig` | monitor identification, rules, profiles, hotplug decisions | no |
+| `main.zig` | startup, registry, the manage/render loop, signals, CLI | yes |
+| `config.zig`, `lua.zig`, `share/default_config.lua` | Lua config and its defaults | no |
+| `plist.zig` | Window Maker / GNUstep property-list parser | no |
+| `wm_menu.zig` | root menu model (plist and text format) | no |
+| `fsmenu.zig` | `OPEN_MENU`: a menu built from a directory | no |
+| `wm_attr.zig` | `WMWindowAttributes`, per-`app_id` rules | no |
+| `wm_files.zig` | where Window Maker files are looked for, and loading them | no |
+| `wm_dock.zig` | the logic of Window Maker's `dock.c` (slots, snapping, drawers, Clip) | no |
+| `dockapp.zig` | Dock and Clip data: entries, order, `WMState` read/write | no |
+| `dockhost.zig` | how DockApp windows are adopted and placed in their tile | yes |
+| `dock.zig` | Dock/Clip geometry, hit testing, icon loading, drawing | no |
+| `scale.zig` | tile-size scaling; an identical copy lives in each example | no |
+| `appicon.zig` | finds the icon theme icon of an application | no |
+| `xpm.zig`, `svg.zig` | XPM reader; SVG through `librsvg` loaded with `dlopen` | no |
+| `ui.zig` | root menu, window list, Dock and Clip surfaces, pointer and keyboard input | yes |
+| `miniwin.zig` | list of tiles for minimized windows | no |
+| `gfx.zig`, `wm_text.c/.h` | cairo/pango drawing; the C file wraps Pango font-description macros | no |
+| `shm.zig` | `wl_shm` buffers (memfd) with a checked size | yes |
+| `anim.zig` | Window Maker's miniaturize animation (zoom, twist, flip), drawn as outlines | no |
+| `animation.zig` | window animations: spring and easing curves, parsing `anim_window_*` | no |
+| `process.zig` | starts commands detached from the WM | no |
+| `log.zig`, `trace.zig`, `perf.zig`, `invariants.zig`, `diag.zig`, `dump.zig` | logging and debugging, see [DEBUGGING.md](DEBUGGING.md) | no |
+| `compatibility.zig` | old stub, not used at run time; only imported by `root.zig` and the tests | no |
+| `root.zig` | re-exports modules by name; its `test { }` block is the list of test files | no |
+| `*_test.zig`, `bench.zig` | tests and the benchmark | – |
+| `../wlprefs/` | the settings program, a separate executable | yes |
 
-Everything that modifies the model can be tested without a compositor with `zig build test` (102 tests as of this writing).
+Anything that changes the model can be tested without a compositor.
 
-## Protocol Flow
+### Registering tests
 
-```text
-Events ─▶ manage_start ─▶ [Requests] ─▶ manage_finish ─▶ river configures clients
-                                                              │
-                          render_finish ◀─ [Requests] ◀─ render_start
+Zig only runs the tests of a file if the test root refers to it, and an unused `pub const x = @import(...)`
+does not count. So every file with `test` blocks is named in one `test { }` block, one line each:
+
+```zig
+_ = @import("name.zig");
 ```
 
-- **Management state** (`propose_dimensions`, `set_tiled`, `fullscreen`, focus, `op_start_pointer`, `op_end`, `close`) may **only** be sent between `manage_start` and `manage_finish`. All of this runs from `main.onManage`.
-- **Rendering state** (`set_position`, `place_top`, `set_borders`, `show`, `hide`) may be sent in **either** sequence and takes effect with `render_finish`. Position is therefore set during `manage_start` alongside `propose_dimensions` for frame-perfect placement; `render_start` only corrects windows that changed their own size.
-- Every `manage_start` is answered with `manage_finish` on **every** path (`defer` in `onManage`), otherwise river waits indefinitely.
-- Key presses arrive **outside** a manage sequence. `pressed` only queues the command and calls `manage_dirty`; it is executed in `onManage`.
+- **wmaker-wl:** `src/root.zig`. This is the only place to touch for a new test file. `src/main.zig` is the
+  test root and only pulls in `root.zig`; its own tests run without a line.
+- **wlprefs:** `wlprefs/src/root.zig`, same convention. It is a separate module with its own Wayland
+  bindings, so its tests cannot be listed in `src/root.zig`; `zig build test` runs both anyway.
+- **Examples:** the `main.zig` of each example. They are separate projects, run by `zig build test-all`.
 
-## Data Model
+A test file that is missing from its list silently never runs. Nothing checks this automatically.
+
+## Protocol flow
+
+```text
+events ─▶ manage_start ─▶ [requests] ─▶ manage_finish ─▶ river configures clients
+                                                              │
+                          render_finish ◀─ [requests] ◀─ render_start
+```
+
+- **Management state** (`propose_dimensions`, `set_tiled`, `fullscreen`, focus, `op_start_pointer`,
+  `op_end`, `close`) may only be sent between `manage_start` and `manage_finish`. It all happens in
+  `main.onManage`.
+- **Rendering state** (`set_position`, `place_top`, `set_borders`, `show`, `hide`) can be sent in either
+  sequence and takes effect at `render_finish`. Positions are set during `manage_start` next to
+  `propose_dimensions`, so a window is placed in the same frame it is resized. `render_start` only
+  corrects windows that changed their own size.
+- Every `manage_start` is answered with `manage_finish` on every path (a `defer` in `onManage`), or river
+  waits forever.
+- Key presses arrive outside a manage sequence. `pressed` only queues the command and calls
+  `manage_dirty`; the command runs in `onManage`.
+- The same applies to the menu: pointer and keyboard callbacks in `ui.zig` only change plain data (hover
+  row, open levels, a pending request) and call `manage_dirty`. Creating and destroying shell surfaces,
+  positioning, stacking, drawing, committing buffers and taking keyboard focus all happen in `Ui.sync()`,
+  called once from `onManage`.
+- A shell surface that is no longer needed (closed submenu, vanished output) is destroyed at the end of
+  `sync()`, after drawing for that sequence is done. Destroying it earlier left the last frame on screen
+  for one extra cycle.
+- Menu buffers are double-buffered per surface; a `wl_buffer` that river has not released is never drawn
+  into. `shm.checkedSize()` rejects zero or negative sizes, `i32` overflow, sides over 16384 px and
+  buffers over 256 MiB before any `memfd` or `mmap` call. `wm_menu.zig` caps nesting depth, items per menu
+  and the number of warnings, so a broken `RootMenu` cannot exhaust memory or stack.
+
+## Data model
 
 ```text
 Output ─ workspaces[N] ─ Workspace
                           ├─ strip    ─ Column ─ Window      (tiled)
-                          ├─ floating ─ Window ...            (Z-order, top = most recent)
+                          ├─ floating ─ Window ...            (z-order, top = most recent)
                           └─ fullscreen: ?*Window
 ```
 
-Invariants (enforced in `workspace.zig`, checked in `model_test.zig`):
+Invariants (kept by `workspace.zig`, checked in `model_test.zig` and, with `WMAKER_CHECKS=1`, at run time):
 
-1. Every window belongs to exactly one container (`Window.mode`).
+1. Every window is in exactly one container (`Window.mode`).
 2. A column is never empty; it is destroyed with its last window.
-3. A window switches between Tiling and Floating only through `floatWindow`/`tileWindow`. Restoration uses **index and width**, never a pointer to a potentially freed column.
-4. Fullscreen is a display state *over* the container; the window remains a member of its column and the strip retains its shape.
-5. `wl.list.Link.remove()` dereferences `prev`/`next`. Unlinked links have `null`; removal is only performed through `types.unlink()`.
+3. A window changes between tiled and floating only through `floatWindow` / `tileWindow`. Going back uses
+   the remembered column index and width, never a pointer to a column that may be freed.
+4. Fullscreen is a display state on top of the container; the window stays in its column and the strip
+   keeps its shape.
+5. `wl.list.Link.remove()` dereferences `prev` and `next`. Unlinked links hold `null`, and removal only
+   goes through `types.unlink()`.
+
+DockApp windows are the exception to 1: they are moved out of `wm.windows` into `wm.dock_windows` (see
+[DOCKAPPS.md](DOCKAPPS.md)).
 
 ## Layout
 
-- Column width: `w = f·(avail + gap) − gap`, so 1/2+1/2 and 1/3+1/3+1/3 fit exactly.
-- Windows in a column fill the height exactly; remaining pixels are distributed.
-- A maximized active column locks the viewport (`layout.lockMaximized`, `maximize_follow`) on every pass.
-- The viewport (`scroll_x`) is clamped on **every** layout pass; when focus changes, it follows the active column (`center_focused_column`).
-- Borders are outside the content area; the layout subtracts them from the slot.
-- Windows use the layer-shell `non_exclusive_area` so panels do not overlap them.
+- Column width is `w = f·(avail + gap) − gap`, so 1/2 + 1/2 and 1/3 + 1/3 + 1/3 fit exactly.
+- Windows in a column fill its height; leftover pixels are distributed.
+- A maximized active column locks the view (`layout.lockMaximized`, `maximize_follow`) on every pass.
+- The view (`scroll_x`) is clamped on every layout pass and follows the active column when focus changes
+  (`center_focused_column`).
+- Borders sit outside the content area; the layout subtracts them from the slot.
+- Windows are kept inside the layer-shell `non_exclusive_area`, so panels are not covered.
 
-## Mouse (Super+Left = move, Super+Right = resize)
+## Mouse (Super+left = move, Super+right = resize)
 
-States: `idle → requested → running → ending → idle` (see `types.OpState`).
+States: `idle → requested → running → ending → idle` (`types.OpState`).
 
-- `op_delta` is **cumulative** since the start: geometry is always `start + delta`, never `+=`.
-- A tiled window leaves the strip only after moving `drag_threshold` pixels.
-- Releasing **before** `op_start_pointer`: river does not know about the operation and never sends `op_release`; the operation is cancelled immediately.
-- If a window dies during the operation: `running → ending`, so `op_end` is still sent and the pointer is not left grabbed.
-- Client requests (`pointer_move_requested`, etc.) go through the same state machine.
+- `op_delta` is cumulative since the start. Geometry is always `start + delta`, never `+=`.
+- A tiled window leaves the strip only after being dragged `drag_threshold` pixels.
+- If the button is released before `op_start_pointer`, river does not know about the operation and never
+  sends `op_release`, so the operation is cancelled on the spot.
+- If a window dies during an operation, the state goes `running → ending`, so `op_end` is still sent and
+  the pointer is not left grabbed.
+- Client requests (`pointer_move_requested` and so on) go through the same state machine.
 
 ## Focus and workspaces
 
-- `onManage` resolves the focus target and calls `workspace.activate` on it **before** the layout, so that a
-  click/hover (which only *requests* focus) updates `strip.active` and the view follows the right column.
-- Workspaces are modular: `workspace.setWorkspaceCount` grows or shrinks only the end of `Output.workspaces`
-  (addresses stay stable); `maintainDynamic` implements `dynamic_workspaces` once per manage pass.
-- `reload_config` only sets `wm.reload_pending`; `onManage` reloads after the queued actions ran.
+- `onManage` resolves the focus target and calls `workspace.activate` on it before the layout runs, so a
+  click or hover (which only requests focus) updates `strip.active` and the view follows the right column.
+- Workspaces are modular. `workspace.setWorkspaceCount` only grows or shrinks the end of
+  `Output.workspaces`, so addresses stay stable. `maintainDynamic` implements `dynamic_workspaces` once
+  per manage pass.
+- `reload_config` only sets `wm.reload_pending`; `onManage` reloads after the queued actions have run.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/wmaker-wl/config.lua` (else `~/.config/wmaker-wl/config.lua`): a Lua 5.4 script (ziglua, linked statically, `lua.zig`) that runs on top of the built-in `src/share/default_config.lua`. Every global it sets is an option, `bind()`/`unbind()`/`include()`/`theme()` are the functions it can call. `config.zig` runs the built-in script first and then the user's, each in its own Lua state; the user's script only touches what it names.
+`config.zig` runs the built-in `default_config.lua` first and then the user's script, each in its own Lua
+state (Lua 5.4 from ziglua, linked statically). Every global the script sets is an option; `bind`,
+`unbind`, `include`, `theme`, `monitor` and `monitor_profile` are the functions it can call. A Lua error,
+unknown option or bad value gives a warning and is skipped, so startup never fails because of the config.
+`SIGHUP` reloads it (`main.reloadConfig`).
 
-A Lua error, an unknown option or a bad value produces a warning and is skipped; startup never fails because of the config. `pkill -HUP wmaker-wl` reloads it (`main.reloadConfig`).
+Dock and Clip options (`dock_edge`, `dock_offset`, `dock_on_top`, `dock_auto_raise`, `clip_corner`,
+`clip_on_top`, `clip_collapsed`, `clip_auto_collapse`, `clip_auto_raise`) can also come from the saved
+`WMState`. `Config.explicit` records which of them the user's `config.lua` sets itself (the built-in
+defaults never count), and `main.applyDockState` lets the saved state fill only the others.
 
-The old `config.conf` is not read any more; `config.load` logs a warning if it still exists next to `config.lua`.
+Key names are xkbcommon keysyms and follow the active keyboard layout. There used to be a QWERTZ
+remapping; I removed it because river compares against the active layout and the extra remapping made
+bindings wrong. `bind_layout` pins bindings to one layout if needed.
 
-**Dock/Clip precedence.** The Dock/Clip switches (`dock_edge`, `dock_offset`, `dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`, `clip_auto_raise`) can also come from the saved `WMState` (what was last changed with the mouse). `Config.explicit` records which of them the user's `config.lua` names itself (the built-in defaults never count); `main.applyDockState` lets the saved state set only the others. A line in `config.lua` therefore always wins.
+## Window Maker files
 
-Key names are xkbcommon keysyms and follow the **active keyboard layout**. The old QWERTZ remapping was removed: river compares against the active layout, and additional remapping made bindings incorrect.
+- `~/.config/wmaker-wl/{RootMenu,WMWindowAttributes}` win over `~/GNUstep/Defaults/{WMRootMenu,WMWindowAttributes}`
+  (`$WMAKER_USER_ROOT` is respected). A broken file is reported with its line number and skipped.
+- `enable_wmaker_compat = false` (the default) turns off reading from `~/GNUstep`.
+- Attributes are looked up per `app_id` in `window.placeNew`. `StartWorkspace`, `Omnipresent`, `KeepOnTop`,
+  `StartMaximized` and `Floating` decide the initial placement; `NoBorder` and `Unfocusable` apply
+  continuously and are refreshed when the `app_id` arrives late.
+- Omnipresent windows (`Window.isOmnipresent`) follow the user in `action.switchWorkspace`.
 
-## Window Maker Compatibility
+## Known limitations
 
-- Files: `~/.config/wmaker-wl/{RootMenu,WMWindowAttributes}` take precedence over `~/GNUstep/Defaults/{WMRootMenu,WMWindowAttributes}` (`$WMAKER_USER_ROOT` is respected). A broken file is reported with its line number and skipped; startup never fails because of it.
-- `enable_wmaker_compat = no` disables reading from `~/GNUstep`.
-- Attributes are resolved in `window.placeNew` (`Table.lookup(app_id)`): `StartWorkspace`, `Omnipresent`, `KeepOnTop`, `StartMaximized`, and `Floating` determine the initial placement; `NoBorder` and `Unfocusable` apply continuously (`Window.attrs`, updated when `app_id` arrives later).
-- Omnipresent windows (`Window.isOmnipresent`: `sticky` and floating) move with the user to the new workspace in `action.switchWorkspace`.
-
-## Root Menu (`ui.zig`)
-
-The root menu, window list, and the transparent desktop-catcher surfaces that receive right/middle clicks
-on the empty desktop are implemented in `ui.zig`, drawn with `gfx.zig` (cairo/pango) into `wl_shm` buffers
-managed by `shm.zig`. See `docs/INTEGRATION.md` for the Window Maker-specific menu format and behaviour;
-this section only covers the client-side protocol discipline:
-
-- Input callbacks (`wl_pointer`/`wl_keyboard` listeners) run **outside** a manage/render sequence, where
-  river forbids both rendering state (`node.set_position`, `place_top`/`place_bottom`) and management state
-  (`seat.focus_shell_surface`). Callbacks therefore only mutate plain data (hover index, which levels are
-  open, a pending `Request`) and call `manage_dirty()`.
-- Everything that actually talks to river — creating/destroying shell surfaces, positioning, stacking,
-  drawing, committing buffers, taking keyboard focus — happens in `Ui.sync()`, called once from
-  `main.onManage()`. This is the single place that is allowed to do so.
-- Shell surfaces that are no longer needed (a closed submenu, an output that disappeared) are queued in a
-  graveyard and only actually destroyed at the **end** of `sync()`, after drawing and positioning for that
-  sequence are done — not at the start of the *next* `sync()`, which previously left a closed submenu
-  visible with its last frame for one extra cycle.
-- Buffers are double-buffered per surface (`Panel.slots`): a `wl_buffer` river has not yet released is
-  never drawn into again.
-- `shm.checkedSize()` validates width/height before any `memfd`/`mmap`/Wayland call: rejects zero or
-  negative sizes, catches `i32` overflow in `width * 4`, and caps both the per-side size (16384 px) and the
-  total byte size (256 MiB). `wm_menu.zig` separately caps menu nesting depth, item count per menu, and the
-  number of parse warnings, so a broken or hostile `RootMenu` file cannot exhaust memory or the stack.
-
-## Known Limitations
-
-- Title bars are not implemented yet. The Dock and the Clip exist (`dock.zig`, `ui.zig`), but cannot be moved with the mouse or
-  edited by drag and drop, and only appear on the first output (see `docs/TODO.md`).
-- Drag-reordering windows within the strip is not implemented; dragging makes windows floating.
-- The root menu currently binds only the first `wl_seat` that appears; additional seats get no pointer or
-  keyboard for the menu.
-- Two small root-menu fixes (pointer cursor shape, a menu-overlap timing issue) are written and tested but
-  not yet merged into `main`; see `docs/TODO.md`.
-- Running against a real river has not been verified for the UI layer (`ui.zig`, `shm.zig`, `gfx.zig`);
-  only `zig build` and `zig build test` are confirmed so far.
+- No title bars or other window decoration. Dragging a tiled window makes it float; there is no
+  drag-reordering of columns.
+- Dock and Clip are only on the primary output.
+- Menu and Dock bind only the first `wl_seat`.
+- Monitor hotplug is tested on the model, not yet against a river with real plugging and unplugging.

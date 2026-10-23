@@ -1,142 +1,140 @@
-# DockApps, Dock und Clip
+# Dock, Clip and DockApps
 
-wmaker-wl folgt hier Window Maker (`dock.c`, `appicon.c`): **ein** Dateiformat, **kein** Register
-von DockApps, und DockApps sind keine Fenster.
+This follows Window Maker (`dock.c`, `appicon.c`) in three ways: there is one file format, there is no
+list of DockApps to maintain, and DockApps are not treated as windows.
 
-## DockApps sind Icons, keine Fenster (`dockhost.zig`)
+The Dock and the Clip are drawn on the primary monitor only. One tile is `dock_size` pixels (64 by
+default, 16 to 256 allowed).
 
-Ein DockApp ist ein normales Programm mit **einem Tag**: sein Wayland-`app_id` ist
-`dockapp:<name>` (oder `dockapp-<name>`). Mehr braucht es nicht; gestartet wird es, wie man will:
-`autostart`, Menü, Terminal oder ein `WMState`-Eintrag mit `AutoLaunch = Yes`.
+## Writing a DockApp
 
-Sobald der Tag da ist (egal wie spät), wird das Fenster einmal **adoptiert** (`Window.role = .dockapp`)
-und wandert von `wm.windows` nach `wm.dock_windows`. Damit ist es für alles andere unsichtbar, ohne
-dass irgendwo ein Flag geprüft werden muss: Layout, Workspaces, Fokus, Fokus-Zyklus, Close, Hide,
-Minimize, Kill, Fensterliste und Fenstermenüs iterieren nur über `wm.windows`.
+A DockApp is an ordinary Wayland program with one convention: its `app_id` is `dockapp:<name>` (or
+`dockapp-<name>`). Start it however you like: from `autostart`, the root menu, a terminal, or a `WMState`
+entry with `AutoLaunch = Yes`. It should:
 
-Was der Compositor (nicht der Client) dann festlegt, ausschließlich in `dockhost.apply`:
+1. set that `app_id`,
+2. ask for a window size (at most one tile),
+3. draw into it.
 
-| Thema | Verhalten |
+Everything else is up to the window manager. `examples/wl-clock` and `examples/wl-battery` are complete
+small examples; neither needs a toolkit or layer-shell, they are plain `xdg_shell` clients drawing into
+`wl_shm` buffers.
+
+## How DockApps are handled (`dockhost.zig`)
+
+When the tag shows up, whenever that is, the window is adopted once: `Window.role = .dockapp`, and it
+moves from `wm.windows` to `wm.dock_windows`. After that, layout, workspaces, focus, focus cycling, close,
+hide, minimize, kill, the window list and window menus never see it, because they only iterate
+`wm.windows`. No flag has to be checked in each of them.
+
+What the compositor then decides, all in `dockhost.apply`:
+
+| Topic | Behaviour |
 |---|---|
-| Größe | was das DockApp angefragt hat, höchstens eine Kachel (`dock_size`, 64×64 ist der Standard); ohne Hint eine ganze Kachel |
-| Position | zentriert in der Kachel seines Namens, über dem Dock, auf allen Workspaces |
-| Dekoration | keine (CSD, keine Ränder, keine Titelleiste) |
-| Fokus, Tastatur | nie; Mod+Q und andere Fenster-Aktionen erreichen es nicht |
-| Events | nur Größe, Name und Schließen zählen; Move, Resize und Fullscreen werden ignoriert |
-| Maus | geht direkt ans DockApp (sein Fenster liegt auf der Kachel) |
-| Kachel | existiert ein Eintrag mit passendem Namen, sitzt es dort; sonst bekommt es eine **temporäre Kachel** am Dock-Ende, solange es läuft (nie gespeichert) |
-| *Keep Icon* | macht die Kachel dauerhaft; Command = `<name>`, also `app_id` nach dem Programm benennen (`dockapp:wl-clock`) |
-| *Kill* im Kachelmenü | beendet das Programm (einziger Weg vom Compositor aus) |
-| Klick auf die Kachel | startet **keine** zweite Instanz, solange das DockApp läuft |
+| Size | what the DockApp asked for, at most one tile; a whole tile if it gave no hint |
+| Position | centred in the tile of its name, above the Dock, on all workspaces |
+| Decoration | none |
+| Focus, keyboard | never; `Super+q` and other window actions do not reach it |
+| Events | only size, name and close count; move, resize and fullscreen are ignored |
+| Mouse | goes straight to the DockApp, because its window sits on the tile |
+| Tile | if an entry with the same name exists, the window sits there; otherwise it gets a temporary tile at the end of the Dock for as long as it runs (never saved) |
+| *Keep Icon* | makes the tile permanent. Its command is `<name>`, so name the program like the `app_id` (`dockapp:wl-clock`) |
+| *Kill* in the tile menu | ends the program (the only way to do it from the compositor) |
+| Click on the tile | does not start a second instance while the DockApp runs |
 
-Das Framework für DockApp-Autoren ist damit: Tag setzen, Fenstergröße angeben, zeichnen. Alles
-andere übernimmt der Compositor.
+If two DockApps have the same `app_id`, only the oldest is shown in the tile; the second stays invisible
+until the first ends.
 
-## Größen und das Skalierungssystem (`scale.zig`)
+## Sizes (`scale.zig`)
 
-Window Maker skaliert nie ein fertiges Bild: die Kachel ist `IconSize` Pixel groß (64), und was darin
-sitzt, wird in dieser Größe gezeichnet oder (kleineres DockApp) einfach zentriert. wmaker-wl hat dazu
-`dock_size` (16..256), und `src/scale.zig` ist die eine Stelle, die das für jede Größe regelt:
+Window Maker never scales a finished picture: the tile is `IconSize` pixels, and whatever is inside is
+drawn at that size, or centred if it is smaller. `scale.zig` does the same for any `dock_size`.
 
-- **Designraster:** alles wird auf einer 64×64-Kachel entworfen („Design-Einheiten“). `scale.Metrics`
-  macht daraus ganze Pixel der echten Kachel: `edge(v)` rundet eine *Kante* (0 bleibt 0, 64 ist immer
-  die Kachelseite), `len(at, size)` ist der Abstand zweier gerundeter Kanten (Nachbarn lassen keine Lücke
-  und überlappen nicht), `stroke(v)` ist nie dünner als 1 px, `whole(v)` ist eine ganzzahlige
-  Vergrößerung (Pixelfont), `f(v)` die exakte Größe für antialiaste Polygone, `fontDesc` skaliert eine
-  Pango-Schrift.
-- **Host (`dock.zig`):** Kachelrahmen, Bevel, „läuft nicht“-Punkte, Pfeile, Schriften und der
-  Icon-Rand laufen durch `dock.metrics`; PNG-Icons werden auf ganze Pixel gesetzt (`gfx.Canvas.drawIcon`).
-  Bei 64 px ist das Ergebnis pixelgleich zum alten Bild.
-- **DockApps:** ein DockApp ohne Größenhint bekommt eine ganze Kachel (`scale.proposedSide`) und zeichnet
-  *in dieser Größe* (`examples/wl-clock/src/face.zig`, `examples/wl-battery/src/face.zig`: Layout aus
-  `Metrics`, Pixelfont-Vergrößerung wird verkleinert, bis der Text passt, Icons sind Pixelkacheln).
-  Ein Bild, das sich nicht neu zeichnen lässt, kann mit `scale.centre` (wie Window Maker: unverändert in
-  die Mitte) oder `scale.resize` (bilinear/Box) angepasst werden – das ist der Notbehelf, nicht der
-  Normalfall. `scale.zig` hängt als identische Kopie in jedem Beispiel (`diff src/scale.zig examples/*/src/scale.zig`).
+- Everything is designed on a 64×64 tile ("design units"). `scale.Metrics` turns those into whole pixels
+  of the real tile. `edge(v)` rounds an edge (0 stays 0, 64 is always the tile side), `len(at, size)` is
+  the distance between two rounded edges (neighbours neither overlap nor leave a gap), `stroke(v)` is never
+  thinner than 1 px, `whole(v)` is an integer magnification (for pixel fonts), `f(v)` is the exact size
+  for antialiased polygons, and `fontDesc` scales a Pango font.
+- The host (`dock.zig`) draws tile frames, bevels, the "not running" dots, arrows, fonts and the icon
+  margin through `dock.metrics`. PNG icons are placed on whole pixels. At 64 px the result is
+  pixel-identical to the unscaled drawing.
+- A DockApp without a size hint gets a whole tile (`scale.proposedSide`) and should draw at that size,
+  as the two examples do. An image that cannot be redrawn can be adjusted with `scale.centre` (as Window
+  Maker does) or `scale.resize` (bilinear or box). That is a fallback, not the intended way.
+- `scale.zig` is copied unchanged into each example. Check with
+  `diff src/scale.zig examples/*/src/scale.zig`.
 
-## Normale Programme
+## Ordinary programs
 
-*Keep Application* im Dock-/Clip-Menü legt für ein laufendes Programm einen Starter an. Ein Klick
-startet das Programm oder fokussiert sein Fenster; ein Starter ohne Fenster zeigt die drei Punkte
-("läuft nicht").
+*Keep Application* in the Dock or Clip menu creates a launcher for a running program. A click starts the
+program or focuses its window. A launcher with no window shows three dots ("not running"). By default a
+double click launches, like Window Maker; `dock_single_click = true` makes it one click. A second click
+within 1.5 s on a tile that was just launched starts nothing; a middle click and *Launch* in the menu always
+start a new instance.
 
-## WMState: das einzige Format
+## `WMState`
 
-Dock und Clip stehen in Window Makers Property-List `WMState`:
+Dock and Clip are stored in Window Maker's own property list:
 
 ```
-$XDG_STATE_HOME/wmaker-wl/WMState      (sonst ~/.local/state/wmaker-wl/WMState)
-~/GNUstep/Defaults/WMState             (nur bei enable_wmaker_compat = true)
+$XDG_STATE_HOME/wmaker-wl/WMState      (else ~/.local/state/wmaker-wl/WMState)
+~/GNUstep/Defaults/WMState             (only with enable_wmaker_compat = true)
 ```
 
-wmaker-wl schreibt die erste Datei selbst (atomar, per `rename`), sobald man Kacheln bewegt,
-hinzufügt, entfernt oder Schalter ändert (`dock_save_state = true`). Beim Start gewinnt sie vor
-`~/GNUstep`; ein leeres gespeichertes Dock bleibt leer. Löschen setzt auf `~/GNUstep` bzw. die Werte der
-`config.lua` zurück.
+wmaker-wl writes the first file itself, atomically (temporary file and `rename`), whenever tiles are
+moved, added or removed or a switch changes (`dock_save_state = true`). At start it wins over `~/GNUstep`;
+an empty saved Dock stays empty. Deleting it goes back to `~/GNUstep` or to the values in `config.lua`.
 
-**Vorrang gegenüber `config.lua`:** Die gespeicherten Schalter (`dock_edge`, `dock_offset`,
-`dock_on_top`, `dock_auto_raise`, `clip_corner`, `clip_on_top`, `clip_collapsed`,
-`clip_auto_collapse`, `clip_auto_raise`) füllen nur die Optionen, die in der eigenen `config.lua`
-**nicht** stehen. Steht eine davon in der `config.lua`, gewinnt die Config (auch nach einem Neustart
-oder `SIGHUP`); Änderungen mit der Maus an dieser Option gelten dann nur bis dahin. Zeile aus der
-`config.lua` löschen, damit wieder die Maus entscheidet. Die eingebauten Standardwerte zählen nicht
-als „selbst geschrieben“.
+**Precedence.** The saved switches (`dock_edge`, `dock_offset`, `dock_on_top`, `dock_auto_raise`,
+`clip_corner`, `clip_on_top`, `clip_collapsed`, `clip_auto_collapse`, `clip_auto_raise`) only fill in
+options that your own `config.lua` does not set. If `config.lua` sets one, the config wins, also after a
+restart or `SIGHUP`, and changing that option with the mouse only lasts until then. Delete the line from
+`config.lua` to let the mouse decide again. The built-in defaults do not count as "set by you".
 
-Gelesen und geschrieben werden:
+What is read and written:
 
-* `Dock`: `Applications`, `Lowered`, `AutoRaiseLower`; die Logo-Kachel (`Command = "-"`) verankert die Spalte.
-* `Clip`: `Applications` (alle Workspaces), `Lowered`, `Collapsed`, `AutoCollapse`, `AutoRaiseLower`.
-* `Workspaces[i]`: `Name` und `Clip.Applications` (nur dieser Workspace).
-* pro Eintrag: `Name`, `Command`, `Position` ("x,y"), `AutoLaunch`, `Lock`, `Lowered`.
-* wmaker-wl-eigen (Window Maker ignoriert sie): `WMakerWLEdge`, `WMakerWLOffset` im Dock,
-  `WMakerWLCorner` im Clip, `WMakerWLIcon`, `WMakerWLAppId` pro Eintrag.
+- `Dock`: `Applications`, `Lowered`, `AutoRaiseLower`. The logo tile (`Command = "-"`) anchors the column.
+- `Clip`: `Applications` (all workspaces), `Lowered`, `Collapsed`, `AutoCollapse`, `AutoRaiseLower`.
+- `Workspaces[i]`: `Name`, and `Clip.Applications` for that workspace only.
+- Per entry: `Name`, `Command`, `Position` (`"x,y"`), `AutoLaunch`, `Lock`, `Lowered`.
+- wmaker-wl's own keys, which Window Maker ignores: `WMakerWLEdge` and `WMakerWLOffset` in the Dock,
+  `WMakerWLCorner` in the Clip, `WMakerWLIcon` and `WMakerWLAppId` per entry, `WMakerWLRow` per drawer.
 
-Reihenfolge ist die Position: im Dock zählt `y` (die Logo-Kachel ist 0, Einträge darüber negativ), im
-Clip `x`.
+Order is position: in the Dock `y` counts (the logo tile is 0, entries above it are negative), in the Clip `x`.
 
-## Dock-Optionen
+A window is matched to an entry through `app_id` instead of `WM_CLASS` (`DockApp.matches`): an explicit
+`WMakerWLAppId`, then `dockapp:<name>`, parts of `instance.Class`, the program name, and the last part of a
+reverse-DNS `app_id`.
 
-`dock_*` / `clip_*` in `config.lua` (Lua-Variablen, z. B. `clip_corner = "bottom_right"`); Fensterzuordnung über `app_id` statt `WM_CLASS`
-(`DockApp.matches`: expliziter `WMakerWLAppId`, `dockapp:<Name>`, Teile von `instance.Class`,
-Programmname).
+## Grid model (`wm_dock.zig`, from `dock.c`)
 
-## Das Raster-Modell (`wm_dock.zig`, Port von `dock.c`)
+Dock, Clip and Drawers share Window Maker's model: every icon has a grid position (`xindex`, `yindex`)
+relative to the first tile of its dock.
 
-Dock, Clip und Drawers teilen sich Window Makers Modell: jedes Icon hat eine Rasterposition
-(`xindex`, `yindex`) relativ zur ersten Kachel seines Docks.
-
-| Typ | Aufbau |
+| Kind | Layout |
 |---|---|
-| **Dock** | Logo-Kachel und eine Spalte (`xindex = 0`); Zeilen dürfen leer bleiben, auch oberhalb des Logos (`yindex < 0`) |
-| **Clip** | Workspace-Kachel in einer Ecke, Anwendungen des *aktuellen* Workspaces frei darum herum, jede neben einer anderen (`CLIP_ATTACH_VICINITY = 1`); *Omnipresent*-Kacheln wandern mit dem Workspace |
-| **Drawer** | Kachel am Dock, öffnet eine lückenlose Reihe zur Bildschirmmitte; eingeklappt (nur die Kachel), bis der Zeiger kommt (*Autocollapse*) |
+| Dock | logo tile and one column (`xindex = 0`); rows may stay empty, also above the logo (`yindex < 0`) |
+| Clip | workspace tile in a corner, the applications of the current workspace freely around it, each next to another (`CLIP_ATTACH_VICINITY = 1`); omnipresent tiles follow the workspace |
+| Drawer | a tile on the Dock that opens a gapless row towards the middle of the screen; folded (tile only) until the pointer comes (*Autocollapse*) |
 
-Verhalten wie im Original:
+As in the original:
 
-* Ziehen einer Kachel rastet über `snapIcon` ein: im eigenen Dock, dann in den anderen (Dock,
-  Drawers, Clip). Losgelassen ohne Ziel wird sie entfernt (gesperrte Kacheln bleiben).
-* Neue Kacheln kommen auf den ersten freien Platz (`findFreeSlot`: Spirale um die Clip-Kachel, am
-  Rand entlang bei einer Clip in der Ecke).
-* Ein Klick auf die Drawer-Kachel öffnet/schließt, ziehen verschiebt sie auf eine andere Dock-Zeile.
-  *Add a drawer* steht im Dock-Menü, das Drawer-Menü hat *Collapsed*, *Autocollapse*, *Remove drawer*.
-* Dock-Menü: *Dock position*, *Keep Application*, *Add a drawer*, *Info Panel*.
+- Dragging a tile snaps it with `snapIcon`: first into its own dock, then into the others (Dock, Drawers,
+  Clip). Dropped on nothing, it is removed (locked tiles stay).
+- New tiles take the first free slot (`findFreeSlot`: a spiral around the Clip tile, along the edge for
+  a Clip in a corner).
+- A click on a Drawer tile opens or closes it; dragging moves it to another Dock row. *Add a drawer* is in
+  the Dock menu; the Drawer menu has *Collapsed*, *Autocollapse* and *Remove drawer*.
+- The Dock menu has *Dock position*, *Keep Application*, *Add a drawer* and *Info Panel*.
 
-Gespeichert wird alles in `WMState`: `Dock.Applications` (`Position = "0,y"`),
-`Clip`/`Workspaces[i].Clip` (`Position = "x,y"`), `Drawers` (`Name`, `Dock.Applications`,
-`Collapsed`, `AutoCollapse`, wmaker-wl-eigen `WMakerWLRow`).
+Dock, Clip and every Drawer are each one surface around their tiles plus a margin where a dragged tile
+can still snap in. Only the tiles take pointer input (input region); the rest passes through.
 
-Jede Dock-Fläche (Dock, Clip, jeder Drawer) ist **eine** Layer-Surface um ihre Kacheln plus einen
-Rand, auf den eine gezogene Kachel noch einrasten kann. Pointer-Eingaben nehmen nur die Kacheln
-an (Input-Region), alles andere geht durch.
-## Robustheit
+## Robustness
 
-* **Eine Kachel, eine Instanz.** Laufen zwei DockApps mit demselben `app_id`, zeigt der Compositor nur die
-  älteste in der Kachel; die zweite bleibt unsichtbar, bis die erste endet (`dockhost.apply`).
-* **Das Dock bleibt sichtbar.** `Model.layout` schiebt das Dock nur so weit, dass jede Kachel und jeder Drawer
-  noch auf dem Bildschirm liegt; wechselt das Clip die Ecke, spiegeln seine Kacheln mit.
-* **Zustandsdatei mit Unsinn.** Positionen jenseits von ±4096 Kacheln (`dockapp.max_grid`) zählen als „keine
-  Position“, ein Drawer auf der Logo-Zeile oder auf der Zeile eines anderen Drawers bekommt eine freie Zeile.
-* **Autocollapse** wartet (700 ms zum Einklappen, 250 ms zum Aufklappen); der Timer läuft in der
-  `poll`-Schleife von `main.zig` (`Ui.nextTimeoutMs`/`Ui.onTimer`).
-* **Starten.** Ein zweiter einfacher Klick innerhalb von 1,5 s auf eine gerade gestartete Kachel startet nichts
-  noch einmal; Mittelklick und *Launch* im Menü starten immer eine neue Instanz.
+- `Model.layout` moves the Dock only as far as needed to keep every tile and Drawer on screen. When the
+  Clip changes corner, its tiles mirror.
+- Positions beyond ±4096 tiles (`dockapp.max_grid`) in a state file count as "no position". A Drawer on
+  the logo row or on another Drawer's row gets a free row.
+- Autocollapse waits 700 ms before folding and 250 ms before unfolding. The timer runs in the `poll` loop
+  in `main.zig` (`Ui.nextTimeoutMs`, `Ui.onTimer`).

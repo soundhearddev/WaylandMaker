@@ -18,6 +18,21 @@ min_window_size = 120
 center_focused_column = "on_overflow"   -- on_overflow | always | never
 new_window = "new_column"               -- new_column | stack
 focus_new_windows = true         -- a new window takes the keyboard focus (false: opens in the background)
+-- ---- external monitors ------------------------------------------------------
+output_order = "position"        -- position (left to right) | connection: order of focus_output_next/prev
+monitor_settle_ms = 400          -- a change of the monitors counts after this many ms without another one
+-- A monitor is named by its connector ("DP-1"), by "make model" or by a part
+-- of its description; "*" means every monitor. The most specific rule wins.
+--   monitor("DP-1", { primary = true, workspaces = 6, start_workspace = 1 })
+--   monitor("eDP-1", { enabled = false })              -- ignore the laptop screen
+--   monitor("*", { on_connect = "notify-send 'monitor connected'" })
+-- Windows taken off a monitor that went away return when it comes back
+-- (restore_windows = false turns that off). river does not let a window
+-- manager change modes or positions: a profile runs the tool that does
+-- (kanshi, wlr-randr) when exactly this set of monitors is connected:
+--   monitor_profile{ name = "docked", needs = { "eDP-1", "DP-1" },
+--                    run = "kanshictl switch docked" }
+
 -- ---- space and view -----------------------------------------------------------
 strut_left = 0                   -- extra space kept free on each side of the work area
 strut_right = 0
@@ -152,7 +167,7 @@ dock_on_top = true               -- false: below the windows (the Dock menu chan
 dock_auto_raise = false          -- with dock_on_top = false: up while the pointer is on it
 dock_reserve_space = true        -- keep tiled windows out from under the Dock
 dock_single_click = false        -- launch with one click (default: double click, like Window Maker)
-dock_save_state = true           -- remember moved/added/removed tiles, see docs/DOCKAPPS.md
+dock_save_state = true           -- remember moved/added/removed tiles
 clip_enabled = true
 clip_corner = "top_left"           -- top_left | top_right | bottom_left | bottom_right
 clip_on_top = true

@@ -303,3 +303,127 @@ pub fn makeRef(L: *State) i32 {
 pub fn pushRef(L: *State, ref: i32) void {
     _ = L.getIndexRaw(zlua.registry_index, ref);
 }
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+test "Limiter counts what is held and refuses to go past its limit" {
+    var l: Limiter = .{ .backing = std.testing.allocator, .limit = 64 };
+    const a = l.allocator();
+
+    const p = try a.alloc(u8, 40);
+    try std.testing.expectEqual(@as(usize, 40), l.used);
+
+    // 40 + 40 is over the limit: refused, and nothing is counted for it.
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 40));
+    try std.testing.expectEqual(@as(usize, 40), l.used);
+
+    // Growing in place past the limit is refused too.
+    try std.testing.expect(!a.resize(p, 100));
+    try std.testing.expectEqual(@as(usize, 40), l.used);
+
+    // Freeing gives the room back; exactly the limit is still allowed.
+    a.free(p);
+    try std.testing.expectEqual(@as(usize, 0), l.used);
+    const q = try a.alloc(u8, 64);
+    try std.testing.expectEqual(@as(usize, 64), l.used);
+    a.free(q);
+    try std.testing.expectEqual(@as(usize, 0), l.used);
+}
+
+test "toSlice, toInteger and toBool never convert between types" {
+    const L = newState() orelse return error.SkipZigTest;
+    defer close(L);
+
+    pushString(L, "42");
+    try std.testing.expectEqualStrings("42", toSlice(L, -1).?);
+    try std.testing.expect(toInteger(L, -1) == null); // "42" is not the number 42
+    try std.testing.expect(toBool(L, -1) == null);
+    pop(L, 1);
+
+    pushInteger(L, 42);
+    try std.testing.expectEqual(@as(?i64, 42), toInteger(L, -1));
+    try std.testing.expect(toSlice(L, -1) == null); // 42 is not the string "42"
+    try std.testing.expect(toBool(L, -1) == null);
+    pop(L, 1);
+
+    // 0 and the empty string are not "false" here; only a real boolean is.
+    pushInteger(L, 0);
+    try std.testing.expect(toBool(L, -1) == null);
+    pop(L, 1);
+    pushString(L, "");
+    try std.testing.expect(toBool(L, -1) == null);
+    pop(L, 1);
+    pushBool(L, false);
+    try std.testing.expectEqual(@as(?bool, false), toBool(L, -1));
+    pop(L, 1);
+
+    pushNil(L);
+    try std.testing.expect(toSlice(L, -1) == null);
+    try std.testing.expect(toInteger(L, -1) == null);
+    try std.testing.expect(toNumber(L, -1) == null);
+    try std.testing.expect(toBool(L, -1) == null);
+    pop(L, 1);
+}
+
+test "tables: raw set and get by number and by name, length, iteration" {
+    const L = newState() orelse return error.SkipZigTest;
+    defer close(L);
+
+    newTable(L); // the table is at index 1 from here on
+    pushString(L, "a");
+    rawSetI(L, -2, 1);
+    pushString(L, "b");
+    rawSetI(L, -2, 2);
+    try std.testing.expectEqual(@as(usize, 2), rawLen(L, 1));
+
+    rawGetI(L, 1, 2);
+    try std.testing.expectEqualStrings("b", toSlice(L, -1).?);
+    pop(L, 1);
+
+    // A name that is not there is nil, not an error.
+    rawGetString(L, 1, "missing");
+    try std.testing.expect(typeOf(L, -1) == T_NIL);
+    pop(L, 1);
+
+    // next(): every entry once, and the stack is back to just the table.
+    var seen: usize = 0;
+    pushNil(L);
+    while (next(L, 1)) {
+        seen += 1;
+        pop(L, 1); // the value; the key stays for the next round
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+    pop(L, 1);
+}
+
+test "load and call: a syntax error and a runtime error leave their message on the stack" {
+    const L = newState() orelse return error.SkipZigTest;
+    defer close(L);
+    openLibs(L);
+
+    // A good chunk runs; what it assigns is in the globals afterwards.
+    try std.testing.expect(load(L, "answer = 6 * 7", "=test"));
+    try std.testing.expect(call(L));
+    pushGlobals(L);
+    rawGetString(L, 1, "answer");
+    try std.testing.expectEqual(@as(?i64, 42), toInteger(L, -1));
+    pop(L, 2);
+
+    // A syntax error: load says no, and the message is on the stack.
+    try std.testing.expect(!load(L, "answer = = 1", "=test"));
+    try std.testing.expect(toSlice(L, -1) != null);
+    pop(L, 1);
+
+    // A runtime error: call says no, and the message names the error.
+    try std.testing.expect(load(L, "error('boom')", "=test"));
+    try std.testing.expect(!call(L));
+    try std.testing.expect(std.mem.indexOf(u8, toSlice(L, -1).?, "boom") != null);
+    pop(L, 1);
+
+    // Compiled code (bytecode) is refused: `load` only takes source text.
+    try std.testing.expect(!load(L, "\x1bLua", "=test"));
+    pop(L, 1);
+}
+

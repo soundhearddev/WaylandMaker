@@ -372,6 +372,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
             const fwd = cmd == .move_to_workspace_next;
             const target = stepWorkspace(cfg, out, fwd) orelse return;
             const w = focusedWindow(wm) orelse return;
+            w.home = .{}; // moved on purpose: it no longer belongs to the monitor it was taken from
             workspace.moveToWorkspace(wm, w, &out.workspaces[target]) catch |err| {
                 log.err("move window to workspace failed: {t}", .{err});
                 return;
@@ -430,6 +431,7 @@ fn moveToOutput(wm: *WindowManager, from: *Output, forward: bool) void {
     const w = focusedWindow(wm) orelse return;
     const target = types.cycleOutput(wm, from, forward) orelse return;
     if (target == from) return;
+    w.home = .{}; // moved on purpose: it no longer belongs to the monitor it was taken from
     workspace.moveToWorkspace(wm, w, target.ws()) catch |err| {
         log.warn("cannot move window to the other output: {t}", .{err});
         return;
@@ -561,14 +563,19 @@ fn focusFloatingStep(wm: *WindowManager, w: *Window, forward: bool) void {
 /// The workspace after / before the shown one (wrapping if `workspace_wrap`),
 /// or null at the end when it does not wrap, or with only one workspace.
 fn stepWorkspace(cfg: *const config.Config, out: *Output, forward: bool) ?u32 {
-    const n = out.workspace_count;
+    return stepIndex(out.workspace_count, out.active, forward, cfg.workspace_wrap);
+}
+
+/// The arithmetic of `stepWorkspace` on plain numbers: `n` workspaces, `active`
+/// shown.
+fn stepIndex(n: u32, active: u32, forward: bool, wrap: bool) ?u32 {
     if (n < 2) return null;
     if (forward) {
-        if (out.active + 1 < n) return out.active + 1;
-        return if (cfg.workspace_wrap) 0 else null;
+        if (active + 1 < n) return active + 1;
+        return if (wrap) 0 else null;
     }
-    if (out.active > 0) return out.active - 1;
-    return if (cfg.workspace_wrap) n - 1 else null;
+    if (active > 0) return active - 1;
+    return if (wrap) n - 1 else null;
 }
 
 fn nextPreset(work_w: i32, current: i32, cfg: *const config.Config) i32 {
@@ -606,6 +613,7 @@ fn carryOmnipresent(wm: *WindowManager, from: *types.Workspace, to: *types.Works
     while (it) |w| {
         const next = types.nextFloating(w); // read before the window moves
         if (w.isOmnipresent()) {
+            w.home = .{}; // moved on purpose: it no longer belongs to the monitor it was taken from
             workspace.moveToWorkspace(wm, w, to) catch |err| {
                 log.err("omnipresent window could not follow: {t}", .{err});
             };
@@ -630,6 +638,7 @@ fn sendToWorkspace(wm: *WindowManager, out: *Output, index: u32) void {
     if (index >= out.workspace_count) _ = workspace.setWorkspaceCount(wm, out, index + 1);
     if (index >= out.workspace_count or index == out.active) return;
     const w = focusedWindow(wm) orelse return;
+    w.home = .{}; // moved on purpose: it no longer belongs to the monitor it was taken from
     workspace.moveToWorkspace(wm, w, &out.workspaces[index]) catch |err| {
         log.err("move_to_workspace failed: {t}", .{err});
         return;
@@ -637,4 +646,112 @@ fn sendToWorkspace(wm: *WindowManager, out: *Output, index: u32) void {
     // The window leaves the visible workspace; focus what remains here.
     wm.focus_request = workspace.defaultFocus(out.ws());
     wm.follow_request = true;
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+test "workspaceArg: 1-based in the config, 0-based inside, 1..max_workspaces only" {
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try workspaceArg("1", &cfg));
+    try std.testing.expectEqual(@as(u32, 4), try workspaceArg("5", &cfg));
+    try std.testing.expectEqual(@as(u32, config.max_workspaces - 1), try workspaceArg("16", &cfg));
+    for ([_][]const u8{ "0", "17", "-1", "", "x", "1.5", "2 3" }) |bad| {
+        try std.testing.expectError(error.BadArguments, workspaceArg(bad, &cfg));
+    }
+}
+
+test "fractionArg: 0.5 and 50% are the same, more than 0 and at most 1" {
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), try fractionArg("0.5"), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), try fractionArg("50%"), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), try fractionArg("  25 % "), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try fractionArg("1"), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try fractionArg("100%"), 1e-9);
+    for ([_][]const u8{ "0", "0%", "-0.1", "1.5", "101%", "", "%", "abc", "nan", "inf" }) |bad| {
+        try std.testing.expectError(error.BadArguments, fractionArg(bad));
+    }
+}
+
+test "twoInts: two whole numbers, signs allowed, anything else is a bad argument" {
+    const a = try twoInts("3 -4");
+    try std.testing.expectEqual(@as(i32, 3), a[0]);
+    try std.testing.expectEqual(@as(i32, -4), a[1]);
+    const b = try twoInts("  \t10\t  20  ");
+    try std.testing.expectEqual(@as(i32, 10), b[0]);
+    try std.testing.expectEqual(@as(i32, 20), b[1]);
+    for ([_][]const u8{ "", "7", "7 x", "x 7", "1.5 2", "99999999999 1" }) |bad| {
+        try std.testing.expectError(error.BadArguments, twoInts(bad));
+    }
+}
+
+test "parse: the numeric commands go through the same checks" {
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ws = try parse(a, &cfg, "workspace 3");
+    try std.testing.expectEqual(@as(u32, 2), ws.workspace);
+    const mv = try parse(a, &cfg, "move_to_workspace 1");
+    try std.testing.expectEqual(@as(u32, 0), mv.move_to_workspace);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), (try parse(a, &cfg, "set_column_width 50%")).set_column_width, 1e-9);
+    const fm = try parse(a, &cfg, "float_move 10 -20");
+    try std.testing.expectEqual(@as(i32, 10), fm.float_move.dx);
+    try std.testing.expectEqual(@as(i32, -20), fm.float_move.dy);
+    const fr = try parse(a, &cfg, "float_resize -5 8");
+    try std.testing.expectEqual(@as(i32, -5), fr.float_resize.dw);
+    try std.testing.expectEqual(@as(i32, 8), fr.float_resize.dh);
+    try std.testing.expectEqual(@as(i32, 7), (try parse(a, &cfg, "lua 7")).lua);
+
+    try std.testing.expectError(error.BadArguments, parse(a, &cfg, "workspace 0"));
+    try std.testing.expectError(error.BadArguments, parse(a, &cfg, "workspace"));
+    try std.testing.expectError(error.BadArguments, parse(a, &cfg, "set_column_width 2"));
+    try std.testing.expectError(error.BadArguments, parse(a, &cfg, "float_move 1"));
+    try std.testing.expectError(error.BadArguments, parse(a, &cfg, "lua x"));
+    try std.testing.expectError(error.UnknownCommand, parse(a, &cfg, "no_such_command"));
+    try std.testing.expectError(error.UnknownCommand, parse(a, &cfg, ""));
+    try std.testing.expectError(error.UnknownCommand, parse(a, &cfg, "   \t "));
+}
+
+test "stepIndex: next and previous workspace, with and without wrapping" {
+    // One workspace (or none): nowhere to go.
+    try std.testing.expectEqual(@as(?u32, null), stepIndex(0, 0, true, true));
+    try std.testing.expectEqual(@as(?u32, null), stepIndex(1, 0, true, true));
+    try std.testing.expectEqual(@as(?u32, null), stepIndex(1, 0, false, true));
+    // In the middle.
+    try std.testing.expectEqual(@as(?u32, 2), stepIndex(4, 1, true, false));
+    try std.testing.expectEqual(@as(?u32, 0), stepIndex(4, 1, false, false));
+    // At the ends: wrap around, or stop.
+    try std.testing.expectEqual(@as(?u32, 0), stepIndex(4, 3, true, true));
+    try std.testing.expectEqual(@as(?u32, null), stepIndex(4, 3, true, false));
+    try std.testing.expectEqual(@as(?u32, 3), stepIndex(4, 0, false, true));
+    try std.testing.expectEqual(@as(?u32, null), stepIndex(4, 0, false, false));
+    // Two workspaces bounce between each other.
+    try std.testing.expectEqual(@as(?u32, 1), stepIndex(2, 0, true, true));
+    try std.testing.expectEqual(@as(?u32, 0), stepIndex(2, 1, true, true));
+}
+
+test "nextPreset: the next wider preset, wrapping to the first one" {
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    const work_w: i32 = 1000;
+    const presets = cfg.width_presets;
+    try std.testing.expect(presets.len >= 2);
+
+    // Walking up through the presets visits them in order ...
+    var current: i32 = 0;
+    for (presets) |f| {
+        const want = layout.columnWidthFor(work_w, f, &cfg);
+        const got = nextPreset(work_w, current, &cfg);
+        try std.testing.expectEqual(want, got);
+        current = got;
+    }
+    // ... and after the widest one it starts over.
+    try std.testing.expectEqual(
+        layout.columnWidthFor(work_w, presets[0], &cfg),
+        nextPreset(work_w, current + 1000, &cfg),
+    );
 }

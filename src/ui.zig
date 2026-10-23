@@ -1934,12 +1934,10 @@ pub const Ui = struct {
 
     // ---- Dock and Clip ----------------------------------------------------------
 
+    /// The Dock and the Clip live on the primary monitor (a `monitor()` rule
+    /// with `primary = true`, else the first one from the left).
     fn primaryOutput(ui: *Ui) ?*types.Output {
-        var it = ui.wm.outputs.first();
-        while (it) |o| : (it = types.nextOutput(o, ui.wm)) {
-            if (!o.removed and o.ready()) return o;
-        }
-        return null;
+        return types.primaryOutput(ui.wm);
     }
 
     fn rebuildModel(ui: *Ui) void {

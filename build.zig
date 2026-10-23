@@ -296,16 +296,6 @@ pub fn build(b: *std.Build) void {
 
     // ---- wlprefs --------------------------------------------------------
 
-    // wlprefs/build.zig uses the SAME Build object.
-    //
-    // Therefore it does NOT create:
-    //
-    //     wlprefs/zig-out/bin/wlprefs
-    //
-    // but instead:
-    //
-    //     zig-out/bin/wlprefs
-    //
     const wlprefs = buildWlprefs(
         b,
         target,
@@ -315,8 +305,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(wlprefs.exe);
 
-    // `zig build test-wlprefs`: the settings window's own tests (config
-    // reading/writing against real files, the in-place editor, icons).
     const wlprefs_tests = b.addTest(.{
         .root_module = wlprefs.mod,
         .use_llvm = use_llvm,
@@ -367,10 +355,53 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
 
+    // ---- benchmark -------------------------------------------------------
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    });
+    linkGraphics(bench_module, b.path("src"));
+    bench_module.addImport("wlprefs_settings", wlprefs.settings);
+    bench_module.addImport("wlprefs_actions", wlprefs.actions);
+    const bench_exe = b.addExecutable(.{
+        .name = "wmaker-bench",
+        .root_module = bench_module,
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| run_bench.addArgs(args);
+    const bench_step = b.step("bench", "Time the window model on synthetic loads (use -Doptimize=ReleaseFast)");
+    bench_step.dependOn(&run_bench.step);
+
+    // ---- examples -------------------------------------------------------
+    const examples_step = b.step(
+        "test-examples",
+        "Run the unit tests of the example DockApps (wl-battery, wl-clock)",
+    );
+    inline for (.{ "wl-battery", "wl-clock" }) |name| {
+        const run_example = b.addSystemCommand(&.{ "zig", "build", "test" });
+        run_example.setCwd(b.path("examples/" ++ name));
+        examples_step.dependOn(&run_example.step);
+    }
+
+    // ---- test / test-all ------------------------------------------------
+
     const test_step = b.step(
         "test",
-        "Run unit tests",
+        "Run all unit tests: wmaker-wl and wlprefs",
     );
 
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(wlprefs_test_step);
+
+    const test_all_step = b.step(
+        "test-all",
+        "Run `test` and the tests of the examples",
+    );
+    test_all_step.dependOn(test_step);
+    test_all_step.dependOn(examples_step);
 }

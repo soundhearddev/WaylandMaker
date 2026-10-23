@@ -41,6 +41,7 @@ const animation = @import("animation.zig");
 const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
+const monitors = @import("monitors.zig");
 const river = wayland.client.river;
 const wl = wayland.client.wl;
 
@@ -203,6 +204,12 @@ pub const Window = struct {
     saved_column_index: usize = 0,
     saved_column_width: i32 = 0,
 
+    /// The monitor this window was taken off when that monitor went away, and
+    /// the workspace it was on there. It goes back when the monitor returns
+    /// (output.restoreHomes). A hash and an index, not a pointer: the
+    /// monitor is gone. Cleared when the window is moved on purpose.
+    home: monitors.Home = .{},
+
     pub fn isTiled(w: *const Window) bool {
         return w.mode == .tiled;
     }
@@ -329,11 +336,33 @@ pub const Workspace = struct {
     }
 };
 
+/// A bound `wl_output`: where a monitor's name, make and model come from.
+pub const WlOutput = struct {
+    obj: *wl.Output,
+    info: monitors.Info = .{},
+};
+
 pub const Output = struct {
     obj: *river.OutputV1,
     layer_shell: ?*river.LayerShellOutputV1 = null,
     link: wl.list.Link = .{ .prev = null, .next = null },
     removed: bool = false,
+
+    // ---- which monitor this is (monitors.zig) ------------------------------
+    /// Name, make and model, from the `wl_output` (output.zig). Empty until it
+    /// has been seen; `mon.key()` is the identity used to find its rule and
+    /// to give windows back after a reconnect.
+    mon: monitors.Info = .{},
+    /// Global name of the `wl_output` river says belongs to this output
+    /// (0: not told yet).
+    wl_global: u32 = 0,
+    /// A `monitor()` rule switched it off: it is ignored like a screen that is
+    /// not there (see `liveOutput`), but stays known.
+    disabled: bool = false,
+    /// A `monitor()` rule made it the primary one (see `primaryOutput`).
+    primary: bool = false,
+    /// Its rule has been applied for this connection (output.settleOutput).
+    settled: bool = false,
 
     /// Full output rectangle in global coordinates.
     rect: Rect = .{},
@@ -483,6 +512,11 @@ pub const WindowManager = struct {
     active_output: ?*Output = null,
 
     outputs: wl.list.Head(Output, .link),
+    /// External-monitor handling: rules, profiles, hot-plug settling.
+    monitors: monitors.Manager = .{},
+    /// Every `wl_output` global bound so far (output.zig). They carry the
+    /// names of the monitors; river's outputs refer to them by global name.
+    wl_outputs: std.ArrayList(*WlOutput) = .empty,
     windows: wl.list.Head(Window, .link),
     /// The DockApps (role .dockapp), owned by dockhost.zig.
     dock_windows: wl.list.Head(Window, .link),
@@ -721,13 +755,14 @@ pub fn nextDockWindow(w: *Window, wm: *WindowManager) ?*Window {
     return @fieldParentPtr("link", n);
 }
 
-/// An output windows can be put on.
+/// An output windows can be put on: there, sized, and not switched off by a
+/// `monitor()` rule.
 pub fn liveOutput(o: *const Output) bool {
-    return !o.removed and o.ready();
+    return !o.removed and !o.disabled and o.ready();
 }
 
 /// The output the user is working on: `wm.active_output` while it exists,
-/// else the focused window's output, else the first live one. Everything
+/// else the focused window's output, else the primary one. Everything
 /// that says "the current output" (actions, where new windows open) asks
 /// this one place.
 pub fn workingOutput(wm: *WindowManager) ?*Output {
@@ -735,29 +770,69 @@ pub fn workingOutput(wm: *WindowManager) ?*Output {
     if (wm.seats.first()) |s| {
         if (s.focused) |w| if (w.workspace) |ws| if (liveOutput(ws.output)) return ws.output;
     }
-    var it = wm.outputs.first();
-    while (it) |o| : (it = nextOutput(o, wm)) {
-        if (liveOutput(o)) return o;
-    }
-    return null;
+    return primaryOutput(wm);
 }
 
-/// The live output after (`forward`) or before `from` in the output list,
-/// wrapping around. `from` itself if it is the only live one.
-pub fn cycleOutput(wm: *WindowManager, from: *Output, forward: bool) ?*Output {
-    var live: [16]*Output = undefined;
+/// The monitor that gets new windows when nothing else decides, and the Dock
+/// and the Clip: the one a `monitor()` rule made `primary`, else the first
+/// live one in the order `output_order` says.
+pub fn primaryOutput(wm: *WindowManager) ?*Output {
+    var live: [monitors.max_monitors]*Output = undefined;
+    const n = liveOutputs(wm, &live);
+    for (live[0..n]) |o| if (o.primary) return o;
+    return if (n > 0) live[0] else null;
+}
+
+/// The live outputs, in the order `output_order` asks for (left to right by
+/// default, or the order river announced them). Fills `buf`, returns how many.
+pub fn liveOutputs(wm: *WindowManager, buf: *[monitors.max_monitors]*Output) usize {
     var n: usize = 0;
-    var from_idx: ?usize = null;
     var it = wm.outputs.first();
     while (it) |o| : (it = nextOutput(o, wm)) {
-        if (!liveOutput(o) or n == live.len) continue;
-        if (o == from) from_idx = n;
-        live[n] = o;
+        if (!liveOutput(o) or n == buf.len) continue;
+        buf[n] = o;
         n += 1;
     }
+    if (wm.monitors.order == .position and n > 1) {
+        // Insertion sort by position: n is tiny and it must keep ties stable.
+        var boxes: [monitors.max_monitors]monitors.Box = undefined;
+        for (buf[0..n], 0..) |o, i| boxes[i] = .{ .x = o.rect.x, .y = o.rect.y, .w = o.rect.w, .h = o.rect.h };
+        var idx: [monitors.max_monitors]usize = undefined;
+        const sorted = monitors.order(boxes[0..n], &idx);
+        var copy: [monitors.max_monitors]*Output = undefined;
+        @memcpy(copy[0..n], buf[0..n]);
+        for (sorted, 0..) |from, to| buf[to] = copy[from];
+    }
+    return n;
+}
+
+/// The live output after (`forward`) or before `from` in output order,
+/// wrapping around. `from` itself if it is the only live one.
+pub fn cycleOutput(wm: *WindowManager, from: *Output, forward: bool) ?*Output {
+    var live: [monitors.max_monitors]*Output = undefined;
+    const n = liveOutputs(wm, &live);
     if (n == 0) return null;
+    var from_idx: ?usize = null;
+    for (live[0..n], 0..) |o, i| {
+        if (o == from) from_idx = i;
+    }
     const i = from_idx orelse return live[0];
     return live[if (forward) (i + 1) % n else (i + n - 1) % n];
+}
+
+/// The live output next to `from` in `dir` on the desk (by position), or null.
+pub fn outputToward(wm: *WindowManager, from: *Output, dir: monitors.Direction) ?*Output {
+    var live: [monitors.max_monitors]*Output = undefined;
+    const n = liveOutputs(wm, &live);
+    var boxes: [monitors.max_monitors]monitors.Box = undefined;
+    var from_idx: ?usize = null;
+    for (live[0..n], 0..) |o, i| {
+        boxes[i] = .{ .x = o.rect.x, .y = o.rect.y, .w = o.rect.w, .h = o.rect.h };
+        if (o == from) from_idx = i;
+    }
+    const fi = from_idx orelse return null;
+    const ni = monitors.neighbor(boxes[0..n], fi, dir) orelse return null;
+    return live[ni];
 }
 
 pub fn nextOutput(o: *Output, wm: *WindowManager) ?*Output {

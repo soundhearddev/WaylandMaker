@@ -57,8 +57,8 @@ const c = @cImport({
 });
 
 test {
-    _ = face;
-    _ = options;
+    _ = @import("face.zig");
+    _ = @import("options.zig");
     _ = scale;
 }
 

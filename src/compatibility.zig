@@ -344,3 +344,43 @@ test "registerHook stores the function in the matching field" {
     try std.testing.expectEqual(@as(u32, 7), S.called);
     try std.testing.expect(hooks.onWindowUnmapped == null);
 }
+
+test "attributesFor: the exact app-id wins, then the wildcard, else the defaults" {
+    var rules = [_]AttributeRule{
+        .{ .app_id = "*", .attrs = .{ .sticky = true } },
+        .{ .app_id = "firefox", .attrs = .{ .floating = true } },
+    };
+    var ctx = WMakerContext{ .allocator = std.testing.allocator, .enabled = true, .rules = &rules };
+
+    // An exact match is taken even though the wildcard comes first in the list.
+    const ff = attributesFor(&ctx, "firefox");
+    try std.testing.expect(ff.floating);
+    try std.testing.expect(!ff.sticky);
+
+    // Anything else (and no app-id at all) gets the wildcard rule.
+    const other = attributesFor(&ctx, "xterm");
+    try std.testing.expect(other.sticky);
+    try std.testing.expect(!other.floating);
+    try std.testing.expect(attributesFor(&ctx, null).sticky);
+
+    // Matching is exact: no prefixes, no case folding.
+    try std.testing.expect(!attributesFor(&ctx, "firefox-esr").floating);
+    try std.testing.expect(!attributesFor(&ctx, "Firefox").floating);
+
+    // Without the compat layer every rule is ignored.
+    ctx.enabled = false;
+    try std.testing.expectEqual(WindowAttributes{}, attributesFor(&ctx, "firefox"));
+    try std.testing.expectEqual(WindowAttributes{}, attributesFor(&ctx, null));
+}
+
+test "attributesFor: no rules and no wildcard give the defaults" {
+    var ctx = WMakerContext{ .allocator = std.testing.allocator, .enabled = true };
+    try std.testing.expectEqual(WindowAttributes{}, attributesFor(&ctx, "anything"));
+
+    var only_one = [_]AttributeRule{.{ .app_id = "mpv", .attrs = .{ .keep_on_top = true } }};
+    ctx.rules = &only_one;
+    try std.testing.expect(attributesFor(&ctx, "mpv").keep_on_top);
+    try std.testing.expectEqual(WindowAttributes{}, attributesFor(&ctx, "other"));
+    try std.testing.expectEqual(WindowAttributes{}, attributesFor(&ctx, null));
+}
+

@@ -138,15 +138,21 @@ test "every Category icon decodes to a real 48x48 image" {
     }
 }
 
+// The test files of wlprefs are registered here, one line each, as
+//     _ = @import("name.zig");
+// A file that is not named here never runs its tests.
 test {
-    _ = gfx;
-    _ = window;
+    _ = @import("actions.zig");
+    _ = @import("binds.zig");
+    _ = @import("check.zig");
+    _ = @import("configfile.zig");
+    _ = @import("gfx.zig");
+    _ = @import("icons.zig");
+    _ = @import("lualine.zig");
     _ = @import("panel_menu.zig");
     _ = @import("panels.zig");
-    _ = @import("settings.zig");
-    _ = @import("configfile.zig");
-    _ = @import("icons.zig");
-    _ = @import("binds.zig");
-    _ = @import("actions.zig");
     _ = @import("prefs.zig");
+    _ = @import("settings.zig");
+    _ = @import("themes.zig");
+    _ = @import("window.zig");
 }

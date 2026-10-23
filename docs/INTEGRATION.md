@@ -1,131 +1,89 @@
-# Window-Maker-Integration: Stand und Plan
+# Window Maker integration
 
-Ziel: wmaker-wl soll sich wie Window Maker anfühlen: Root-Menü, Dock, Titelleisten
-im NeXTSTEP-Look, Fenster-Attribute, die bekannten Konfigurationsdateien.
+The goal is a window manager that behaves like Window Maker where that makes sense on Wayland: the root
+menu, the Dock and Clip, DockApps, per-application attributes, and the familiar files. This page says what
+is taken over, what is implemented, and what is not.
 
-## 1. Was wlmaker ist und was daraus übertragbar ist
 
-[wlmaker](https://github.com/phkaeser/wlmaker) ist ein **eigener Compositor** (wlroots-Szenengraph, C,
-Apache-2.0). wmaker-wl ist dagegen ein **Client von river**. Deshalb lässt sich vom Zeichencode nichts
-direkt übernehmen; übernommen wird, was Format und Verhalten betrifft:
+## Files
 
-| Aus wlmaker übernommen | Wo |
+| File | Module | Notes |
+|---|---|---|
+| any property list | `plist.zig` | Window Maker / GNUstep format: comments, escapes, data, line numbers in errors |
+| `RootMenu` / `WMRootMenu` | `wm_menu.zig` | property-list and text (`menu`) format, nested menus, `SHORTCUT` |
+| `WMWindowAttributes` | `wm_attr.zig` | all 30 attributes are parsed; resolution follows Window Maker |
+| `WMState` | `dockapp.zig` | Dock, Clip, Drawers, workspace names; see [DOCKAPPS.md](DOCKAPPS.md) |
+| `autostart` | `main.zig` | one shell script, run once at session start |
+
+Search order and the broken-file behaviour are in `wm_files.zig`: `~/.config/wmaker-wl/` first, then
+`~/GNUstep` (or `$WMAKER_USER_ROOT`) when `enable_wmaker_compat = true`. wmaker-wl never writes to
+`~/GNUstep`; it saves its own `WMState` under `$XDG_STATE_HOME`. A broken file is skipped with a message
+that includes the line number; the session still starts.
+
+## Root menu
+
+A right click on the empty desktop opens the root menu, a middle click opens the window list. Submenus
+cascade, rows highlight under the pointer, and the keyboard works (arrows, Enter or Right to open or run,
+Left to close one level, Esc to close all). `SHORTCUT` text is shown right-aligned.
+
+To catch clicks on the empty desktop, there is one transparent, output-sized shell surface per output.
+Windows are stacked above it and keep their own clicks. A left click on it closes an open menu.
+
+Entries that work: `EXEC`, `SHEXEC` (through `/bin/sh -c`), `OPEN_MENU`, `WORKSPACE_MENU`,
+`WINDOWS_MENU` (both built from the live model), `EXIT`, `REFRESH`, `SHOW_ALL`, `HIDE_OTHERS`,
+workspace next/previous, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`.
+
+Shown disabled because there is nothing behind them yet: `RESTART`, `SAVE_SESSION`, `CLEAR_SESSION`,
+`ARRANGE_ICONS`.
+
+## Window attributes
+
+Only some attributes have an effect. The others are parsed and ignored.
+
+| Attribute | Effect |
 |---|---|
-| Menü-Bezeichnungen (`Execute`, `ShellExecute`, `Quit`, `WorkspaceNext` …) | `wm_menu.zig` |
-| Theme-Format (`Window.TitleBar`, `Tile`, `Menu` …, Farben `argb32:ff777777`) | Phase 6 |
-| Maße der Titelleiste, des Docks und der Menüs (aus `Default.plist`) | Phasen 3–5 |
-| State-Format des Docks (`Edge`, `Anchor`, `Launchers`) | Phase 5 |
-
-
-## 2. Stand
-
-Fertig, mit Unit-Tests (78) und Echtlauf gegen Beispieldateien:
-
-| Datei | Inhalt |
-|---|---|
-| `plist.zig` | Parser für das Window-Maker-/GNUstep-Plist-Format (Kommentare, Escapes, Data, Zeilennummern in Fehlern) |
-| `wm_menu.zig` | Root-Menü: Plist-Format **und** Text-Format (`menu`), verschachtelt, `SHORTCUT`, wlmaker-Namen |
-| `wm_attr.zig` | `WMWindowAttributes`: alle 30 Window-Maker-Optionen gelesen, Auflösung wie Window Maker |
-| `wm_files.zig` | Suchpfade `~/GNUstep` bzw. `$WMAKER_USER_ROOT` und `~/.config/wmaker-wl`, Ausweichen bei kaputten Dateien |
-
-
-
-| Attribut | Wirkung |
-|---|---|
-| `StartWorkspace` | Fenster öffnet auf diesem Workspace (Nummer, 1-basiert) |
-| `Omnipresent` | floating, folgt dem Nutzer auf jeden Workspace |
+| `StartWorkspace` | the window opens on this workspace (1-based number) |
+| `Omnipresent` | floating, follows the user to every workspace |
 | `KeepOnTop` | floating |
-| `StartMaximized` | neue Spalte füllt den Arbeitsbereich |
-| `NoBorder` | kein Rand, der Slot ist reiner Inhalt |
-| `Unfocusable` | nimmt nie Tastaturfokus |
-| `Floating` | Erweiterung von wmaker-wl: `Yes` = floating, `No` = getilt |
+| `StartMaximized` | the new column fills the work area |
+| `NoBorder` | no border; the slot is all content |
+| `Unfocusable` | never takes keyboard focus |
+| `Floating` | wmaker-wl's own addition: `Yes` floats the window, `No` tiles it |
 
-Brauchen Titelleisten oder Dock: `NoTitlebar`, `NoResizebar`,
-`NoCloseButton`, `NoMiniaturizeButton`, `Icon`, `NoAppIcon`, alle übrigen.
+Everything about title bars (`NoTitlebar`, `NoResizebar`, `NoCloseButton`, `NoMiniaturizeButton`) and
+application icons (`Icon`, `NoAppIcon`, ...) has no effect, because there are no title bars and Dock
+tiles are not made from arbitrary windows.
 
-Das Root-Menü ist **geladen und sichtbar** (Phase 4, siehe unten): rechte Taste auf dem leeren Desktop
-öffnet es, mittlere Taste die Fensterliste. Zwei kleine Korrekturen (Cursor-Form über dem Menü, ein
-Überlapp-Fehler beim Hovern zwischen Untermenüs) sind als Patch bereit, aber noch nicht in `main` gemerged
-— siehe `docs/TODO.md`.
+## What river provides
 
-## 3. Was river bietet, und was noch fehlt
+The protocol files are in `protocol/`.
 
-river-Protokoll (im Repo unter `protocol/`), geprüft:
+- `river_decoration_v1`: `window.get_decoration_above` / `get_decoration_below` with `set_offset`. This is
+  what title bars would be drawn on. Not used yet.
+- `river_shell_surface_v1`: `get_shell_surface(wl_surface)` gives a surface with its own node, plus
+  `focus_shell_surface` and `shell_surface_interaction`. The root menu, window list, Dock and Clip are all
+  shell surfaces, so no layer-shell client is needed for them.
+- Clicks on a shell surface arrive as ordinary `wl_pointer` events in this process.
 
-* **`river_decoration_v1`**: `window.get_decoration_above/below(wl_surface)` mit `set_offset`. Genau dafür
-  gedacht, Titelleisten zu zeichnen. Die Fläche zeichnen wir selbst.
-* **`river_shell_surface_v1`**: `get_shell_surface(wl_surface)` mit eigenem Node, `focus_shell_surface` und
-  `shell_surface_interaction`. Dafür gedacht: Statusleisten, Hintergrundbild, **Desktop-Menü**. Damit
-  brauchen Dock und Menüs **keinen** Layer-Shell-Client.
-* Klicks auf eine Shell-Surface kommen als normale `wl_pointer`-Events direkt bei unserem Prozess an.
+Besides river's protocols the program binds `wl_compositor`, `wl_shm`, `wl_seat`, `wl_output`, and
+`wp_cursor_shape_manager_v1` if the compositor has it (without it the pointer keeps whatever shape the
+last window set). Drawing is cairo and pango.
 
-Dafür gebraucht und seit Phase 2/4 gebunden: `wl_compositor`, `wl_shm`, `wl_seat` (Zeiger, Tastatur), cairo +
-pangocairo als Zeichenbibliothek (wie wlmaker; getestet mit cairo 1.18, pango 1.52). Optional zusätzlich
-gebunden (Patch bereit, siehe `docs/TODO.md`): `wp_cursor_shape_manager_v1`, damit der Zeiger über
-Menü/Desktop zum normalen Pfeil wechselt statt das zuletzt von einem Fenster gesetzte Bild zu behalten.
+## Differences that stay
 
-## 4. Phasen
+Some Window Maker ideas do not carry over:
 
-Reihenfolge nach deinen Prioritäten (Root-Menü und Dock zuerst), mit Abhängigkeiten:
+- `WM_CLASS`, dragging a window's app icon onto the Dock, and X11 DockApps. Docking works through
+  `app_id` instead, and DockApps are Wayland clients that tag themselves (see [DOCKAPPS.md](DOCKAPPS.md)).
+  wlmaker's own DockApps (`wlmclock`, `wlmbattery`) would need a separate interface.
+- Desktop icons and the icon yard, since windows live in columns.
+- Most of WPrefs' X11-specific options (dithering, backing store, opaque move).
 
-**Phase 2: Zeichen-Infrastruktur** — erledigt
-* `gfx.zig`: `wl_shm`-Puffer (memfd, über `shm.zig` mit geprüfter, überlaufsicherer Größe), cairo-Kontext,
-  Text mit Pango (`wm_text.c`/`.h` als schmaler C-Helfer um die Pango-Font-Description-Makros), Bevel
-  (Kante hell/dunkel), Verläufe.
-* `ui.zig`: Bindung von `wl_compositor`/`wl_shm`/`wl_seat`, Zeiger- und Tastaturereignisse. Die Event-Loop
-  blieb bei `display.dispatch()`; ein Umstieg auf `poll()` war für Menü-Tastatur und -Zeiger nicht nötig.
-* Getestet **ohne Compositor**: cairo-Bild rendern und Pixel prüfen (Titelverlauf, Hover-Hervorhebung,
-  Bevel, dass Text tatsächlich Pixel setzt), plus Fuzz-/Grenzwerttests für `shm.checkedSize` und
-  Menü-Zeilenlimits.
+## Not done
 
-**Phase 3: Titelleisten** (`decoration_above`)
-* Maße aus wlmaker `Default.plist`: Höhe 22, Fase 1, Minimieren links, Schließen rechts, Titel zentriert;
-  Resize-Leiste 7 px unten mit Eckbreite 29. Fokussiert schwarz/weiß, unfokussiert grau.
-* Layout: Titelleiste zieht ihre Höhe vom Fenster ab (getilt und floating); Fenster-Attribute
-  `NoTitlebar`, `NoResizebar`, `NoCloseButton`, `NoMiniaturizeButton` werden wirksam.
-* Klick: Fokus; Ziehen: `op_start_pointer` (läuft schon über die vorhandene Maschine); Schließen: `close`.
-* Minimieren/Shade: eigenes Modell nötig (siehe Phase 7).
-
-**Phase 4: Root-Menü** — erledigt, zwei Korrekturen bereit
-* Ein transparentes, output-großes Desktop-Catcher-Shell-Surface pro Output fängt Klicks auf dem freien
-  Desktop ab (Fenster liegen darüber, bekommen also weiterhin ihre eigenen Klicks): **rechte Taste** öffnet
-  das Root-Menü, **mittlere** die Fensterliste. Linksklick auf dem Desktop schließt ein offenes Menü.
-* Kaskadierende Untermenüs, Hervorhebung beim Hovern, Tastatur (Pfeile, Enter/Rechts öffnet oder
-  aktiviert, Links schließt eine Ebene, Esc schließt alles), `SHORTCUT`-Anzeige rechtsbündig.
-* `WORKSPACE_MENU` und `WINDOWS_MENU` werden zur Laufzeit aus dem Modell erzeugt; `EXEC`/`SHEXEC` über
-  `process.spawn` (`SHEXEC` mit `/bin/sh -c`).
-* Alle Wayland-Requests laufen ausschließlich aus `Ui.sync()`, aufgerufen aus `main.onManage()`; Zeiger-
-  und Tastatur-Callbacks selbst ändern nur reine Daten und rufen `manage_dirty()` — river erlaubt
-  `node.set_position`/`place_*` und `focus_shell_surface` sonst nur innerhalb einer Manage-Sequenz.
-* Offen, als Patch bereitgestellt (siehe `docs/TODO.md`): der Zeiger-Cursor wechselt über dem Menü/Desktop
-  noch nicht zum normalen Pfeil (`wp_cursor_shape_manager_v1` fehlt bisher), und ein durch Hovern
-  geschlossenes Untermenü blieb bis zum nächsten Zyklus mit seinem letzten Frame sichtbar
-  (`reapGraveyard()`-Reihenfolge in `sync()`).
-
-**Phase 5: Dock und Clip** (wichtig) — umgesetzt, siehe `docs/DOCKAPPS.md` und `docs/TODO.md`; offen bleiben XPM-Icons, Verschieben per Maus und Zurückschreiben des Zustands.
-* Zustand laden: Window-Maker-`WMState` (`Dock.Applications` mit `Command`, `Name`, `AutoLaunch`,
-  `Position`) und das einfachere wlmaker-Format (`Edge`, `Anchor`, `Launchers`).
-* 64-px-Kacheln (56 px Inhalt, Fase 2, diagonaler Verlauf), PNG-Icons per cairo. **XPM-Icons**, das
-  klassische Window-Maker-Format, brauchen einen eigenen Lader.
-* Klick startet den Befehl; „läuft“-Anzeige über `app_id`-Vergleich; Rechtsklick-Menü (Autostart, Entfernen).
-* Der Arbeitsbereich schrumpft um das Dock (`Output.usable`), außer `Lowered`.
-* Clip: Workspace-Umschalter mit Namen.
-
-**Phase 6: Themes und `WindowMaker`-Defaults**
-* Theme im wlmaker-Format (eine Datei, alle Farben, Fonts, Maße). Schlüssel aus `~/GNUstep/Defaults/WindowMaker`
-  (`FTitleBack`, `UTitleBack`, `MenuTitleBack` …) werden auf dieselben Werte abgebildet.
-* `enable_wmaker_compat` steuert, ob `~/GNUstep` gelesen wird (heute schon wirksam).
-
-**Phase 7: Feinschliff**
-* Minimieren (`Icon` → Kachel im Dock/Clip), Shade, Verstecken (`SHOW_ALL`, `HIDE_OTHERS`),
-  `SAVE_SESSION`, Workspace-Namen (`StartWorkspace` per Name).
-* Mehrere Monitore: Fokus und Verschieben zwischen Ausgaben.
-
-
-## 5. Grenzen
-
-* Window Makers X11-Konzepte (`WM_CLASS` per Drag auf das Dock, AppIcons, `WPrefs`, DockApps als X-Fenster)
-  haben keine direkte Wayland-Entsprechung. Docking erfolgt über `app_id`; DockApps von wlmaker
-  (`wlmclock`, `wlmbattery`) brauchen eine eigene Schnittstelle.
-* `RESTART`, `SHUTDOWN`, `INFO_PANEL`, `LEGAL_PANEL`, `OPEN_MENU` sind im Menü-Modell vorhanden, aber noch
-  ohne Funktion und erscheinen deaktiviert.
+- **Title bars** (22 px high in wlmaker's defaults, minimize left, close right, resize bar at the bottom),
+  and with them the attributes above. Minimize, hide and show-all exist already, without a title bar.
+- **Themes** in a wlmaker-style file, and Window Maker's `~/GNUstep/Defaults/WindowMaker` keys
+  (`FTitleBack`, `UTitleBack`, `MenuTitleBack`, ...). What exists now are `theme("NAME")` files that set
+  colours, border width and gaps.
+- **Sessions** (`SAVE_SESSION`).

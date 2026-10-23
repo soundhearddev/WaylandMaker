@@ -39,6 +39,9 @@ const config = root.config;
 const layout = root.layout;
 const workspace = root.workspace;
 const window_mod = root.window;
+const diag = @import("diag.zig");
+const perf = @import("perf.zig");
+const trace = @import("trace.zig");
 const output_mod = root.output;
 const seat_mod = root.seat_mod;
 const action = root.action;
@@ -53,34 +56,9 @@ const gfx = root.gfx;
 const WindowManager = types.WindowManager;
 
 test {
-    // Pull in the test blocks of every module.
-    _ = config;
-    _ = layout;
-    _ = workspace;
-    _ = window_mod;
-    _ = seat_mod;
-    _ = output_mod;
-    _ = action;
-    _ = root.animation;
-    _ = @import("plist.zig");
-    _ = @import("wm_menu.zig");
-    _ = @import("wm_attr.zig");
-    _ = @import("dockapp.zig");
-    _ = @import("dockhost.zig");
-    _ = @import("wm_dock.zig");
-    _ = @import("dock.zig");
-    _ = @import("appicon.zig");
-    _ = @import("svg.zig");
-    _ = @import("xpm.zig");
-    _ = @import("fileutil.zig");
-    _ = @import("fuzz_test.zig");
-    _ = @import("fsmenu.zig");
-    _ = wm_files;
-    _ = @import("model_test.zig");
-    _ = @import("gfx.zig");
-    _ = @import("shm.zig");
-    _ = log_mod;
-    _ = ui_mod;
+    // The list of files whose tests run lives in root.zig, in its own `test { }`
+    // block. A new file with `test` blocks is added THERE, nowhere else.
+    _ = @import("root.zig");
 }
 
 /// Every message reaches `log_mod.logFn`, which counts warnings and errors for
@@ -240,6 +218,7 @@ pub fn main(init: std.process.Init) !void {
 
     // What is logged: WMAKER_LOG first, the option wins over it.
     log_mod.initFromEnv();
+    diag.initFromEnv();
     if (cli.log_spec) |spec| log_mod.setSpec(spec) catch |err| usageError("--log `{s}`: {t}", .{ spec, err });
 
     if (cli.print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
@@ -354,6 +333,7 @@ pub fn main(init: std.process.Init) !void {
     dockapp.runAutoLaunch(startup.dockapps, dockappSpawn);
 
     installSighupHandler();
+    diag.installSignalHandler();
     runLoop(wm, display);
 
     if (wm.quit) {
@@ -387,7 +367,8 @@ fn runLoop(wm: *WindowManager, display: *wl.Display) void {
             return;
         }
 
-        const timeout = pickTimeout(if (wm.ui) |u| u.nextTimeoutMs() else -1, window_mod.animWaitMs(wm));
+        const base_timeout = pickTimeout(if (wm.ui) |u| u.nextTimeoutMs() else -1, window_mod.animWaitMs(wm));
+        const timeout = pickTimeout(base_timeout, output_mod.settleWaitMs(wm));
         var fds = [1]cpoll.struct_pollfd{.{
             .fd = display.getFd(),
             .events = @intCast(cpoll.POLLIN | (if (flushed == .AGAIN) cpoll.POLLOUT else 0)),
@@ -404,7 +385,8 @@ fn runLoop(wm: *WindowManager, display: *wl.Display) void {
         }
         if (display.dispatchPending() != .SUCCESS) return;
 
-        if (reload_requested.load(.monotonic)) wm.obj.manageDirty();
+        if (reload_requested.load(.monotonic) or diag.dumpPending()) wm.obj.manageDirty();
+        if (wm.monitors.settle.due(output_mod.nowMs(wm))) wm.obj.manageDirty();
         window_mod.animTimer(wm);
         if (wm.ui) |u| u.onTimer();
     }
@@ -502,6 +484,8 @@ fn reloadConfig(wm: *WindowManager) void {
     if (loadFromConfig(wm)) {
         applyWorkspaceCount(wm, old_cfg.workspace_count);
         applyEnvironment(wm.cfg.environment);
+        applyMonitorConfig(wm);
+        output_mod.applyAll(wm);
         old_cfg.deinit();
         rebind(wm);
         log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
@@ -514,6 +498,12 @@ fn reloadConfig(wm: *WindowManager) void {
         _ = loadFromConfig(wm); // best effort; wm.commands defaults to &.{} below if even this fails
         rebind(wm);
     }
+}
+
+/// Hand the monitor rules, profiles and settings of `wm.cfg` to the monitor
+/// manager (the lists live in the config arena, like everything else in it).
+fn applyMonitorConfig(wm: *WindowManager) void {
+    wm.monitors.configure(wm.cfg.monitor_rules.items, wm.cfg.monitor_profiles.items, wm.cfg.output_order, wm.cfg.monitor_settle_ms);
 }
 
 /// A reload that changed `workspace_count` resizes every output; one that did
@@ -580,6 +570,7 @@ const Startup = struct {
 
 fn loadStartup(wm: *WindowManager) !Startup {
     const files = try loadFromConfigImpl(wm);
+    applyMonitorConfig(wm);
     return .{ .autostart = files.autostart, .dockapps = files.dockapps };
 }
 
@@ -708,6 +699,8 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                 // Outputs that were announced before this global.
                 var it = wm.outputs.first();
                 while (it) |o| : (it = types.nextOutput(o, wm)) output_mod.bindLayerShell(wm, ls, o);
+            } else if (eql(u8, name, std.mem.span(wl.Output.interface.name))) {
+                output_mod.bindWlOutput(wm, registry, g.name, g.version);
             } else if (eql(u8, name, std.mem.span(wl.Compositor.interface.name))) {
                 // createSurface exists since version 1; 4 adds damage_buffer.
                 ctx.compositor = registry.bind(g.name, wl.Compositor, @min(g.version, 4)) catch |err| {
@@ -787,9 +780,13 @@ fn wmListener(_: *river.WindowManagerV1, event: river.WindowManagerV1.Event, wm:
 fn onManage(wm: *WindowManager) void {
     // manage_finish is sent on EVERY path out of this function.
     defer wm.obj.manageFinish();
+    const span = perf.start(wm.io, .manage);
+    defer _ = perf.stop(wm.io, span);
+    defer diag.maybeCheck(wm);
 
     // 0. One reading of the animation clock for this whole sequence.
     window_mod.tickClock(wm);
+    trace.tick(output_mod.nowMs(wm));
     manage_count +%= 1;
     seq_log.debug("manage #{d} (clock {d:.1}, animation running: {})", .{ manage_count, wm.clock.now(), wm.anim_active });
 
@@ -797,6 +794,12 @@ fn onManage(wm: *WindowManager) void {
     window_mod.reap(wm);
     output_mod.reap(wm);
     seat_mod.reap(wm);
+
+    // 1. (diagnostics) SIGUSR1: write the state dump.
+    diag.maybeDump(wm);
+
+    // 1a. Monitors that stopped changing: rules, windows back home, profile.
+    output_mod.settle(wm);
 
     // 1b. SIGHUP asked for a config reload (destroys/creates bindings,
     // legal only here, same as step 2 below).
@@ -876,7 +879,11 @@ fn onManage(wm: *WindowManager) void {
     };
 
     // 7a. Layout. Geometry only; no requests yet.
-    layoutAll(wm);
+    {
+        const layout_span = perf.start(wm.io, .layout);
+        defer _ = perf.stop(wm.io, layout_span);
+        layoutAll(wm);
+    }
 
     // 7b. The minimize / restore animations: a restored window's final
     //     rectangle is known now. Draws the picture that is due.
@@ -1004,7 +1011,7 @@ fn prepareOutputs(wm: *WindowManager) void {
 fn layoutAll(wm: *WindowManager) void {
     var oit = wm.outputs.first();
     while (oit) |out| : (oit = types.nextOutput(out, wm)) {
-        if (!out.ready() or out.removed) continue;
+        if (!types.liveOutput(out)) continue;
         // Only the visible workspace needs geometry. Hidden workspaces keep
         // their scroll offset for when they come back.
         layout.compute(out.ws(), &wm.cfg, wm.follow_request);
@@ -1020,6 +1027,8 @@ fn layoutAll(wm: *WindowManager) void {
 /// position corrected; nothing here changes management state.
 fn onRender(wm: *WindowManager) void {
     defer wm.obj.renderFinish();
+    const span = perf.start(wm.io, .render);
+    defer _ = perf.stop(wm.io, span);
     window_mod.tickClock(wm);
     render_count +%= 1;
     seq_log.debug("render #{d} (clock {d:.1}, animation running: {})", .{ render_count, wm.clock.now(), wm.anim_active });
