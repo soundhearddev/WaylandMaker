@@ -196,8 +196,11 @@ pub const Spec = union(enum) {
 
     /// niri's default for window movement, resize and the horizontal view.
     pub const default_movement: Spec = .{ .spring = .{ .damping_ratio = 1.0, .stiffness = 800.0, .epsilon = 0.0001 } };
-    /// niri's default for a window that opens.
-    pub const default_open: Spec = .{ .easing = .{ .curve = .@"ease-out-expo", .duration_ms = 150 } };
+    /// A window that opens. niri uses `ease-out-expo 150`, which shows about
+    /// half of the window in the very first frame and is over after five: it
+    /// looks like a pop. A cubic over 250 ms starts gently and ends about when
+    /// the spring of the windows making room for it settles (~0.33 s).
+    pub const default_open: Spec = .{ .easing = .{ .curve = .@"ease-out-cubic", .duration_ms = 250 } };
 
     // niri's limits (niri-config/src/animations.rs).
     pub const max_duration_ms: u32 = 60_000;
@@ -425,12 +428,13 @@ test "overdamped springs: no NaN, no crash (niri's two regression tests)" {
 
 test "Animation: easing runs for its duration, spring from -> to" {
     const open = Animation.init(Spec.default_open, 0, 1, 0, 1000).?;
-    try std.testing.expect(near(open.duration, 0.150, 1e-12));
+    try std.testing.expect(near(open.duration, 0.250, 1e-12));
     try std.testing.expectEqual(@as(f64, 0), open.valueAt(900)); // before the start
-    try std.testing.expect(open.valueAt(1075) > 0.5); // ease-out-expo is fast at first
-    try std.testing.expectEqual(@as(f64, 1), open.valueAt(1150));
-    try std.testing.expect(!open.isDone(1149));
-    try std.testing.expect(open.isDone(1150));
+    try std.testing.expect(open.valueAt(1125) > 0.5); // ease-out-cubic is fast at first ...
+    try std.testing.expect(open.valueAt(1016) < 0.25); // ... but the first 16 ms frame is no jump
+    try std.testing.expectEqual(@as(f64, 1), open.valueAt(1250));
+    try std.testing.expect(!open.isDone(1249));
+    try std.testing.expect(open.isDone(1250));
 
     const mv = Animation.init(Spec.default_movement, 500, 100, 0, 0).?; // downwards: from > to
     try std.testing.expectEqual(@as(f64, 500), mv.valueAt(0));
@@ -462,7 +466,7 @@ test "Spec: parse / format round trip and niri's limits" {
         try std.testing.expectEqualStrings(txt, s.format(&buf));
     }
     try std.testing.expectEqual(Spec.default_movement, Spec.parse("spring 1.0 800 0.0001").?);
-    try std.testing.expectEqual(Spec.default_open, Spec.parse("  ease-out-expo   150 ").?);
+    try std.testing.expectEqual(Spec.default_open, Spec.parse("  ease-out-cubic   250 ").?);
 
     for ([_][]const u8{
         "",                       "spring",               "spring 1 800",        "spring 1 800 0.0001 9",

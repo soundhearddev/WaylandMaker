@@ -35,7 +35,7 @@ maximize_keep_focus = false      -- a new tiled window does not take the focus f
 animations = true                -- false: everything jumps
 anim_slowdown = 1.0              -- 2.0 = everything runs at half speed, 0.5 = twice as fast
 anim_window_movement = "spring 1.0 800 0.0001"   -- a tiled window moves (scroll, a column opens/closes/resizes)
-anim_window_open = "ease-out-expo 150"           -- a new window is uncovered from its middle
+anim_window_open = "ease-out-cubic 250"          -- a new window is uncovered from its middle (niri: "ease-out-expo 150", abrupt)
 
 -- ---- look -------------------------------------------------------------------
 border_width = 2

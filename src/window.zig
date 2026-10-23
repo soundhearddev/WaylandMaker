@@ -601,6 +601,16 @@ fn frameWait(due: u64, now: u64) i32 {
     return @intCast(@min(due -| now, frame_ms));
 }
 
+/// When the frame after the one asked for at `now` is due, `prev` being the
+/// deadline of the one asked for. Counted from `prev`, not from `now`, so a
+/// frame that came a few ms late does not push every later one back (the
+/// cadence used to drift from 16 towards 20 ms); a frame more than half a
+/// frame late starts the grid again from `now`.
+pub fn nextFrameAt(prev: u64, now: u64) u64 {
+    const grid = prev + frame_ms;
+    return if (grid >= now + frame_ms / 2) grid else now + frame_ms;
+}
+
 /// Called by the event loop after every wake-up: when something still moves
 /// and the next frame is due, ask for a manage sequence (it draws the frame
 /// and sets `anim_active` again if the movement goes on).
@@ -612,7 +622,7 @@ pub fn animTimer(wm: *WindowManager) void {
     const now = realMs(wm);
     if (now < wm.anim_frame_at) return;
     wm.anim_active = false;
-    wm.anim_frame_at = now + frame_ms;
+    wm.anim_frame_at = nextFrameAt(wm.anim_frame_at, now);
     anim_log.debug("timer asks for a frame (manage_dirty) real={d}", .{now});
     wm.obj.manageDirty();
 }
@@ -887,6 +897,30 @@ test "visibleBox: fully open = the work area cut only; opening = a growing middl
     try std.testing.expectEqual(@as(i32, 1), out.w);
 }
 
+test "nextFrameAt: on a 16 ms grid, small delays do not accumulate" {
+    // The first frame (nothing was asked for before): from now.
+    try std.testing.expectEqual(@as(u64, 123_472), nextFrameAt(0, 123_456));
+    // On time or a few ms late: the next one stays on the grid.
+    try std.testing.expectEqual(@as(u64, 1016), nextFrameAt(1000, 1000));
+    try std.testing.expectEqual(@as(u64, 1016), nextFrameAt(1000, 1003));
+    try std.testing.expectEqual(@as(u64, 1016), nextFrameAt(1000, 1008));
+    // More than half a frame late: a new grid, never two frames back to back.
+    try std.testing.expectEqual(@as(u64, 1026), nextFrameAt(1000, 1010));
+    try std.testing.expectEqual(@as(u64, 1516), nextFrameAt(1000, 1500));
+
+    // Every wake-up 3 ms late for a second: 62 frames, not the 50 of "now + 16"
+    // with a 4 ms round trip, and the grid does not move.
+    var due: u64 = 1000;
+    var frames: u32 = 0;
+    while (due < 2000) : (frames += 1) {
+        const now = due + 3;
+        const next = nextFrameAt(due, now);
+        try std.testing.expectEqual(due + frame_ms, next);
+        due = next;
+    }
+    try std.testing.expect(frames >= 62);
+}
+
 test "frameWait: never longer than one frame, 0 when due" {
     try std.testing.expectEqual(@as(i32, 0), frameWait(100, 100));
     try std.testing.expectEqual(@as(i32, 0), frameWait(100, 500));
@@ -952,8 +986,8 @@ test "opening: 16 ms frames uncover the window, and no clip box is left at the e
         try std.testing.expect(box.w >= 1 and box.h >= 1);
         try std.testing.expect(box.w <= win.w + 4 and box.h <= win.h + 4);
     }
-    // 150 ms at 16 ms per frame: about ten frames, certainly fewer than 20.
-    try std.testing.expect(frames < 20);
+    // 250 ms at 16 ms per frame: about sixteen frames, certainly fewer than 24.
+    try std.testing.expect(frames < 24);
     try std.testing.expect(a.isDone(clock.now()));
     // Done: reveal is 1 and the window is not clipped at all.
     try std.testing.expectEqual(@as(?types.Rect, null), visibleBox(win, 2, work, 1.0));
