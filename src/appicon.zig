@@ -8,9 +8,10 @@
 //   2. the `Icon=` of the program's `<app_id>.desktop` file
 //   3. a PLACEHOLDER of the icon theme ("application-x-executable", ...)
 //
-// Only PNG and XPM can be loaded (what gfx.Icon and xpm.zig read); an SVG-only
-// theme just means "not found". If even the placeholder is missing, `get`
-// returns null and the tile shows the application's first letter.
+// PNG and XPM are read directly (gfx.Icon, xpm.zig), SVG through librsvg when
+// it is installed (svg.zig). If nothing is found, not even the theme's
+// placeholder, `load` returns null and the Dock draws a placeholder of its own
+// (dock.drawPlaceholder), never a letter.
 //
 // The app_id comes from the client, so it only ever becomes part of a path
 // when it is a plain identifier (no '/', no leading '.', see `validName`).
@@ -20,6 +21,7 @@
 const std = @import("std");
 const gfx = @import("gfx.zig");
 const xpm = @import("xpm.zig");
+const svg = @import("svg.zig");
 
 /// A name that is safe to put into a file name: letters, digits and . - _ +,
 /// not starting with '.' or '-' (same rule as dockapp.validAppId).
@@ -46,9 +48,19 @@ pub const Dirs = struct {
     },
 };
 
-const themes = [_][]const u8{ "hicolor", "Adwaita", "Humanity", "gnome", "breeze", "Papirus" };
-/// Best size for a 32 px icon first.
+const themes = [_][]const u8{
+    "hicolor",     "Adwaita",      "Papirus", "Papirus-Dark", "Papirus-Light", "breeze",
+    "breeze-dark", "Humanity",     "gnome",   "oxygen",       "elementary",    "Yaru",
+    "Mint-Y",      "Mint-X",       "Numix",   "Numix-Circle", "Tela",          "Qogir",
+    "Colloid",     "WhiteSur",     "Fluent",  "Arc",          "Moka",          "Vimix",
+    "Flat-Remix",  "la-capitaine",
+};
+/// Best size for a 48 px icon first.
 const sizes = [_][]const u8{ "64", "48", "128", "256", "32", "24", "22", "16" };
+/// A PNG of these sizes is good enough to be used before an SVG; a smaller one
+/// (blown up it looks bad) only after it.
+const big_sizes = [_][]const u8{ "64", "48", "128", "256" };
+const small_sizes = [_][]const u8{ "32", "24", "22", "16" };
 
 /// What themes call "an application, nothing more specific known".
 const placeholder_names = [_][]const u8{
@@ -67,6 +79,7 @@ fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
         return gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels);
     }
     if (std.ascii.endsWithIgnoreCase(path, ".png")) return gfx.Icon.loadPng(path);
+    if (std.ascii.endsWithIgnoreCase(path, ".svg")) return svg.load(path, svg.render_size);
     return null;
 }
 
@@ -87,29 +100,67 @@ fn presentThemes(dirs: Dirs, out: *[themes.len][]const u8) []const []const u8 {
     return out[0..n];
 }
 
-/// The icon file called `name` in the themes (PNG first, then XPM).
+/// The icon file `name` + `ext` of one theme in one size, in the two layouts
+/// themes use: `<theme>/<size>x<size>/<context>/` (hicolor, Adwaita, ...) and
+/// `<theme>/<context>/<size>/` (Humanity, breeze, ...).
+fn inTheme(gpa: std.mem.Allocator, dirs: Dirs, th: []const u8, sz: []const u8, cx: []const u8, name: []const u8, comptime ext: []const u8) ?gfx.Icon {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}x{s}/{s}/{s}" ++ ext, .{ dirs.icons, th, sz, sz, cx, name })) |p| {
+        if (loadFile(gpa, p)) |ic| return ic;
+    } else |_| {}
+    if (std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}/{s}/{s}" ++ ext, .{ dirs.icons, th, cx, sz, name })) |p| {
+        if (loadFile(gpa, p)) |ic| return ic;
+    } else |_| {}
+    return null;
+}
+
+/// `name` + `ext` in the given sizes, every theme and context.
+fn inSizes(gpa: std.mem.Allocator, dirs: Dirs, present: []const []const u8, name: []const u8, contexts: []const []const u8, size_list: []const []const u8, comptime ext: []const u8) ?gfx.Icon {
+    for (size_list) |sz| {
+        for (present) |th| {
+            for (contexts) |cx| {
+                if (inTheme(gpa, dirs, th, sz, cx, name, ext)) |ic| return ic;
+            }
+        }
+    }
+    return null;
+}
+
+/// The SVG of `name` in the `scalable` directories of the themes.
+fn inScalable(gpa: std.mem.Allocator, dirs: Dirs, present: []const []const u8, name: []const u8, contexts: []const []const u8) ?gfx.Icon {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    for (present) |th| {
+        for (contexts) |cx| {
+            if (std.fmt.bufPrintZ(&buf, "{s}/{s}/scalable/{s}/{s}.svg", .{ dirs.icons, th, cx, name })) |p| {
+                if (loadFile(gpa, p)) |ic| return ic;
+            } else |_| {}
+        }
+    }
+    return null;
+}
+
+/// The icon file called `name`: a PNG of a usable size, else an SVG (when
+/// librsvg is there), else a small PNG, else an XPM, else /usr/share/pixmaps.
 fn findIcon(gpa: std.mem.Allocator, dirs: Dirs, name: []const u8, contexts: []const []const u8) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var present_buf: [themes.len][]const u8 = undefined;
     const present = presentThemes(dirs, &present_buf);
-    inline for (.{ ".png", ".xpm" }) |ext| {
-        for (sizes) |sz| {
-            for (present) |th| {
-                for (contexts) |cx| {
-                    // <theme>/<size>x<size>/<context>/ (hicolor, Adwaita, ...)
-                    if (std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}x{s}/{s}/{s}" ++ ext, .{ dirs.icons, th, sz, sz, cx, name })) |p| {
-                        if (loadFile(gpa, p)) |ic| return ic;
-                    } else |_| {}
-                    // <theme>/<context>/<size>/ (Humanity and other older themes)
-                    if (std.fmt.bufPrintZ(&buf, "{s}/{s}/{s}/{s}/{s}" ++ ext, .{ dirs.icons, th, cx, sz, name })) |p| {
-                        if (loadFile(gpa, p)) |ic| return ic;
-                    } else |_| {}
-                }
-            }
+
+    if (inSizes(gpa, dirs, present, name, contexts, &big_sizes, ".png")) |ic| return ic;
+    const have_svg = svg.available();
+    if (have_svg) {
+        if (inScalable(gpa, dirs, present, name, contexts)) |ic| return ic;
+        if (inSizes(gpa, dirs, present, name, contexts, &sizes, ".svg")) |ic| return ic;
+    }
+    if (inSizes(gpa, dirs, present, name, contexts, &small_sizes, ".png")) |ic| return ic;
+    if (inSizes(gpa, dirs, present, name, contexts, &sizes, ".xpm")) |ic| return ic;
+
+    inline for (.{ ".png", ".svg", ".xpm" }) |ext| {
+        if (!std.mem.eql(u8, ext, ".svg") or have_svg) {
+            if (std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dirs.pixmaps, name })) |p| {
+                if (loadFile(gpa, p)) |ic| return ic;
+            } else |_| {}
         }
-        if (std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dirs.pixmaps, name })) |p| {
-            if (loadFile(gpa, p)) |ic| return ic;
-        } else |_| {}
     }
     return null;
 }
@@ -347,4 +398,98 @@ test "load: no icon theme at all gives null, never a made-up icon" {
     const s: Search = .{ .dirs = .{ .icons = "/nonexistent/icons", .pixmaps = "/nonexistent/pixmaps", .desktop = &.{} } };
     try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, "foo"));
     try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, s, null));
+}
+
+test "load: SVG icons are used when librsvg is there; a big PNG beats an SVG, a small one does not" {
+    const gpa = std.testing.allocator;
+    var root_buf: [64:0]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/wmaker-appicon-svg-test-{d}", .{std.c.getpid()});
+
+    const dirs_to_make = [_][]const u8{
+        "",
+        "/icons",
+        "/icons/hicolor",
+        "/icons/hicolor/scalable",
+        "/icons/hicolor/scalable/apps",
+        "/icons/hicolor/48x48",
+        "/icons/hicolor/48x48/apps",
+        "/icons/hicolor/48x48/mimetypes",
+        "/icons/hicolor/16x16",
+        "/icons/hicolor/16x16/apps",
+        "/pixmaps",
+        "/apps",
+    };
+    const pngs = [_]struct { path: []const u8, side: c_int }{
+        .{ .path = "/icons/hicolor/48x48/apps/both.png", .side = 4 },
+        .{ .path = "/icons/hicolor/16x16/apps/small.png", .side = 3 },
+        .{ .path = "/icons/hicolor/48x48/mimetypes/application-x-executable.png", .side = 8 },
+    };
+    const svgs = [_][]const u8{
+        "/icons/hicolor/scalable/apps/vec.svg",
+        "/icons/hicolor/scalable/apps/both.svg",
+        "/icons/hicolor/scalable/apps/small.svg",
+    };
+
+    var made: usize = 0;
+    defer {
+        var i = made;
+        while (i > 0) : (i -= 1) {
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, dirs_to_make[i - 1] }) catch continue;
+            _ = std.c.rmdir(p.ptr);
+        }
+    }
+    for (dirs_to_make) |d| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, d });
+        _ = std.c.mkdir(p.ptr, 0o755);
+        made += 1;
+    }
+    var written: [pngs.len + svgs.len]bool = @splat(false);
+    defer {
+        for (pngs, 0..) |f, i| {
+            if (!written[i]) continue;
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path }) catch continue;
+            _ = std.c.unlink(p.ptr);
+        }
+        for (svgs, 0..) |f, i| {
+            if (!written[pngs.len + i]) continue;
+            var pbuf: [256:0]u8 = undefined;
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f }) catch continue;
+            _ = std.c.unlink(p.ptr);
+        }
+    }
+    for (pngs, 0..) |f, i| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path });
+        try testPng(p, f.side);
+        written[i] = true;
+    }
+    for (svgs, 0..) |f, i| {
+        var pbuf: [256:0]u8 = undefined;
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f });
+        try svg.writeTestFile(p, svg.test_svg);
+        written[pngs.len + i] = true;
+    }
+
+    var icons_buf: [128]u8 = undefined;
+    var pix_buf: [128]u8 = undefined;
+    var apps_buf: [128]u8 = undefined;
+    const apps = [_][]const u8{try std.fmt.bufPrint(&apps_buf, "{s}/apps", .{root})};
+    const s: Search = .{ .dirs = .{
+        .icons = try std.fmt.bufPrint(&icons_buf, "{s}/icons", .{root}),
+        .pixmaps = try std.fmt.bufPrint(&pix_buf, "{s}/pixmaps", .{root}),
+        .desktop = &apps,
+    } };
+
+    const have_svg = svg.available();
+    // Only an SVG: drawn if librsvg is there, else the theme's placeholder (8).
+    try std.testing.expectEqual(if (have_svg) @as(i32, svg.render_size) else @as(i32, 8), widthOf(gpa, s, "vec"));
+    // A PNG of a usable size (48) wins over the SVG, with or without librsvg.
+    try std.testing.expectEqual(@as(i32, 4), widthOf(gpa, s, "both"));
+    // A small PNG (16) only after the SVG.
+    try std.testing.expectEqual(if (have_svg) @as(i32, svg.render_size) else @as(i32, 3), widthOf(gpa, s, "small"));
+    // Nothing at all: the theme's placeholder.
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "no-such-program"));
 }

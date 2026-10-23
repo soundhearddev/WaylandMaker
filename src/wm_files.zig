@@ -25,6 +25,7 @@
 // -- see `candidates(.autostart, ...)` and `main.zig`, which spawns it.
 
 const std = @import("std");
+const log = std.log.scoped(.files);
 const plist = @import("plist.zig");
 const wm_menu = @import("wm_menu.zig");
 const wm_attr = @import("wm_attr.zig");
@@ -90,7 +91,7 @@ pub fn saveDockState(
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     const skipped = try dockapp.render(&aw.writer, list, state);
-    if (skipped > 0) std.log.warn("dock state: {d} entries cannot be written and were left out", .{skipped});
+    if (skipped > 0) log.warn("dock state: {d} entries cannot be written and were left out", .{skipped});
 
     const cwd = std.Io.Dir.cwd();
     if (std.fs.path.dirname(path)) |dir| try cwd.createDirPath(io, dir);
@@ -173,7 +174,7 @@ fn showPath(w: *std.Io.Writer, io: std.Io, a: std.mem.Allocator, p: []const u8) 
 fn readCandidate(io: std.Io, a: std.mem.Allocator, p: []const u8) ?[]const u8 {
     return std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, p, a, .limited(max_file)) catch |err| {
         if (!std.mem.eql(u8, @errorName(err), "FileNotFound")) {
-            std.log.warn("cannot read {s}: {t}", .{ p, err });
+            log.warn("cannot read {s}: {t}", .{ p, err });
         }
         return null;
     };
@@ -228,37 +229,37 @@ fn loadMenu(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config, own: ?[
         const text = readCandidate(io, a, p) orelse continue;
         var diag: plist.Diag = .{};
         if (wm_menu.parseDiag(a, text, &diag)) |parsed| {
-            for (parsed.warnings) |w| std.log.warn("root menu {s}: {s}", .{ p, w });
-            std.log.info("root menu: {d} entries from {s}", .{ parsed.menu.count(), p });
+            for (parsed.warnings) |w| log.warn("root menu {s}: {s}", .{ p, w });
+            log.info("root menu: {d} entries from {s}", .{ parsed.menu.count(), p });
             return parsed.menu;
         } else |err| {
             switch (err) {
-                error.Syntax => std.log.warn("root menu {s}, {f}; trying the next file", .{ p, diag }),
-                else => std.log.warn("root menu {s} is unusable ({t}); trying the next file", .{ p, err }),
+                error.Syntax => log.warn("root menu {s}, {f}; trying the next file", .{ p, diag }),
+                else => log.warn("root menu {s} is unusable ({t}); trying the next file", .{ p, err }),
             }
         }
     }
 
-    std.log.info("root menu: no file found, using the built-in one", .{});
+    log.info("root menu: no file found, using the built-in one", .{});
     return wm_menu.builtinDefault(a, try join(a, cfg.terminal), try join(a, cfg.launcher), try join(a, cfg.browser));
 }
 
 fn loadAttributes(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !wm_attr.Table {
     const paths = try candidates(a, .window_attributes, own, root);
     const found = readFirst(io, a, paths) orelse {
-        std.log.info("window attributes: no file found, no rules", .{});
+        log.info("window attributes: no file found, no rules", .{});
         return .{};
     };
     var diag: plist.Diag = .{};
     const loaded = wm_attr.parseDiag(a, found.text, &diag) catch |err| {
         switch (err) {
-            error.Syntax => std.log.warn("window attributes {s}, {f}; ignoring the file", .{ found.path, diag }),
-            else => std.log.warn("window attributes {s} is unusable ({t}); ignoring it", .{ found.path, err }),
+            error.Syntax => log.warn("window attributes {s}, {f}; ignoring the file", .{ found.path, diag }),
+            else => log.warn("window attributes {s} is unusable ({t}); ignoring it", .{ found.path, err }),
         }
         return .{};
     };
-    for (loaded.warnings) |w| std.log.warn("window attributes {s}: {s}", .{ found.path, w });
-    std.log.info("window attributes: {d} rules from {s}", .{ loaded.table.rules.len, found.path });
+    for (loaded.warnings) |w| log.warn("window attributes {s}: {s}", .{ found.path, w });
+    log.info("window attributes: {d} rules from {s}", .{ loaded.table.rules.len, found.path });
     return loaded.table;
 }
 
@@ -271,7 +272,7 @@ fn loadAttributes(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]c
 fn findAutostart(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !?[]const u8 {
     const paths = try candidates(a, .autostart, own, root);
     const found = readFirst(io, a, paths) orelse return null;
-    std.log.info("autostart: found {s}", .{found.path});
+    log.info("autostart: found {s}", .{found.path});
     return found.path;
 }
 
@@ -285,13 +286,13 @@ fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]con
         var diag: plist.Diag = .{};
         if (dockapp.parseWMStateAllDiag(a, text, &diag)) |l| {
             if (l.state != null) {
-                std.log.info("dockapps: {d} entries from the saved state {s}", .{ l.apps.len, sp });
+                log.info("dockapps: {d} entries from the saved state {s}", .{ l.apps.len, sp });
                 return l;
             }
-            std.log.warn("dockapps: {s} has no Dock or Clip section; ignored", .{sp});
+            log.warn("dockapps: {s} has no Dock or Clip section; ignored", .{sp});
         } else |err| switch (err) {
-            error.Syntax => std.log.warn("dockapps: saved state {s}, {f}; using the next file", .{ sp, diag }),
-            else => std.log.warn("dockapps: saved state {s} is unusable ({t}); using the next file", .{ sp, err }),
+            error.Syntax => log.warn("dockapps: saved state {s}, {f}; using the next file", .{ sp, diag }),
+            else => log.warn("dockapps: saved state {s} is unusable ({t}); using the next file", .{ sp, err }),
         }
     };
 
@@ -300,14 +301,14 @@ fn loadDockApps(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]con
         const text = readCandidate(io, a, p) orelse continue;
         var diag: plist.Diag = .{};
         if (dockapp.parseWMStateAllDiag(a, text, &diag)) |l| {
-            std.log.info("dockapps: {d} entries from {s}", .{ l.apps.len, p });
+            log.info("dockapps: {d} entries from {s}", .{ l.apps.len, p });
             return l;
         } else |err| switch (err) {
-            error.Syntax => std.log.warn("dockapps {s}, {f}; trying the next file", .{ p, diag }),
-            else => std.log.warn("dockapps {s} is unusable ({t}); trying the next file", .{ p, err }),
+            error.Syntax => log.warn("dockapps {s}, {f}; trying the next file", .{ p, diag }),
+            else => log.warn("dockapps {s} is unusable ({t}); trying the next file", .{ p, err }),
         }
     }
-    std.log.info("dockapps: no WMState found, the Dock starts empty", .{});
+    log.info("dockapps: no WMState found, the Dock starts empty", .{});
     return .{};
 }
 

@@ -3,6 +3,7 @@
 // Spawning child processes.
 
 const std = @import("std");
+const log = std.log.scoped(.process);
 const types = @import("types.zig");
 
 /// Start `argv` detached. SIGCHLD is ignored process-wide (see main.zig),
@@ -23,9 +24,12 @@ pub fn spawnChecked(wm: *types.WindowManager, argv: []const []const u8) bool {
         .stdout = .ignore,
         .stderr = .ignore,
     }) catch |err| {
-        std.log.err("failed to spawn `{s}`: {t}", .{ argv[0], err });
+        log.err("failed to spawn `{s}`: {t}", .{ argv[0], err });
         return false;
     };
+    // A command run through the shell is named by its text, not by /bin/sh.
+    const shown = if (argv.len == 3 and std.mem.eql(u8, argv[0], "/bin/sh") and std.mem.eql(u8, argv[1], "-c")) argv[2] else argv[0];
+    log.info("started `{s}`", .{shown});
     return true;
 }
 

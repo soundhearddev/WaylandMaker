@@ -19,6 +19,8 @@
 //   * management requests are only made from onManage().
 
 const std = @import("std");
+const log = std.log.scoped(.main);
+const seq_log = std.log.scoped(.sequence);
 const builtin = @import("builtin");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
@@ -30,6 +32,7 @@ const cpoll = @cImport({
 });
 
 const root = @import("root.zig");
+const log_mod = @import("log.zig");
 
 const types = root.types;
 const config = root.config;
@@ -58,6 +61,7 @@ test {
     _ = seat_mod;
     _ = output_mod;
     _ = action;
+    _ = root.animation;
     _ = @import("plist.zig");
     _ = @import("wm_menu.zig");
     _ = @import("wm_attr.zig");
@@ -75,23 +79,17 @@ test {
     _ = @import("model_test.zig");
     _ = @import("gfx.zig");
     _ = @import("shm.zig");
+    _ = log_mod;
     _ = ui_mod;
 }
 
-/// Warnings and errors logged so far; `--check` turns them into its exit code.
-var problems: u32 = 0;
+/// Every message reaches `log_mod.logFn`, which counts warnings and errors for
+/// `--check` and prints what the filter (WMAKER_LOG, `--log`) lets through.
+pub const std_options: std.Options = .{ .log_level = .debug, .logFn = log_mod.logFn };
 
-pub const std_options: std.Options = .{ .logFn = countingLog };
-
-fn countingLog(
-    comptime level: std.log.Level,
-    comptime scope: @EnumLiteral(),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    if (level == .warn or level == .err) problems +%= 1;
-    std.log.defaultLog(level, scope, format, args);
-}
+/// How many manage / render sequences there have been (for the log).
+var manage_count: u64 = 0;
+var render_count: u64 = 0;
 
 const usage =
     \\usage: wmaker-wl [OPTION]
@@ -112,6 +110,12 @@ const usage =
     \\      --paths         list the files wmaker-wl reads (and which exist), exit
     \\      --print-config  print the built-in default config.lua and exit, e.g.
     \\                      wmaker-wl --print-config > ~/.config/wmaker-wl/config.lua
+    \\      --log FILTER    what to log, e.g. `debug`, `warn` or `info,anim=debug`
+    \\                      (levels: off err warn info debug; a SCOPE=LEVEL pair
+    \\                      changes one scope: main sequence window anim action
+    \\                      config seat ui dock dockhost dockapp files compat svg
+    \\                      process output). The same as the environment variable
+    \\                      WMAKER_LOG; the default is `info`
     \\
     \\A running session reloads its files on `pkill -HUP wmaker-wl`.
     \\
@@ -124,6 +128,7 @@ const Cli = struct {
     print_config: bool = false,
     config_path: ?[]const u8 = null,
     config_dir: ?[]const u8 = null,
+    log_spec: ?[]const u8 = null,
 };
 
 const Parsed = union(enum) {
@@ -161,6 +166,10 @@ fn parseArgs(args: anytype) Parsed {
             cli.config_dir = args.next() orelse return .{ .needs_value = "--config-dir" };
         } else if (std.mem.startsWith(u8, arg, "--config-dir=")) {
             cli.config_dir = arg["--config-dir=".len..];
+        } else if (std.mem.eql(u8, arg, "--log")) {
+            cli.log_spec = args.next() orelse return .{ .needs_value = "--log" };
+        } else if (std.mem.startsWith(u8, arg, "--log=")) {
+            cli.log_spec = arg["--log=".len..];
         } else {
             return .{ .unknown = arg };
         }
@@ -204,8 +213,8 @@ fn checkConfig(io: std.Io, gpa: std.mem.Allocator) !void {
     const arena = cfg.arena.allocator();
     _ = try action.parseAll(arena, &cfg);
     _ = try wm_files.load(io, arena, &cfg);
-    if (problems > 0) {
-        std.debug.print("{s}: {d} problem(s), see the messages above\n", .{ cfg.config_file, problems });
+    if (log_mod.problems > 0) {
+        std.debug.print("{s}: {d} problem(s), see the messages above\n", .{ cfg.config_file, log_mod.problems });
         std.process.exit(1);
     }
     std.debug.print("{s}: OK\n", .{cfg.config_file});
@@ -229,6 +238,10 @@ pub fn main(init: std.process.Init) !void {
     config.config_path_override = cli.config_path;
     config.config_dir_override = cli.config_dir;
 
+    // What is logged: WMAKER_LOG first, the option wins over it.
+    log_mod.initFromEnv();
+    if (cli.log_spec) |spec| log_mod.setSpec(spec) catch |err| usageError("--log `{s}`: {t}", .{ spec, err });
+
     if (cli.print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
     if (cli.show_paths) return showPaths(io, gpa);
 
@@ -244,7 +257,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (cli.check_only) return checkConfig(io, gpa);
 
-    std.log.info("wmaker-wl {s}", .{root.version.version});
+    log.info("wmaker-wl {s}", .{root.version.version});
+    if (log_mod.currentSpec().len > 0) log.info("log filter: {s}", .{log_mod.currentSpec()});
     ignoreSigchld();
 
     const wm = try gpa.create(WindowManager);
@@ -279,7 +293,7 @@ pub fn main(init: std.process.Init) !void {
     const autostart_path = startup.autostart;
 
     const display = wl.Display.connect(null) catch {
-        std.log.err("cannot connect to the wayland display. wmaker-wl is not started " ++
+        log.err("cannot connect to the wayland display. wmaker-wl is not started " ++
             "directly: run `river -c wmaker-wl`", .{});
         std.process.exit(1);
     };
@@ -292,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
     if (!bound_wm) {
-        std.log.err("this compositor does not offer river_window_manager_v1. " ++
+        log.err("this compositor does not offer river_window_manager_v1. " ++
             "wmaker-wl needs river >= 0.4 with the window management protocol: " ++
             "run `river -c wmaker-wl`", .{});
         std.process.exit(1);
@@ -304,7 +318,7 @@ pub fn main(init: std.process.Init) !void {
         ui_state = ui_mod.Ui.init(wm, ctx.compositor.?, ctx.shm.?);
         ui_state.cursor_shape_manager = ctx.cursor_shape_manager;
         if (ctx.cursor_shape_manager == null) {
-            std.log.warn("no wp_cursor_shape_manager_v1: the pointer will not switch to an arrow over the menu", .{});
+            log.warn("no wp_cursor_shape_manager_v1: the pointer will not switch to an arrow over the menu", .{});
         }
         if (ctx.seat) |sd| {
             ui_state.setSeat(sd);
@@ -312,16 +326,16 @@ pub fn main(init: std.process.Init) !void {
             // Capabilities that arrived before the Ui existed.
             ui_state.onCapabilities(ctx.seat_pointer, ctx.seat_keyboard);
         } else {
-            std.log.warn("no wl_seat: root menu cannot receive clicks", .{});
+            log.warn("no wl_seat: root menu cannot receive clicks", .{});
         }
         wm.ui = &ui_state;
-        std.log.info("root menu ready: right click on the empty desktop", .{});
+        log.info("root menu ready: right click on the empty desktop", .{});
     } else {
-        std.log.warn("root menu disabled: wl_compositor={} wl_shm={}", .{ ctx.compositor != null, ctx.shm != null });
+        log.warn("root menu disabled: wl_compositor={} wl_shm={}", .{ ctx.compositor != null, ctx.shm != null });
     }
     defer if (wm.ui) |u| u.deinit();
 
-    std.log.info("wmaker-wl running (config: {s}; DockApps are icons: dockhost)", .{wm.cfg.config_file});
+    log.info("wmaker-wl running (config: {s}; DockApps are icons: dockhost)", .{wm.cfg.config_file});
     // `environment` first (the programs below inherit it), then
     // `spawn_at_startup`; both once, a reload does not repeat the spawns.
     applyEnvironment(wm.cfg.environment);
@@ -330,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
     // /bin/sh so it works whether or not the file is marked executable; a
     // shebang line is just a `#` comment to sh and is harmless either way.
     if (autostart_path) |p| {
-        std.log.info("autostart: running {s}", .{p});
+        log.info("autostart: running {s}", .{p});
         proc.spawn(wm, &.{ "/bin/sh", p });
     }
     // DockApps marked `autolaunch = yes` (see dockapp.zig): started once
@@ -373,7 +387,7 @@ fn runLoop(wm: *WindowManager, display: *wl.Display) void {
             return;
         }
 
-        const timeout: c_int = if (wm.ui) |u| u.nextTimeoutMs() else -1;
+        const timeout = pickTimeout(if (wm.ui) |u| u.nextTimeoutMs() else -1, window_mod.animWaitMs(wm));
         var fds = [1]cpoll.struct_pollfd{.{
             .fd = display.getFd(),
             .events = @intCast(cpoll.POLLIN | (if (flushed == .AGAIN) cpoll.POLLOUT else 0)),
@@ -391,8 +405,16 @@ fn runLoop(wm: *WindowManager, display: *wl.Display) void {
         if (display.dispatchPending() != .SUCCESS) return;
 
         if (reload_requested.load(.monotonic)) wm.obj.manageDirty();
+        window_mod.animTimer(wm);
         if (wm.ui) |u| u.onTimer();
     }
+}
+
+/// The shorter of the Ui's timeout (-1: none) and the animation's (null: none).
+fn pickTimeout(ui_ms: c_int, anim_ms: ?i32) c_int {
+    const a = anim_ms orelse return ui_ms;
+    if (ui_ms < 0) return a;
+    return @min(ui_ms, a);
 }
 
 /// Adapter for dockapp.runAutoLaunch, which takes a plain function pointer
@@ -456,7 +478,7 @@ fn installSighupHandler() void {
 /// further to roll back here.
 fn reloadConfig(wm: *WindowManager) void {
     const new_cfg = config.load(wm.io, wm.gpa) catch |err| {
-        std.log.err("config reload: {t}, keeping the current configuration", .{err});
+        log.err("config reload: {t}, keeping the current configuration", .{err});
         return;
     };
 
@@ -482,7 +504,7 @@ fn reloadConfig(wm: *WindowManager) void {
         applyEnvironment(wm.cfg.environment);
         old_cfg.deinit();
         rebind(wm);
-        std.log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
+        log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
     } else {
         // Something under the new config's arena failed (OOM, most likely):
         // revert wholesale rather than leave wm.commands/root_menu/attrs
@@ -517,10 +539,10 @@ pub fn applyEnvironment(vars: []const config.EnvVar) void {
         var vbuf: [4096]u8 = undefined;
         const n = std.fmt.bufPrintZ(&nbuf, "{s}", .{e.name}) catch continue;
         const v = std.fmt.bufPrintZ(&vbuf, "{s}", .{e.value}) catch {
-            std.log.warn("environment: the value of `{s}` is too long, skipped", .{e.name});
+            log.warn("environment: the value of `{s}` is too long, skipped", .{e.name});
             continue;
         };
-        if (setenv(n.ptr, v.ptr, 1) != 0) std.log.warn("environment: cannot set `{s}`", .{e.name});
+        if (setenv(n.ptr, v.ptr, 1) != 0) log.warn("environment: cannot set `{s}`", .{e.name});
     }
 }
 
@@ -540,7 +562,7 @@ pub fn applyEnvironment(vars: []const config.EnvVar) void {
 /// half-built config.
 fn loadFromConfig(wm: *WindowManager) bool {
     _ = loadFromConfigImpl(wm) catch |err| {
-        std.log.err("config reload: {t}", .{err});
+        log.err("config reload: {t}", .{err});
         wm.commands = &.{};
         return false;
     };
@@ -665,7 +687,7 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
             if (eql(u8, name, std.mem.span(river.WindowManagerV1.interface.name))) {
                 const version = @min(g.version, 6);
                 const obj = registry.bind(g.name, river.WindowManagerV1, version) catch |err| {
-                    std.log.err("bind river_window_manager_v1: {t}", .{err});
+                    log.err("bind river_window_manager_v1: {t}", .{err});
                     return;
                 };
                 wm.obj = obj;
@@ -674,12 +696,12 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                 obj.setListener(*WindowManager, wmListener, wm);
             } else if (eql(u8, name, std.mem.span(river.XkbBindingsV1.interface.name))) {
                 wm.xkb_bindings = registry.bind(g.name, river.XkbBindingsV1, 1) catch |err| {
-                    std.log.err("bind river_xkb_bindings_v1: {t}", .{err});
+                    log.err("bind river_xkb_bindings_v1: {t}", .{err});
                     return;
                 };
             } else if (eql(u8, name, std.mem.span(river.LayerShellV1.interface.name))) {
                 const ls = registry.bind(g.name, river.LayerShellV1, 1) catch |err| {
-                    std.log.err("bind river_layer_shell_v1: {t}", .{err});
+                    log.err("bind river_layer_shell_v1: {t}", .{err});
                     return;
                 };
                 wm.layer_shell = ls;
@@ -689,19 +711,19 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
             } else if (eql(u8, name, std.mem.span(wl.Compositor.interface.name))) {
                 // createSurface exists since version 1; 4 adds damage_buffer.
                 ctx.compositor = registry.bind(g.name, wl.Compositor, @min(g.version, 4)) catch |err| {
-                    std.log.err("bind wl_compositor: {t}", .{err});
+                    log.err("bind wl_compositor: {t}", .{err});
                     return;
                 };
             } else if (eql(u8, name, std.mem.span(wl.Shm.interface.name))) {
                 ctx.shm = registry.bind(g.name, wl.Shm, 1) catch |err| {
-                    std.log.err("bind wl_shm: {t}", .{err});
+                    log.err("bind wl_shm: {t}", .{err});
                     return;
                 };
             } else if (eql(u8, name, std.mem.span(wl.Seat.interface.name))) {
                 // First seat only: one pointer/keyboard for the menu.
                 if (ctx.seat == null) {
                     const seat = registry.bind(g.name, wl.Seat, @min(g.version, 5)) catch |err| {
-                        std.log.err("bind wl_seat: {t}", .{err});
+                        log.err("bind wl_seat: {t}", .{err});
                         return;
                     };
                     seat.setListener(*RegistryCtx, seatListener, ctx);
@@ -711,7 +733,7 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
                 // Optional: without it the pointer keeps whatever image it
                 // last had (usually a plain arrow from the last window).
                 ctx.cursor_shape_manager = registry.bind(g.name, wp.CursorShapeManagerV1, @min(g.version, 1)) catch |err| blk: {
-                    std.log.warn("bind wp_cursor_shape_manager_v1: {t}", .{err});
+                    log.warn("bind wp_cursor_shape_manager_v1: {t}", .{err});
                     break :blk null;
                 };
             }
@@ -727,28 +749,28 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Regi
 fn wmListener(_: *river.WindowManagerV1, event: river.WindowManagerV1.Event, wm: *WindowManager) void {
     switch (event) {
         .unavailable => {
-            std.log.err("another window manager is already running", .{});
+            log.err("another window manager is already running", .{});
             std.process.exit(1);
         },
         .finished => {
-            std.log.info("river finished; exiting", .{});
+            log.info("river finished; exiting", .{});
             std.process.exit(0);
         },
         .window => |ev| {
             _ = window_mod.create(wm, ev.id) catch |err| {
-                std.log.err("cannot track new window: {t}", .{err});
+                log.err("cannot track new window: {t}", .{err});
                 ev.id.destroy();
             };
         },
         .output => |ev| {
             _ = output_mod.create(wm, ev.id) catch |err| {
-                std.log.err("cannot track new output: {t}", .{err});
+                log.err("cannot track new output: {t}", .{err});
                 ev.id.destroy();
             };
         },
         .seat => |ev| {
             _ = seat_mod.create(wm, ev.id) catch |err| {
-                std.log.err("cannot track new seat: {t}", .{err});
+                log.err("cannot track new seat: {t}", .{err});
                 ev.id.destroy();
             };
         },
@@ -765,6 +787,11 @@ fn wmListener(_: *river.WindowManagerV1, event: river.WindowManagerV1.Event, wm:
 fn onManage(wm: *WindowManager) void {
     // manage_finish is sent on EVERY path out of this function.
     defer wm.obj.manageFinish();
+
+    // 0. One reading of the animation clock for this whole sequence.
+    window_mod.tickClock(wm);
+    manage_count +%= 1;
+    seq_log.debug("manage #{d} (clock {d:.1}, animation running: {})", .{ manage_count, wm.clock.now(), wm.anim_active });
 
     // 1. Drop what river told us is gone.
     window_mod.reap(wm);
@@ -993,6 +1020,9 @@ fn layoutAll(wm: *WindowManager) void {
 /// position corrected; nothing here changes management state.
 fn onRender(wm: *WindowManager) void {
     defer wm.obj.renderFinish();
+    window_mod.tickClock(wm);
+    render_count +%= 1;
+    seq_log.debug("render #{d} (clock {d:.1}, animation running: {})", .{ render_count, wm.clock.now(), wm.anim_active });
     const focus = if (wm.seats.first()) |s| s.focused else null;
     var it = wm.windows.first();
     while (it) |w| : (it = types.nextWindow(w, wm)) {
@@ -1221,7 +1251,7 @@ test "command line: a missing value and an unknown argument are reported, not ig
 }
 
 test "command line: the help text names every option parseArgs knows" {
-    for ([_][]const u8{ "-h", "--help", "-V", "--version", "--check", "--paths", "--print-config", "--config", "--config-dir" }) |opt| {
+    for ([_][]const u8{ "-h", "--help", "-V", "--version", "--check", "--paths", "--print-config", "--config", "--config-dir", "--log" }) |opt| {
         try std.testing.expect(std.mem.indexOf(u8, usage, opt) != null);
     }
 }
@@ -1239,4 +1269,69 @@ test "main() takes its options from parseArgs and prints help and version on std
     try std.testing.expect(std.mem.indexOf(u8, body, ".version => return stdoutPrint(io") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "config.config_path_override = cli.config_path") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "config.config_dir_override = cli.config_dir") != null);
+}
+
+test "pickTimeout: the shorter one, -1 and null mean none" {
+    try std.testing.expectEqual(@as(c_int, -1), pickTimeout(-1, null));
+    try std.testing.expectEqual(@as(c_int, 500), pickTimeout(500, null));
+    try std.testing.expectEqual(@as(c_int, 16), pickTimeout(-1, 16));
+    try std.testing.expectEqual(@as(c_int, 5), pickTimeout(500, 5));
+    try std.testing.expectEqual(@as(c_int, 20), pickTimeout(20, 50));
+}
+
+test "onManage and onRender read the animation clock first" {
+    const src = @embedFile("main.zig");
+    const m = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
+    const body = src[m..std.mem.indexOfPos(u8, src, m, "\n}").?];
+    try std.testing.expect(std.mem.indexOf(u8, body, "window_mod.tickClock(wm)").? < std.mem.indexOf(u8, body, "window_mod.reap(wm)").?);
+    const r = std.mem.indexOf(u8, src, "fn onRender(wm: *WindowManager) void {").?;
+    const rbody = src[r..std.mem.indexOfPos(u8, src, r, "\n}").?];
+    try std.testing.expect(std.mem.indexOf(u8, rbody, "window_mod.tickClock(wm)").? < std.mem.indexOf(u8, rbody, "applyRender").?);
+}
+
+test "runLoop: the animation timeout is picked before poll, animTimer runs after every wake-up" {
+    const src = @embedFile("main.zig");
+    const m = std.mem.indexOf(u8, src, "fn runLoop(wm: *WindowManager, display: *wl.Display) void {").?;
+    const body = src[m..std.mem.indexOfPos(u8, src, m, "\n}").?];
+    const wait_at = std.mem.indexOf(u8, body, "window_mod.animWaitMs(wm)").?;
+    const poll_at = std.mem.indexOf(u8, body, "cpoll.poll(").?;
+    const timer_at = std.mem.indexOf(u8, body, "window_mod.animTimer(wm)").?;
+    const ui_at = std.mem.indexOf(u8, body, "u.onTimer()").?;
+    try std.testing.expect(wait_at < poll_at);
+    try std.testing.expect(poll_at < timer_at);
+    try std.testing.expect(timer_at < ui_at);
+}
+
+test "command line: --log takes a filter, with a space or an equals sign" {
+    switch (parseTest(&.{ "--log", "info,anim=debug" })) {
+        .run => |cli| try std.testing.expectEqualStrings("info,anim=debug", cli.log_spec.?),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{ "--check", "--log=warn" })) {
+        .run => |cli| {
+            try std.testing.expect(cli.check_only);
+            try std.testing.expectEqualStrings("warn", cli.log_spec.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{"--log"})) {
+        .needs_value => |opt| try std.testing.expectEqualStrings("--log", opt),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{})) {
+        .run => |cli| try std.testing.expect(cli.log_spec == null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "main() sets the log filter before it loads anything" {
+    const src = @embedFile("main.zig");
+    const start = std.mem.indexOf(u8, src, "pub fn main(init: std.process.Init) !void {").?;
+    const end = std.mem.indexOfPos(u8, src, start, "\n}\n").?;
+    const body = src[start..end];
+    const env_at = std.mem.indexOf(u8, body, "log_mod.initFromEnv()").?;
+    const opt_at = std.mem.indexOf(u8, body, "log_mod.setSpec(spec)").?;
+    try std.testing.expect(env_at < opt_at);
+    try std.testing.expect(opt_at < std.mem.indexOf(u8, body, "config.load(").?);
+    try std.testing.expect(std.mem.indexOf(u8, src, "pub const std_options: std.Options = .{ .log_level = .debug, .logFn = log_mod.logFn }") != null);
 }

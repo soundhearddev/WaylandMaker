@@ -524,6 +524,8 @@ pub const WindowManager = struct {
     /// Something is still moving: the event loop asks for a new manage
     /// sequence every frame until nothing is.
     anim_active: bool = false,
+    /// Real time (ms) at which the next frame may be requested.
+    anim_frame_at: u64 = 0,
 
     /// The `reload_config` command asked for a config reload. Executed in the
     /// same manage sequence, after the queued actions (main.onManage): a

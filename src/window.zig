@@ -16,6 +16,8 @@
 // `close`, which is legal in a manage sequence and lives in action.zig.
 
 const std = @import("std");
+const log = std.log.scoped(.window);
+const anim_log = std.log.scoped(.anim);
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
@@ -45,6 +47,7 @@ pub fn create(wm: *WindowManager, obj: *river.WindowV1) !*Window {
 
     wm.windows.append(win);
     obj.setListener(*WindowManager, listener, wm);
+    log.debug("river announced a new window", .{});
     return win;
 }
 
@@ -112,6 +115,8 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
             // shown and focused.
             if (!win.ready) {
                 win.ready = true;
+                log.debug("window `{s}` has content ({d}x{d})", .{ win.app_id orelse "?", d.width, d.height });
+                anim_log.debug("window has content ({d}x{d}) real={d}", .{ d.width, d.height, realMs(wm) });
                 wm.obj.manageDirty();
             }
         },
@@ -130,6 +135,7 @@ fn listener(obj: *river.WindowV1, event: river.WindowV1.Event, wm: *WindowManage
 
         .app_id => |a| {
             setString(wm, &win.app_id, a.app_id);
+            log.debug("window app_id is `{s}`", .{win.app_id orelse "?"});
             // The tag `dockapp:<name>` makes this an icon, not a window, from
             // now on and whatever state it was in (see dockhost.zig).
             if (dockhost.isDockApp(win.app_id)) {
@@ -250,10 +256,10 @@ pub fn placeNew(wm: *WindowManager) void {
                 if (i < out.workspace_count) {
                     ws = &out.workspaces[i];
                 } else {
-                    std.log.warn("StartWorkspace {d} for `{s}`: only {d} workspaces exist", .{ i + 1, win.app_id orelse "?", out.workspace_count });
+                    log.warn("StartWorkspace {d} for `{s}`: only {d} workspaces exist", .{ i + 1, win.app_id orelse "?", out.workspace_count });
                 }
             },
-            .name => |n| std.log.warn("StartWorkspace `{s}`: workspace names are not supported yet, use a number", .{n}),
+            .name => |n| log.warn("StartWorkspace `{s}`: workspace names are not supported yet, use a number", .{n}),
         };
 
         win.new = false;
@@ -275,7 +281,7 @@ pub fn placeNew(wm: *WindowManager) void {
             win.sticky = attrs.is("omnipresent");
         } else {
             workspace.placeTiled(wm, ws, win) catch |err| {
-                std.log.err("cannot place window: {t}", .{err});
+                log.err("cannot place window: {t}", .{err});
                 win.new = true;
                 continue;
             };
@@ -358,6 +364,7 @@ fn hadFocus(wm: *WindowManager, win: *Window) bool {
 }
 
 fn destroy(wm: *WindowManager, win: *Window) void {
+    log.debug("window `{s}` is gone", .{win.app_id orelse "?"});
     const ws = win.workspace;
     // Only the window that HAD the focus hands it on. (Any window of the
     // shown workspace used to: closing a background dialog moved the focus.)
@@ -479,12 +486,14 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
     if (held or !isVisible(win)) {
         stopAnimations(win);
         if (win.visible != false) {
+            log.debug("window `{s}` hidden", .{win.app_id orelse "?"});
             win.obj.hide();
             win.visible = false;
         }
         return;
     }
     if (win.visible != true) {
+        log.debug("window `{s}` shown", .{win.app_id orelse "?"});
         win.obj.show();
         win.visible = true;
     }
@@ -555,12 +564,57 @@ pub fn applyRender(wm: *WindowManager, win: *Window, focused: bool) void {
 
 pub const Visual = struct { x: i32, y: i32, reveal: f64 };
 
+/// Frame interval of the animations while something moves (about 60 Hz).
+pub const frame_ms: u64 = 16;
+
+/// Real time in milliseconds, on a clock that only goes forward.
+fn realMs(wm: *const WindowManager) u64 {
+    const ts = std.Io.Clock.awake.now(wm.io);
+    return @intCast(@max(0, ts.toMilliseconds()));
+}
+
 /// Feed the animation clock; once per manage / render sequence, before the
 /// windows are looked at (all animations of a sequence see the same moment).
 pub fn tickClock(wm: *WindowManager) void {
     wm.clock.setSlowdown(wm.cfg.anim_slowdown);
-    const ts = std.Io.Clock.awake.now(wm.io);
-    wm.clock.advance(@intCast(@max(0, ts.toMilliseconds())));
+    wm.clock.advance(realMs(wm));
+    if (tracing(wm)) anim_log.debug("tick real={d} clock={d:.1} active={}", .{ realMs(wm), wm.clock.now(), wm.anim_active });
+}
+
+/// Diagnostics: from the moment a window starts to open until 1.5 s later,
+/// the animation code says at info level what it does (ticks, frame requests,
+/// clip boxes), with real time stamps, so a log shows where a frame is lost.
+var trace_until: u64 = 0;
+
+fn tracing(wm: *const WindowManager) bool {
+    return realMs(wm) < trace_until;
+}
+
+/// How long the event loop may sleep before the next frame of a running
+/// animation is due. null: nothing moves.
+pub fn animWaitMs(wm: *const WindowManager) ?i32 {
+    if (!wm.anim_active) return null;
+    return frameWait(wm.anim_frame_at, realMs(wm));
+}
+
+fn frameWait(due: u64, now: u64) i32 {
+    return @intCast(@min(due -| now, frame_ms));
+}
+
+/// Called by the event loop after every wake-up: when something still moves
+/// and the next frame is due, ask for a manage sequence (it draws the frame
+/// and sets `anim_active` again if the movement goes on).
+pub fn animTimer(wm: *WindowManager) void {
+    if (!wm.anim_active) {
+        if (tracing(wm)) anim_log.debug("timer: nothing is active (real={d})", .{realMs(wm)});
+        return;
+    }
+    const now = realMs(wm);
+    if (now < wm.anim_frame_at) return;
+    wm.anim_active = false;
+    wm.anim_frame_at = now + frame_ms;
+    anim_log.debug("timer asks for a frame (manage_dirty) real={d}", .{now});
+    wm.obj.manageDirty();
 }
 
 /// Forget everything about how the window moved (it is hidden, or river
@@ -590,10 +644,12 @@ fn axis(spec: animation.Spec, anim: *?animation.Animation, shown: i32, goal: *i3
     if (want != goal.*) {
         goal.* = want;
         anim.* = animation.Animation.init(spec, @floatFromInt(shown), @floatFromInt(want), 0, now);
+        anim_log.debug("movement {d} -> {d} (clock {d:.1})", .{ shown, want, now });
     }
     if (anim.*) |a| {
         if (!a.isDone(now)) return @intFromFloat(@round(a.valueAt(now)));
         anim.* = null;
+        anim_log.debug("movement arrived at {d}", .{want});
     }
     return want;
 }
@@ -628,13 +684,19 @@ pub fn visualState(wm: *WindowManager, win: *Window) Visual {
         win.opened = true;
         if (cfg.animations and wm.obj_version >= 2) {
             win.open_anim = animation.Animation.init(cfg.anim_window_open, 0.0, 1.0, 0.0, now);
+            if (win.open_anim != null) {
+                trace_until = realMs(wm) + 1500;
+                anim_log.debug("window `{s}` opens ({d}x{d}) real={d} clock={d:.1}", .{ win.app_id orelse "?", win.target.w, win.target.h, realMs(wm), now });
+            }
         }
     }
     if (win.open_anim) |a| {
         if (a.isDone(now) or !cfg.animations) {
             win.open_anim = null;
+            anim_log.debug("open animation finished real={d} clock={d:.1}", .{ realMs(wm), now });
         } else {
             vis.reveal = std.math.clamp(a.valueAt(now), 0.0, 1.0);
+            anim_log.debug("open frame reveal={d:.3} clock={d:.1} real={d}", .{ vis.reveal, now, realMs(wm) });
         }
     }
 
@@ -686,6 +748,11 @@ fn applyClip(wm: *WindowManager, win: *Window, vis: types.Rect, reveal: f64) voi
     const want = visibleBox(vis, win.borderWidth(&wm.cfg), work, reveal);
 
     if (std.meta.eql(want, win.sent_clip)) return;
+    if (want) |b| {
+        anim_log.debug("set_clip_box {d},{d} {d}x{d} reveal={d:.3}", .{ b.x, b.y, b.w, b.h, reveal });
+    } else {
+        anim_log.debug("set_clip_box off (reveal={d:.3})", .{reveal});
+    }
     if (want) |b| {
         win.obj.setClipBox(b.x, b.y, b.w, b.h);
     } else {
@@ -818,4 +885,111 @@ test "visibleBox: fully open = the work area cut only; opening = a growing middl
     // Opening completely outside the work area: the harmless 1 x 1 box.
     const out = visibleBox(.{ .x = 2000, .y = 0, .w = 100, .h = 100 }, 0, work, 0.5).?;
     try std.testing.expectEqual(@as(i32, 1), out.w);
+}
+
+test "frameWait: never longer than one frame, 0 when due" {
+    try std.testing.expectEqual(@as(i32, 0), frameWait(100, 100));
+    try std.testing.expectEqual(@as(i32, 0), frameWait(100, 500));
+    try std.testing.expectEqual(@as(i32, 7), frameWait(107, 100));
+    try std.testing.expectEqual(@as(i32, frame_ms), frameWait(10_000, 100));
+}
+
+test "a window arrives only while the clock runs: frames advance it to its target" {
+    const spec = animation.Spec.default_movement;
+    var clock: animation.Clock = .{};
+    var anim: ?animation.Animation = null;
+    var goal: i32 = 0;
+    var shown: i32 = 0;
+
+    clock.advance(5000);
+    shown = axis(spec, &anim, shown, &goal, 400, clock.now());
+    try std.testing.expectEqual(@as(i32, 0), shown);
+
+    // A stopped clock (the old bug: tickClock never ran) never gets there.
+    shown = axis(spec, &anim, shown, &goal, 400, clock.now());
+    try std.testing.expect(anim != null and shown == 0);
+
+    // 16 ms frames: monotonic, and exactly at the target in the end.
+    var t: u64 = 5000;
+    var prev: i32 = shown;
+    var frames: u32 = 0;
+    while (anim != null and frames < 1000) : (frames += 1) {
+        t += frame_ms;
+        clock.advance(t);
+        shown = axis(spec, &anim, shown, &goal, 400, clock.now());
+        try std.testing.expect(shown >= prev and shown <= 400);
+        prev = shown;
+    }
+    try std.testing.expectEqual(@as(i32, 400), shown);
+    try std.testing.expect(frames < 100);
+}
+
+test "opening: 16 ms frames uncover the window, and no clip box is left at the end" {
+    const work: types.Rect = .{ .x = 64, .y = 0, .w = 936, .h = 800 };
+    const win: types.Rect = .{ .x = 100, .y = 50, .w = 400, .h = 300 };
+    var clock: animation.Clock = .{};
+    clock.advance(1000);
+    const a = animation.Animation.init(animation.Spec.default_open, 0.0, 1.0, 0.0, clock.now()).?;
+
+    // First frame, same moment as the start: nothing uncovered yet, but the
+    // box is never 0 x 0 (that would switch clipping off and show it all).
+    var reveal = std.math.clamp(a.valueAt(clock.now()), 0.0, 1.0);
+    try std.testing.expectEqual(@as(f64, 0), reveal);
+    const first = visibleBox(win, 2, work, reveal).?;
+    try std.testing.expect(first.w >= 1 and first.h >= 1);
+
+    var t: u64 = 1000;
+    var prev: f64 = 0;
+    var frames: u32 = 0;
+    while (frames < 100) : (frames += 1) {
+        t += frame_ms;
+        clock.advance(t);
+        if (a.isDone(clock.now())) break;
+        reveal = std.math.clamp(a.valueAt(clock.now()), 0.0, 1.0);
+        try std.testing.expect(reveal >= prev);
+        prev = reveal;
+        const box = visibleBox(win, 2, work, reveal).?;
+        try std.testing.expect(box.w >= 1 and box.h >= 1);
+        try std.testing.expect(box.w <= win.w + 4 and box.h <= win.h + 4);
+    }
+    // 150 ms at 16 ms per frame: about ten frames, certainly fewer than 20.
+    try std.testing.expect(frames < 20);
+    try std.testing.expect(a.isDone(clock.now()));
+    // Done: reveal is 1 and the window is not clipped at all.
+    try std.testing.expectEqual(@as(?types.Rect, null), visibleBox(win, 2, work, 1.0));
+}
+
+test "opening: a stopped clock never uncovers the window, a late frame does at once" {
+    var clock: animation.Clock = .{};
+    clock.advance(1000);
+    const a = animation.Animation.init(animation.Spec.default_open, 0.0, 1.0, 0.0, clock.now()).?;
+
+    // The clock is only read by `tickClock`; without it nothing ever moves.
+    try std.testing.expect(!a.isDone(clock.now()));
+    try std.testing.expectEqual(@as(f64, 0), a.valueAt(clock.now()));
+    clock.advance(1000);
+    try std.testing.expectEqual(@as(f64, 0), a.valueAt(clock.now()));
+
+    // One late frame (the machine was busy for 6 s) and it is all there.
+    clock.advance(7000);
+    try std.testing.expect(a.isDone(clock.now()));
+    try std.testing.expectEqual(@as(f64, 1), a.valueAt(clock.now()));
+}
+
+test "opening: \"off\" has no animation, so the window is shown at once" {
+    try std.testing.expect(animation.Animation.init(.off, 0.0, 1.0, 0.0, 0.0) == null);
+}
+
+test "visibleBox: while opening, the box always lies inside the window frame" {
+    const win: types.Rect = .{ .x = 100, .y = 100, .w = 333, .h = 777 };
+    const bw: i32 = 3;
+    var step: u32 = 0;
+    while (step < 20) : (step += 1) {
+        const p: f64 = @as(f64, @floatFromInt(step)) / 20.0;
+        const b = visibleBox(win, bw, null, p).?;
+        try std.testing.expect(b.w >= 1 and b.h >= 1);
+        try std.testing.expect(b.x >= -bw and b.y >= -bw);
+        try std.testing.expect(b.x + b.w <= win.w + bw);
+        try std.testing.expect(b.y + b.h <= win.h + bw);
+    }
 }

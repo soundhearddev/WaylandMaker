@@ -12,6 +12,7 @@
 // No Wayland types in here, so it is unit-testable without a compositor.
 
 const std = @import("std");
+const log = std.log.scoped(.svg);
 const gfx = @import("gfx.zig");
 const c = gfx.c;
 
@@ -63,9 +64,9 @@ pub fn available() bool {
         tried = true;
         api = openLibrary();
         if (api != null) {
-            std.log.info("svg icons: librsvg found", .{});
+            log.info("svg icons: librsvg found", .{});
         } else {
-            std.log.info("svg icons: librsvg (librsvg-2.so.2) not found, SVG-only icons get the placeholder", .{});
+            log.info("svg icons: librsvg (librsvg-2.so.2) not found, SVG-only icons get the placeholder", .{});
         }
     }
     return api != null;

@@ -11,7 +11,6 @@
 - [ ] **Session speichern** (`SAVE_SESSION`, Fenster + Workspaces + Spalten): nur sinnvoll, wenn Programme
       wiedererkannt und gestartet werden; erst `app_id` → Startbefehl-Zuordnung (hat `dockapps.conf` schon).
 - [ ] **Modular Workspaces**.
-- [ ] **Animationen** beim Scrollen und Drag-Reordering von Spalten (optional).
 - [ ] **Drag-Reordering von Spalten**.
 - [ ] **Perf (Messen)**: Es fehlt ein Benchmark im Repo (`zig build bench`); die Zahlen stammen aus einem lokalen
       Wegwerf-Test.

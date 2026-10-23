@@ -19,11 +19,13 @@
 | `wm_menu.zig` | Root menu model, Plist and text format, depth/item/warning limits | no |
 | `wm_attr.zig` | `WMWindowAttributes`: per-`app_id` rules | no |
 | `wm_files.zig` | Search paths and loading Window Maker files | no |
-| `process.zig` | Spawns commands (`EXEC`/`SHEXEC`, autostart) detached from the WM | no |
+| `process.zig` | Spawns commands (`EXEC`/`SHEXEC`, autostart) detached from the WM; logs every started command at `info` | no |
+| `log.zig` | Run-time log filter: `std_options.logFn`, `WMAKER_LOG` / `--log` (`info,anim=debug`), per-scope levels, counts warnings and errors for `--check`. Every file logs through its own scope (`std.log.scoped(.window)`); the scopes are listed in the README | no |
 | `gfx.zig` | Cairo/Pango canvas: clear, fill, gradient (vertical, diagonal), polygon, bevel, text, measure, PNG icons | no |
 | `shm.zig` | `wl_shm` buffer (memfd), with a checked, overflow-safe size cap | yes |
 | `ui.zig` | Root menu and window list: desktop catcher surfaces, cascading menu surfaces, cairo drawing, pointer/keyboard handling; owns the Dock and Clip surfaces, their clicks, and puts DockApp windows into their tile | yes |
 | `anim.zig` | Window Maker's miniaturize animation (`actions.c`: zoom, twist, flip) ported loop for loop with the same constants and `float` arithmetic (checked point for point against the original C); produces the pictures, draws them as outlines. `ui.zig` shows them on a transparent surface (`animCollect` / `animLaunch` / `animStep`) | no |
+| `animation.zig` | Window animations: spring and easing curves, clock and the parsed `Spec` of `anim_window_movement` / `anim_window_open`; no Wayland types, unit-tested. `window.zig` (`visualState`, `axis`, `visibleBox`) decides what is shown per window; `main.zig` reads the clock once per manage / render sequence (`tickClock`) and `runLoop` asks for a frame every 16 ms while `wm.anim_active` (`animWaitMs`, `animTimer`) | no |
 | `appicon.zig` | The system icon of an application window, for the Dock tile of a minimized window: an icon named like the app_id in the installed icon themes (PNG/XPM), else the `Icon=` of its `.desktop` file, else the theme's own placeholder (`application-x-executable`, ...); nothing is drawn by wmaker-wl | no |
 | `dock.zig` | Dock and Clip: model (deep copy of `wm.dockapps`), tile geometry, hit testing, icon loading, drawing | no |
 | `wm_text.c`/`.h` | Small C helper around Pango's font-description macros, called from `gfx.zig` | no |

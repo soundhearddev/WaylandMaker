@@ -60,6 +60,7 @@
 // set_layout_override). `bind_layout = "current"` follows the active one.
 
 const std = @import("std");
+const log = std.log.scoped(.config);
 const wayland = @import("wayland");
 const xkb = @import("xkbcommon");
 const animation = @import("animation.zig");
@@ -406,7 +407,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) !Config {
             };
             try parseWith(a, text, &cfg, &binds, path, &inc, false);
         } else |err| {
-            std.log.info("no user config at {s} ({t}); using defaults", .{ path, err });
+            log.info("no user config at {s} ({t}); using defaults", .{ path, err });
         }
         warnLegacyConfig(io, a, path);
     }
@@ -423,7 +424,7 @@ fn warnLegacyConfig(io: std.Io, a: std.mem.Allocator, lua_path: []const u8) void
     const dir = std.fs.path.dirname(lua_path) orelse return;
     const old = std.fmt.allocPrint(a, "{s}/config.conf", .{dir}) catch return;
     if (std.Io.Dir.readFileAlloc(std.Io.Dir.cwd(), io, old, a, .limited(1 << 20))) |_| {
-        std.log.warn("{s} is NOT read any more: the config is now {s} (Lua, see share/default_config.lua)", .{ old, lua_path });
+        log.warn("{s} is NOT read any more: the config is now {s} (Lua, see share/default_config.lua)", .{ old, lua_path });
     } else |_| {}
 }
 
@@ -523,7 +524,7 @@ const Ctx = struct {
     callbacks: u32 = 0,
 
     fn warn(ctx: *Ctx, comptime fmt: []const u8, args: anytype) void {
-        std.log.warn(fmt, args);
+        log.warn(fmt, args);
         ctx.cfg.parse_warnings += 1;
     }
 
@@ -532,7 +533,7 @@ const Ctx = struct {
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, fmt, args) catch "(message too long)";
         const loc = lua.where(ctx.L);
-        std.log.warn("{s}{s}", .{ loc, msg });
+        log.warn("{s}{s}", .{ loc, msg });
         lua.pop(ctx.L, 1);
         ctx.cfg.parse_warnings += 1;
     }
@@ -761,7 +762,7 @@ threadlocal var in_callback: bool = false;
 /// config that bound it. Errors (and endless loops) are logged, never raised.
 pub fn callLua(cfg: *const Config, ref: i32) void {
     const L = cfg.script orelse {
-        std.log.warn("a Lua key binding without its script (config reloaded?)", .{});
+        log.warn("a Lua key binding without its script (config reloaded?)", .{});
         return;
     };
     lua.limitInstructions(L, max_callback_instructions);
@@ -771,7 +772,7 @@ pub fn callLua(cfg: *const Config, ref: i32) void {
     defer in_callback = was;
     if (!lua.call(L)) {
         const msg = lua.toSlice(L, -1) orelse "(error object is not a string)";
-        std.log.warn("config.lua: {s}", .{msg});
+        log.warn("config.lua: {s}", .{msg});
         lua.pop(L, 1);
     }
 }
@@ -795,7 +796,7 @@ fn cShell(L: *lua.State) i32 {
 /// `run("workspace 2")` / `spawn("foot -e htop")` / `shell("a | b")`.
 fn luaCommand(L: *lua.State, comptime prefix: []const u8) i32 {
     const text = lua.toSlice(L, 1) orelse {
-        if (active) |ctx| ctx.warnAt("takes one string: run(\"workspace 2\")", .{}) else std.log.warn("config.lua: run/spawn/shell take one string", .{});
+        if (active) |ctx| ctx.warnAt("takes one string: run(\"workspace 2\")", .{}) else log.warn("config.lua: run/spawn/shell take one string", .{});
         return 0;
     };
     if (!in_callback) {
@@ -805,7 +806,7 @@ fn luaCommand(L: *lua.State, comptime prefix: []const u8) i32 {
     const r = runner orelse return 0;
     var buf: [2048]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, prefix ++ "{s}", .{text}) catch {
-        std.log.warn("config.lua: command too long", .{});
+        log.warn("config.lua: command too long", .{});
         return 0;
     };
     r(line);

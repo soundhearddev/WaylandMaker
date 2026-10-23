@@ -10,6 +10,7 @@
 // for `close`, which is a plain request that is legal in manage.
 
 const std = @import("std");
+const log = std.log.scoped(.action);
 
 const types = @import("types.zig");
 const config = @import("config.zig");
@@ -53,13 +54,13 @@ pub fn runFromLua(text: []const u8) void {
     const wm = global orelse return;
     // A function calling `run("lua N")` could loop for ever.
     if (std.mem.startsWith(u8, std.mem.trimStart(u8, text, " \t"), "lua")) {
-        std.log.warn("config.lua: run() cannot start a Lua function", .{});
+        log.warn("config.lua: run() cannot start a Lua function", .{});
         return;
     }
     var arena: std.heap.ArenaAllocator = .init(wm.gpa);
     defer arena.deinit();
     const cmd = parse(arena.allocator(), &wm.cfg, text) catch |err| {
-        std.log.warn("config.lua: bad command `{s}`: {t}", .{ text, err });
+        log.warn("config.lua: bad command `{s}`: {t}", .{ text, err });
         return;
     };
     run(wm, cmd);
@@ -77,7 +78,7 @@ pub fn parseAll(a: std.mem.Allocator, cfg: *const config.Config) ![]const Comman
     const out = try a.alloc(Command, cfg.binds.len);
     for (cfg.binds, 0..) |b, i| {
         out[i] = parse(a, cfg, b.command) catch |err| blk: {
-            std.log.warn("bind `{s}`: {t}", .{ b.command, err });
+            log.warn("bind `{s}`: {t}", .{ b.command, err });
             break :blk .none;
         };
     }
@@ -196,6 +197,7 @@ fn focusedWindow(wm: *WindowManager) ?*Window {
 }
 
 pub fn run(wm: *WindowManager, cmd: Command) void {
+    log.debug("run {s}", .{@tagName(cmd)});
     const out = currentOutput(wm) orelse return;
     const ws = out.ws();
     const strip = &ws.strip;
@@ -360,7 +362,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         },
         .workspace_last => if (out.prev_active) |p| switchWorkspace(wm, out, p),
         .workspace_add => if (!workspace.addWorkspace(wm, out)) {
-            std.log.warn("workspace_add: already {d} workspaces", .{out.workspace_count});
+            log.warn("workspace_add: already {d} workspaces", .{out.workspace_count});
         },
         .workspace_remove_last => if (workspace.removeLastWorkspace(wm, out)) {
             wm.focus_request = workspace.defaultFocus(out.ws());
@@ -371,7 +373,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
             const target = stepWorkspace(cfg, out, fwd) orelse return;
             const w = focusedWindow(wm) orelse return;
             workspace.moveToWorkspace(wm, w, &out.workspaces[target]) catch |err| {
-                std.log.err("move window to workspace failed: {t}", .{err});
+                log.err("move window to workspace failed: {t}", .{err});
                 return;
             };
             switchWorkspace(wm, out, target);
@@ -429,7 +431,7 @@ fn moveToOutput(wm: *WindowManager, from: *Output, forward: bool) void {
     const target = types.cycleOutput(wm, from, forward) orelse return;
     if (target == from) return;
     workspace.moveToWorkspace(wm, w, target.ws()) catch |err| {
-        std.log.warn("cannot move window to the other output: {t}", .{err});
+        log.warn("cannot move window to the other output: {t}", .{err});
         return;
     };
     wm.active_output = target;
@@ -465,7 +467,7 @@ fn hideMatching(wm: *WindowManager, keep: *Window, which: HideWhich) void {
 /// Put a minimized window onto the workspace the user is on, and focus it.
 pub fn restoreWindow(wm: *WindowManager, w: *Window, out: *Output) void {
     workspace.restore(wm, w, out.ws()) catch |err| {
-        std.log.warn("cannot restore window: {t}", .{err});
+        log.warn("cannot restore window: {t}", .{err});
         return;
     };
     wm.focus_request = w;
@@ -605,7 +607,7 @@ fn carryOmnipresent(wm: *WindowManager, from: *types.Workspace, to: *types.Works
         const next = types.nextFloating(w); // read before the window moves
         if (w.isOmnipresent()) {
             workspace.moveToWorkspace(wm, w, to) catch |err| {
-                std.log.err("omnipresent window could not follow: {t}", .{err});
+                log.err("omnipresent window could not follow: {t}", .{err});
             };
         }
         it = next;
@@ -629,7 +631,7 @@ fn sendToWorkspace(wm: *WindowManager, out: *Output, index: u32) void {
     if (index >= out.workspace_count or index == out.active) return;
     const w = focusedWindow(wm) orelse return;
     workspace.moveToWorkspace(wm, w, &out.workspaces[index]) catch |err| {
-        std.log.err("move_to_workspace failed: {t}", .{err});
+        log.err("move_to_workspace failed: {t}", .{err});
         return;
     };
     // The window leaves the visible workspace; focus what remains here.

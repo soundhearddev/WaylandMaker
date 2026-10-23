@@ -29,6 +29,7 @@
 // only says where the Dock is (`Host`) and what the tiles are (the Model).
 
 const std = @import("std");
+const log = std.log.scoped(.dockhost);
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
@@ -75,7 +76,7 @@ pub fn adopt(wm: *WindowManager, win: *Window) void {
     wm.dock_windows.append(win);
 
     win.role = .dockapp;
-    std.log.info("dockhost: `{s}` is a DockApp: an icon in the Dock, not a window", .{win.app_id orelse "?"});
+    log.debug("`{s}` is a DockApp: an icon in the Dock, not a window", .{win.app_id orelse "?"});
     win.new = false;
     win.minimized = false;
     win.sticky = false;
@@ -161,9 +162,9 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
         const name = dockapp.declaredName(id) orelse continue;
         if (!dockapp.validAppId(name) or m.dockSlotFor(id) != null) continue;
         if (m.attach(name)) |_| {
-            std.log.info("dockhost: temporary Dock tile for `{s}`", .{name});
+            log.debug("temporary Dock tile for `{s}`", .{name});
             changed = true;
-        } else |err| std.log.warn("dockapp `{s}` gets no tile: {t}", .{ name, err });
+        } else |err| log.warn("dockapp `{s}` gets no tile: {t}", .{ name, err });
     }
 
     // Minimized windows: one tile each, in the order they were minimized.
@@ -186,11 +187,11 @@ pub fn syncModel(wm: *WindowManager, m: *dock_mod.Model) bool {
             const name = cutUtf8(raw, 64);
             if (m.attachWindow(name, w.app_id, w.min_order)) |idx| {
                 changed = true;
-                std.log.info("dockhost: Dock tile for the minimized window `{s}` (row {d})", .{ name, m.slots.items[idx].gi.yindex });
+                log.debug("Dock tile for the minimized window `{s}` (row {d})", .{ name, m.slots.items[idx].gi.yindex });
             } else |err| {
                 if (warned_order != w.min_order) {
                     warned_order = w.min_order;
-                    std.log.warn("dockhost: the minimized window `{s}` gets no Dock tile: {t} (is the Dock full for this screen height?)", .{ name, err });
+                    log.warn("the minimized window `{s}` gets no Dock tile: {t} (is the Dock full for this screen height?)", .{ name, err });
                 }
             }
         }
@@ -250,7 +251,7 @@ pub fn closeAll(wm: *WindowManager) void {
 /// that does not show up says why.
 fn hide(win: *Window, why: []const u8) void {
     if (win.visible != false) {
-        std.log.warn("dockhost: DockApp `{s}` is not shown: {s}", .{ win.app_id orelse "?", why });
+        log.warn("DockApp `{s}` is not shown: {s}", .{ win.app_id orelse "?", why });
         win.obj.hide();
         win.visible = false;
     }

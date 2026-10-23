@@ -39,6 +39,7 @@
 // yet) is never drawn into.
 
 const std = @import("std");
+const log = std.log.scoped(.ui);
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const river = wayland.client.river;
@@ -657,7 +658,7 @@ pub const Ui = struct {
 
     pub fn onCapabilities(ui: *Ui, has_pointer: bool, has_keyboard: bool) void {
         const seat = ui.seat orelse return;
-        std.log.info("seat capabilities: pointer={} keyboard={}", .{ has_pointer, has_keyboard });
+        log.debug("seat capabilities: pointer={} keyboard={}", .{ has_pointer, has_keyboard });
         if (has_pointer and ui.pointer == null) {
             if (seat.getPointer()) |p| {
                 ui.pointer = p;
@@ -665,15 +666,15 @@ pub const Ui = struct {
                 if (ui.cursor_shape_manager) |mgr| {
                     if (mgr.getPointer(p)) |dev| {
                         ui.cursor_shape_device = dev;
-                    } else |err| std.log.err("wp_cursor_shape_manager_v1.get_pointer: {t}", .{err});
+                    } else |err| log.err("wp_cursor_shape_manager_v1.get_pointer: {t}", .{err});
                 }
-            } else |err| std.log.err("wl_seat.get_pointer: {t}", .{err});
+            } else |err| log.err("wl_seat.get_pointer: {t}", .{err});
         }
         if (has_keyboard and ui.keyboard == null) {
             if (seat.getKeyboard()) |k| {
                 ui.keyboard = k;
                 k.setListener(*Ui, keyboardListener, ui);
-            } else |err| std.log.err("wl_seat.get_keyboard: {t}", .{err});
+            } else |err| log.err("wl_seat.get_keyboard: {t}", .{err});
         }
     }
 
@@ -683,7 +684,7 @@ pub const Ui = struct {
                 ui.pointer_surface = e.surface;
                 ui.px = @intCast(e.surface_x.toInt());
                 ui.py = @intCast(e.surface_y.toInt());
-                std.log.debug("pointer enter: {s} at {d},{d}", .{ ui.describe(e.surface), ui.px, ui.py });
+                log.debug("pointer enter: {s} at {d},{d}", .{ ui.describe(e.surface), ui.px, ui.py });
                 // Every one of our surfaces (desktop catcher and menus) is
                 // plain UI: always the default arrow, regardless of which
                 // shape a window under the old focus had set.
@@ -706,7 +707,7 @@ pub const Ui = struct {
             },
             .button => |e| {
                 if (e.state == .pressed) {
-                    std.log.info("pointer button 0x{x} on {s}", .{ e.button, ui.describe(ui.pointer_surface) });
+                    log.debug("pointer button 0x{x} on {s}", .{ e.button, ui.describe(ui.pointer_surface) });
                     ui.onButton(e.button, e.time);
                 } else ui.onRelease(e.button);
             },
@@ -1391,7 +1392,7 @@ pub const Ui = struct {
             .workspace = if (clip) @as(?u32, 0) else null,
         };
         _ = m.addApp(app) catch |err| {
-            std.log.warn("dock: cannot keep {s}: {t}", .{ app_id, err });
+            log.warn("dock: cannot keep {s}: {t}", .{ app_id, err });
             return;
         };
     }
@@ -1599,8 +1600,8 @@ pub const Ui = struct {
         defer tmp.deinit();
         const argv = config_mod.parseCommand(tmp.allocator(), cmd) catch |err| {
             switch (err) {
-                error.OutOfMemory => std.log.err("out of memory while starting `{s}`", .{cmd}),
-                else => std.log.warn("EXEC `{s}` has no command to run", .{cmd}),
+                error.OutOfMemory => log.err("out of memory while starting `{s}`", .{cmd}),
+                else => log.warn("EXEC `{s}` has no command to run", .{cmd}),
             }
             return;
         };
@@ -1636,7 +1637,7 @@ pub const Ui = struct {
         var rows: std.ArrayList(Row) = .empty;
         for (m.items) |it| {
             if (rows.items.len >= max_rows) {
-                std.log.warn("menu `{s}`: more than {d} entries, the rest is not shown", .{ m.title, max_rows });
+                log.warn("menu `{s}`: more than {d} entries, the rest is not shown", .{ m.title, max_rows });
                 break;
             }
             const label = try ui.zdup(it.label);
@@ -1948,7 +1949,7 @@ pub const Ui = struct {
         ui.model = null;
         ui.model_gen = wm.dock_gen;
         ui.model = dock_mod.Model.init(ui.gpa(), wm.dockapps, wm.cfg.workspace_names, config_mod.max_workspaces) catch |err| blk: {
-            std.log.err("dock: cannot build the model: {t}", .{err});
+            log.err("dock: cannot build the model: {t}", .{err});
             break :blk null;
         };
         ui.dock_level = dock_mod.levelFor(wm.cfg.dock_on_top, wm.cfg.dock_auto_raise);
@@ -2051,10 +2052,10 @@ pub const Ui = struct {
         defer arena.deinit();
         const list = m.exportList(arena.allocator()) catch return;
         wm_files.saveDockState(wm.io, ui.gpa(), path, list, ui.savedState()) catch |err| {
-            std.log.warn("dock: cannot save the state to {s}: {t}", .{ path, err });
+            log.warn("dock: cannot save the state to {s}: {t}", .{ path, err });
             return;
         };
-        std.log.info("dock: state saved to {s}", .{path});
+        log.debug("dock: state saved to {s}", .{path});
     }
 
     fn prepareBar(ui: *Ui, b: *Bar, out: *types.Output, wd: *wdock.Dock, only_main: bool) void {
@@ -2082,7 +2083,7 @@ pub const Ui = struct {
         b.rect = rect;
         if (b.panel == null) {
             b.panel = Panel.create(ui, rect.w, rect.h) catch |err| {
-                std.log.err("dock surface: {t}", .{err});
+                log.err("dock surface: {t}", .{err});
                 return;
             };
             b.dirty = true;
@@ -2214,7 +2215,7 @@ pub const Ui = struct {
 
         if (!std.meta.eql(primary.reserved, ui.last_reserved)) {
             ui.last_reserved = primary.reserved;
-            std.log.info("dock: reserved space left={d} right={d} (dock_enabled={}, dock_reserve_space={}, edge={t}, level={t})", .{
+            log.debug("dock: reserved space left={d} right={d} (dock_enabled={}, dock_reserve_space={}, edge={t}, level={t})", .{
                 primary.reserved.left, primary.reserved.right,
                 cfg.dock_enabled,      cfg.dock_reserve_space,
                 cfg.dock_edge,         ui.dock_level,
@@ -2444,7 +2445,7 @@ pub const Ui = struct {
         }
 
         if (!ui.animEnsurePanel()) {
-            std.log.warn("animation: no surface for it; skipped", .{});
+            log.warn("animation: no surface for it; skipped", .{});
             ui.animCancel();
             return;
         }
@@ -2708,13 +2709,13 @@ pub const Ui = struct {
 
     fn createDesktop(ui: *Ui, out: *types.Output) void {
         const panel = Panel.create(ui, out.rect.w, out.rect.h) catch |err| {
-            std.log.err("desktop surface: {t}", .{err});
+            log.err("desktop surface: {t}", .{err});
             return;
         };
         // A fully transparent surface still takes pointer input, and the
         // wallpaper (if any) stays visible.
         const slot = panel.freeSlot() catch |err| {
-            std.log.err("desktop buffer: {t}", .{err});
+            log.err("desktop buffer: {t}", .{err});
             panel.destroy();
             return;
         };
@@ -2724,7 +2725,7 @@ pub const Ui = struct {
             panel.destroy();
             return;
         };
-        std.log.info("desktop surface {d}x{d} at {d},{d}", .{ out.rect.w, out.rect.h, out.rect.x, out.rect.y });
+        log.debug("desktop surface {d}x{d} at {d},{d}", .{ out.rect.w, out.rect.h, out.rect.x, out.rect.y });
     }
 
     fn place(p: *Panel, x: i32, y: i32) void {
@@ -2758,11 +2759,11 @@ pub const Ui = struct {
         else if (ui.wm.root_menu) |menu|
             ui.buildLevel(menu)
         else {
-            std.log.warn("root menu: none loaded", .{});
+            log.warn("root menu: none loaded", .{});
             return;
         };
         const top = built catch |err| {
-            std.log.err("root menu build failed: {t}", .{err});
+            log.err("root menu build failed: {t}", .{err});
             ui.resetMenu();
             return;
         };
@@ -2772,7 +2773,7 @@ pub const Ui = struct {
     fn openBarMenu(ui: *Ui, kind: BarMenuKind, out: *types.Output, x: i32, y: i32, slot: ?SlotRef) void {
         ui.resetMenu();
         const top = ui.buildBarMenu(kind, slot) catch |err| {
-            std.log.err("dock menu build failed: {t}", .{err});
+            log.err("dock menu build failed: {t}", .{err});
             ui.resetMenu();
             return;
         };
@@ -2790,7 +2791,7 @@ pub const Ui = struct {
         lvl.open = true;
         lvl.dirty = true;
         ui.want_focus = true;
-        std.log.info("menu `{s}` at {d},{d} ({d} rows)", .{ lvl.title, lvl.x, lvl.y, lvl.rows.len });
+        log.debug("menu `{s}` at {d},{d} ({d} rows)", .{ lvl.title, lvl.x, lvl.y, lvl.rows.len });
     }
 
     // ---- menu surfaces --------------------------------------------------------
@@ -2816,7 +2817,7 @@ pub const Ui = struct {
             if (!lvl.open) continue;
             const panel = ui.panelFor(li) orelse blk: {
                 const p = Panel.create(ui, lvl.w, lvl.h) catch |err| {
-                    std.log.err("menu surface: {t}", .{err});
+                    log.err("menu surface: {t}", .{err});
                     lvl.open = false;
                     continue;
                 };

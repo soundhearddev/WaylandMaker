@@ -33,6 +33,7 @@
 // unconditionally), otherwise river waits for us forever.
 
 const std = @import("std");
+const log = std.log.scoped(.seat);
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
@@ -143,7 +144,7 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     var ok: usize = 0;
     for (wm.cfg.binds, 0..) |bind, i| {
         const binding = mgr.getXkbBinding(seat.obj, bind.keysym, bind.mods) catch |err| {
-            std.log.err("getXkbBinding failed for `{s}`: {t}", .{ bind.command, err });
+            log.err("getXkbBinding failed for `{s}`: {t}", .{ bind.command, err });
             continue;
         };
         const node = wm.gpa.create(types.XkbBinding) catch {
@@ -161,7 +162,11 @@ pub fn setupBindings(wm: *WindowManager, seat: *Seat) void {
     }
 
     setupPointerBindings(wm, seat);
-    std.log.info("seat: {d}/{d} key bindings registered", .{ ok, wm.cfg.binds.len });
+    if (ok == wm.cfg.binds.len) {
+        log.info("{d} key bindings registered", .{ok});
+    } else {
+        log.warn("only {d} of {d} key bindings could be registered", .{ ok, wm.cfg.binds.len });
+    }
 }
 
 fn xkbListener(_: *river.XkbBindingV1, event: river.XkbBindingV1.Event, node: *types.XkbBinding) void {
@@ -172,7 +177,7 @@ fn xkbListener(_: *river.XkbBindingV1, event: river.XkbBindingV1.Event, node: *t
             // `pressed` arrives outside a manage sequence; queue it and ask
             // for one so it actually runs.
             wm.pending.append(wm.gpa, wm.commands[node.command]) catch {
-                std.log.err("out of memory: key binding {d} dropped", .{node.command});
+                log.err("out of memory: key binding {d} dropped", .{node.command});
                 return;
             };
             wm.obj.manageDirty();
@@ -189,7 +194,7 @@ fn setupPointerBindings(wm: *WindowManager, seat: *Seat) void {
     const mods = wm.cfg.mouse_mod;
     inline for (.{ .{ BTN_LEFT, types.PointerOp.move }, .{ BTN_RIGHT, types.PointerOp.resize } }) |pair| {
         const binding = seat.obj.getPointerBinding(pair[0], mods) catch |err| {
-            std.log.err("getPointerBinding failed: {t}", .{err});
+            log.err("getPointerBinding failed: {t}", .{err});
             return;
         };
         const node = wm.gpa.create(types.PointerBinding) catch {

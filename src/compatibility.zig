@@ -30,6 +30,7 @@
 // scrollable-tiling strip.
 
 const std = @import("std");
+const log = std.log.scoped(.compat);
 const config = @import("config.zig");
 
 pub const WMakerContext = struct {
@@ -67,11 +68,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, cfg: *const config.Config)
     };
 
     if (!cfg.enable_wmaker_compat) {
-        std.log.info("WindowMaker compatibility disabled", .{});
+        log.info("WindowMaker compatibility disabled", .{});
         return ctx;
     }
 
-    std.log.info("Initializing WindowMaker compatibility layer", .{});
+    log.info("Initializing WindowMaker compatibility layer", .{});
 
     // NOTE: config.Config has no `wmaker_docksapp_dir` field (yet); this
     // context field is populated by callers that have their own notion of
@@ -80,7 +81,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, cfg: *const config.Config)
     _ = &ctx.docksapp_dir;
 
     ctx.rules = loadAttributes(io, allocator) catch |err| blk: {
-        std.log.info("no WMaker attributes file loaded ({}), using defaults", .{err});
+        log.info("no WMaker attributes file loaded ({}), using defaults", .{err});
         break :blk &.{};
     };
 
@@ -97,7 +98,7 @@ pub fn loadWMakerLibrary(allocator: std.mem.Allocator, ctx: *WMakerContext) !voi
 
     // TODO: dlopen("libwmaker.so") or similar
     // For now, just scaffold the function
-    std.log.debug("WMaker library loading: placeholder", .{});
+    log.debug("WMaker library loading: placeholder", .{});
 
     // If available, initialize:
     // - Dock/Clip support
@@ -109,7 +110,7 @@ pub fn loadWMakerLibrary(allocator: std.mem.Allocator, ctx: *WMakerContext) !voi
 pub fn loadTheme(ctx: *WMakerContext, theme_path: []const u8) !void {
     if (!ctx.enabled) return;
 
-    std.log.info("Loading WMaker theme: {s}", .{theme_path});
+    log.info("Loading WMaker theme: {s}", .{theme_path});
 
     // TODO: Call WMaker C API to load theme
     // Maps WMaker themes to Wayland surface attributes
@@ -119,7 +120,7 @@ pub fn loadTheme(ctx: *WMakerContext, theme_path: []const u8) !void {
 pub fn loadConfiguration(ctx: *WMakerContext, config_path: []const u8) !void {
     if (!ctx.enabled) return;
 
-    std.log.info("Loading WMaker configuration: {s}", .{config_path});
+    log.info("Loading WMaker configuration: {s}", .{config_path});
 
     // TODO: Parse WMakerrc or WindowMaker config format
     // Integrate settings with our config system
@@ -139,7 +140,7 @@ pub const DockAppInfo = struct {
 pub fn createDockApp(ctx: *WMakerContext, app_info: DockAppInfo) !void {
     if (!ctx.enabled) return;
 
-    std.log.info("Creating DockApp: {s} at ({}, {})", .{ app_info.name, app_info.x, app_info.y });
+    log.debug("Creating DockApp: {s} at ({}, {})", .{ app_info.name, app_info.x, app_info.y });
 
     // TODO: Draw the actual dock tile for this app (Phase 5, docs/TODO.md).
     //
@@ -284,7 +285,7 @@ fn loadAttributes(io: std.Io, allocator: std.mem.Allocator) ![]AttributeRule {
         current_id = null;
     }
 
-    std.log.info("loaded {d} WMaker attribute rule(s) from: {s}", .{ rules.items.len, path });
+    log.info("loaded {d} WMaker attribute rule(s) from: {s}", .{ rules.items.len, path });
     return try rules.toOwnedSlice(allocator);
 }
 
@@ -296,7 +297,7 @@ pub const ClipboardData = struct {
 pub fn copyToClipboard(ctx: *WMakerContext, data: ClipboardData) !void {
     if (!ctx.enabled) return;
 
-    std.log.debug("WMaker clipboard operation", .{});
+    log.debug("WMaker clipboard operation", .{});
 
     // TODO: Integrate with Wayland clipboard/primary selection
     _ = data;
@@ -325,7 +326,7 @@ pub fn registerHook(hook_fn: anytype, comptime hook_field: []const u8) !void {
         @compileError("unknown hook `" ++ hook_field ++ "`; see `Hooks` for the available ones");
     }
     @field(hooks, hook_field) = hook_fn;
-    std.log.debug("Registered hook: {s}", .{hook_field});
+    log.debug("Registered hook: {s}", .{hook_field});
 }
 
 test "registerHook stores the function in the matching field" {

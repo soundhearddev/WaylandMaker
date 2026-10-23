@@ -7,6 +7,7 @@
 // bar never overlaps the layout.
 
 const std = @import("std");
+const log = std.log.scoped(.output);
 const wayland = @import("wayland");
 const river = wayland.client.river;
 
@@ -42,7 +43,7 @@ pub fn create(wm: *WindowManager, obj: *river.OutputV1) !*Output {
 pub fn bindLayerShell(wm: *WindowManager, ls: *river.LayerShellV1, out: *Output) void {
     if (out.layer_shell != null) return;
     const lso = ls.getOutput(out.obj) catch |err| {
-        std.log.err("layer_shell.get_output failed: {t}", .{err});
+        log.err("layer_shell.get_output failed: {t}", .{err});
         return;
     };
     out.layer_shell = lso;

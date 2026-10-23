@@ -35,6 +35,7 @@
 // `workspace` (1-based) and then only shows up there.
 
 const std = @import("std");
+const log = std.log.scoped(.dockapp);
 const plist = @import("plist.zig");
 const config = @import("config.zig");
 
@@ -659,7 +660,7 @@ pub fn runAutoLaunch(
     for (list.apps) |app| {
         if (!app.autolaunch) continue;
         if (app.command.len == 0) continue;
-        std.log.info("dockapp autolaunch: {s}", .{app.name});
+        log.info("dockapp autolaunch: {s}", .{app.name});
         spawn(app.command);
     }
 }

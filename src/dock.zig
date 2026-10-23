@@ -28,6 +28,7 @@
 // pointing into a freed arena.
 
 const std = @import("std");
+const log = std.log.scoped(.dock);
 const gfx = @import("gfx.zig");
 const config = @import("config.zig");
 const dockapp = @import("dockapp.zig");
@@ -59,13 +60,12 @@ pub fn setSize(size: i32) void {
     icon_size = @divTrunc(size * 3, 4);
     // The Dock grid in wm_dock.zig must use the same cell size as the drawing.
     wdock.icon_size = size;
-    std.log.info("dock: tile size {d} px (icon {d} px)", .{ tile, icon_size });
+    log.debug("tile size {d} px (icon {d} px)", .{ tile, icon_size });
 }
 /// Edge length of the workspace arrow buttons in the Clip's corners.
 pub const arrow: i32 = 16;
 
 const font_logo: [:0]const u8 = "Sans Bold 22";
-const font_letter: [:0]const u8 = "Sans Bold 24";
 const font_number: [:0]const u8 = "Sans Bold 20";
 
 const col_clear: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
@@ -235,7 +235,7 @@ pub const Model = struct {
 
         for (list.apps) |app| {
             _ = m.insert(app) catch |err| {
-                std.log.warn("dock: entry `{s}` dropped: {t}", .{ app.name, err });
+                log.warn("entry `{s}` dropped: {t}", .{ app.name, err });
             };
         }
         return m;
@@ -1038,7 +1038,7 @@ fn drawOmnipresent(cv: *gfx.Canvas, x: i32, y: i32) void {
     cv.fillPolygon(&.{ .{ fx - 8, fy + 1 }, .{ fx - 1, fy + 1 }, .{ fx - 1, fy + 8 } }, col_light);
 }
 
-fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, font: [:0]const u8, col: gfx.Color) void {
+pub fn drawCentered(cv: *gfx.Canvas, text: [:0]const u8, x: i32, y: i32, w: i32, font: [:0]const u8, col: gfx.Color) void {
     const tw = gfx.measureText(text, font).w;
     cv.drawText(text, x + @divTrunc(w - tw, 2), y, font, col);
 }
