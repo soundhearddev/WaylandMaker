@@ -35,6 +35,9 @@
 //       old code left links `undefined`, which was undefined behaviour.
 
 const std = @import("std");
+// `wayland` is only used for the intrusive list types (wl.list). Everything
+// that belongs to the compositor connection comes from `backend`, see
+// backend_river.zig (river) and src_wlr/backend_wlr.zig (wlroots).
 const wayland = @import("wayland");
 const config = @import("config.zig");
 const animation = @import("animation.zig");
@@ -42,7 +45,7 @@ const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
 const monitors = @import("monitors.zig");
-const river = wayland.client.river;
+const backend = @import("backend");
 const wl = wayland.client.wl;
 
 pub const Rect = struct {
@@ -85,8 +88,8 @@ pub const Restore = enum { tiled, floating };
 pub const Role = enum { normal, dockapp };
 
 pub const Window = struct {
-    obj: *river.WindowV1,
-    node: *river.NodeV1,
+    obj: *backend.Window,
+    node: *backend.Node,
 
     role: Role = .normal,
 
@@ -97,7 +100,7 @@ pub const Window = struct {
     app_id: ?[]u8 = null,
     title: ?[]u8 = null,
     /// Set when the client declared a parent (dialog, file picker...).
-    parent: ?*river.WindowV1 = null,
+    parent: ?*backend.Window = null,
 
     // ---- lifecycle --------------------------------------------------------
     /// Not yet placed on a workspace (first manage_start places it).
@@ -338,13 +341,13 @@ pub const Workspace = struct {
 
 /// A bound `wl_output`: where a monitor's name, make and model come from.
 pub const WlOutput = struct {
-    obj: *wl.Output,
+    obj: *backend.WlOutput,
     info: monitors.Info = .{},
 };
 
 pub const Output = struct {
-    obj: *river.OutputV1,
-    layer_shell: ?*river.LayerShellOutputV1 = null,
+    obj: *backend.Output,
+    layer_shell: ?*backend.LayerShellOutput = null,
     link: wl.list.Link = .{ .prev = null, .next = null },
     removed: bool = false,
 
@@ -435,21 +438,21 @@ pub const PointerOp = enum { none, move, resize };
 pub const OpState = enum { idle, requested, running, ending };
 
 pub const XkbBinding = struct {
-    obj: *river.XkbBindingV1,
+    obj: *backend.XkbBinding,
     link: wl.list.Link = .{ .prev = null, .next = null },
     /// Index into wm.commands.
     command: usize,
 };
 
 pub const PointerBinding = struct {
-    obj: *river.PointerBindingV1,
+    obj: *backend.PointerBinding,
     link: wl.list.Link = .{ .prev = null, .next = null },
     seat: *Seat,
     op: PointerOp,
 };
 
 pub const Seat = struct {
-    obj: *river.SeatV1,
+    obj: *backend.Seat,
     link: wl.list.Link = .{ .prev = null, .next = null },
     removed: bool = false,
     bindings_ready: bool = false,
@@ -495,10 +498,10 @@ pub const WindowManager = struct {
     io: std.Io,
     cfg: config.Config,
 
-    obj: *river.WindowManagerV1,
+    obj: *backend.WindowManager,
     obj_version: u32,
-    xkb_bindings: ?*river.XkbBindingsV1 = null,
-    layer_shell: ?*river.LayerShellV1 = null,
+    xkb_bindings: ?*backend.XkbBindings = null,
+    layer_shell: ?*backend.LayerShell = null,
 
     ui: ?*@import("ui.zig").Ui = null,
     pending_ui: ?UiAction = null,

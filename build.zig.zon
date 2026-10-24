@@ -20,6 +20,14 @@
             .url = "git+https://github.com/natecraddock/ziglua?ref=0.7.0#9ae39fa50b1ab8427d35f963216116d7bff1e584",
             .hash = "zlua-0.1.0-hGRpC1mUBQCNQf4CnmRTM4I7gxE3YpCvZ-p2EarlcyER",
         },
+        .wlroots = .{
+            .url = "https://codeberg.org/ifreund/zig-wlroots/archive/v0.20.1.tar.gz",
+            .hash = "wlroots-0.20.1-jmOlcqNVBAB3uB5oqBTzpRlwu-FmMyyZMVAWCe5kmcSt",
+        },
+        .pixman = .{
+            .url = "https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz",
+            .hash = "pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX",
+        },
     },
 
     .paths = .{

@@ -61,12 +61,11 @@
 
 const std = @import("std");
 const log = std.log.scoped(.config);
-const wayland = @import("wayland");
 const xkb = @import("xkbcommon");
 const animation = @import("animation.zig");
-const river = wayland.client.river;
+const backend = @import("backend");
 
-pub const Modifiers = river.SeatV1.Modifiers;
+pub const Modifiers = backend.Modifiers;
 
 pub const Bind = struct {
     mods: Modifiers,
@@ -2808,8 +2807,7 @@ test "monitor() and monitor_profile() fill the rule and profile lists" {
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    try parseText(arena.allocator(),
-        &cfg,
+    try parseText(arena.allocator(), &cfg,
         \\monitor("DP-1", { primary = true, workspaces = 6, start_workspace = 2 })
         \\monitor("eDP-1", { enabled = false, restore_windows = false, on_connect = "notify-send hi", on_disconnect = {"a", "b"} })
         \\monitor_profile{ name = "docked", needs = {"eDP-1", "DP-1"}, exact = true, run = "kanshictl switch docked" }
@@ -2839,8 +2837,7 @@ test "monitor(): typos and wrong values are warnings and add no rule" {
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
     defer cfg.deinit();
-    try parseText(arena.allocator(),
-        &cfg,
+    try parseText(arena.allocator(), &cfg,
         \\monitor("DP-1", { primray = true })
         \\monitor("DP-2", { workspaces = 0 })
         \\monitor("DP-3", { primary = "yes" })

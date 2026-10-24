@@ -17,6 +17,7 @@ const config = @import("config.zig");
 const layout = @import("layout.zig");
 const workspace = @import("workspace.zig");
 const proc = @import("process.zig");
+const backend = @import("backend");
 
 const Command = types.Command;
 const WindowManager = types.WindowManager;
@@ -44,7 +45,7 @@ pub fn requestFocusFollow(wm: *WindowManager, win: *Window, follow: bool) void {
     wm.focus_request = win;
     if (follow) wm.follow_request = true;
     wm.focus_by_pointer = true;
-    wm.obj.manageDirty();
+    backend.manageDirty(wm.obj);
 }
 
 /// What `run("workspace 2")`, `spawn("foot")` and `shell("...")` do inside a
@@ -211,7 +212,7 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .lua => |ref| config.callLua(cfg, ref),
         .exit => wm.quit = true,
 
-        .close => if (focusedWindow(wm)) |w| w.obj.close(),
+        .close => if (focusedWindow(wm)) |w| backend.closeWindow(w.obj),
 
         // ---- minimize / hide (Window Maker's miniaturize, HIDE, HIDE_OTHERS) ---
         .minimize => if (focusedWindow(wm)) |w| {
