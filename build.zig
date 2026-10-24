@@ -333,15 +333,40 @@ pub fn build(b: *std.Build) void {
     );
     wlprefs_test_step.dependOn(&b.addRunArtifact(wlprefs_tests).step);
 
-    // ---- wlroots compositor experiment (src_wlr/) ------------------------
+    // ---- wlroots backend (src_wlr) ----------------------------------------
     //
-    //   zig build wlr-probe          # compositor, drives the model
-    //   zig build wlr-model-check    # model compiles without river
+    // wmaker-wl as its own compositor (docs/TODO wlroots.md). Not part of the
+    // default install while the river backend is the one in use:
     //
-    // Run nested inside the current session:
-    //   WLR_BACKENDS=wayland ./zig-out/bin/wlr-probe
+    //   zig build wlr               wmaker-wlr  -> zig-out/bin
+    //   zig build wlr-probe         wlr-probe (can wlroots be used at all?)
+    //   zig build wlr-model-check   model + keys + manage pass, no wlroots needed
+    //   zig build run-wlr           run it (nested, if a session is already up)
+    //
+    // Needs wlroots 0.20 (pkg-config: wlroots-0.20).
 
-    addWlr(b, target, optimize, use_llvm, xkbcommon_module, zlua_module);
+    const wlr = wlrModules(b, target, optimize, xkbcommon_module, zlua_module);
+
+    const wlr_exe = addWlrExecutable(b, wlr, target, optimize, use_llvm, "wmaker-wlr", "src_wlr/main.zig");
+    const wlr_step = b.step("wlr", "Build the wlroots compositor (wmaker-wlr) into zig-out/bin");
+    wlr_step.dependOn(&b.addInstallArtifact(wlr_exe, .{}).step);
+
+    const wlr_probe = addWlrExecutable(b, wlr, target, optimize, use_llvm, "wlr-probe", "src_wlr/probe.zig");
+    const wlr_probe_step = b.step("wlr-probe", "Build the wlroots probe into zig-out/bin");
+    wlr_probe_step.dependOn(&b.addInstallArtifact(wlr_probe, .{}).step);
+
+    const run_wlr = b.addRunArtifact(wlr_exe);
+    if (b.args) |args| run_wlr.addArgs(args);
+    const run_wlr_step = b.step("run-wlr", "Run wmaker-wlr (nested when WAYLAND_DISPLAY or DISPLAY is set)");
+    run_wlr_step.dependOn(&run_wlr.step);
+
+    // The model against the wlroots handles, and the parts of the backend
+    // that need no compositor library. Runs anywhere.
+    const wlr_check_step = b.step(
+        "wlr-model-check",
+        "Compile the data model with the wlroots backend (no river types) and run its tests",
+    );
+    wlr_check_step.dependOn(addWlrModelCheck(b, wlr, target, optimize, use_llvm));
 
     // ---- run ------------------------------------------------------------
 
@@ -433,47 +458,75 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(examples_step);
 }
 
-// ---- wlroots experiment ----------------------------------------------------
+// ---- wlroots backend ---------------------------------------------------------
 //
-// Everything lives in src_wlr/. Follows zig-wlroots' tinywl/build.zig.
-// One scanner/`wayland` module is shared by wlroots, the model and the probe.
-// The model (src/model.zig) gets its compositor handles from `backend`
-// = src_wlr/backend_wlr.zig, so no river type is involved.
+// One `wayland` module (one scanner) for everything the compositor is made of:
+// the data model needs only its `wl.list` types, wlroots needs the server
+// protocols (xdg-shell, ...), and the compositor both. A module can exist only
+// once per compilation, so they must share it. It is separate from the river
+// build's module, which carries the river client protocols.
 
-fn addWlr(
+const WlrModules = struct {
+    wayland: *std.Build.Module,
+    xkbcommon: *std.Build.Module,
+    wlroots: *std.Build.Module,
+    pixman: *std.Build.Module,
+    /// src_wlr/backend_wlr.zig: the handle types the model is built with.
+    backend: *std.Build.Module,
+    /// src/model.zig: the data model, no river and no wlroots.
+    model: *std.Build.Module,
+};
+
+fn wlrModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    use_llvm: bool,
     xkbcommon: *std.Build.Module,
     zlua: *std.Build.Module,
-) void {
+) WlrModules {
     const scanner = Scanner.create(b, .{});
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
     scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
     scanner.addSystemProtocol("staging/color-management/color-management-v1.xml");
+    scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
+    scanner.addSystemProtocol("unstable/xdg-decoration/xdg-decoration-unstable-v1.xml");
+    scanner.addSystemProtocol("unstable/primary-selection/primary-selection-unstable-v1.xml");
 
-    // These versions only control Zig code generation.
-    scanner.generate("wl_compositor", 4);
+    // These versions only control Zig code generation. Too old a version can
+    // only make a compile fail, never a client misbehave.
+    scanner.generate("wl_compositor", 6);
     scanner.generate("wl_subcompositor", 1);
     scanner.generate("wl_shm", 1);
     scanner.generate("wl_output", 4);
     scanner.generate("wl_seat", 7);
     scanner.generate("wl_data_device_manager", 3);
-    scanner.generate("xdg_wm_base", 2);
+    scanner.generate("xdg_wm_base", 6);
+    scanner.generate("zxdg_decoration_manager_v1", 1);
+    scanner.generate("zwp_primary_selection_device_manager_v1", 1);
     scanner.generate("zwp_tablet_manager_v2", 1);
-    scanner.generate("wp_color_manager_v1", 2);
+    scanner.generate("wp_color_manager_v1", b.option(
+        u32,
+        "color-manager-version",
+        "wp_color_manager_v1 version to generate (2 needs wayland-protocols >= 1.44; default 2)",
+    ) orelse 2);
+    scanner.generate("wp_cursor_shape_manager_v1", 2);
 
-    const wayland = b.createModule(.{ .root_source_file = scanner.result });
+    const wayland = b.createModule(.{
+        .root_source_file = scanner.result,
+        .target = target,
+        .optimize = optimize,
+    });
+
     const pixman = b.dependency("pixman", .{}).module("pixman");
     const wlroots = b.dependency("wlroots", .{}).module("wlroots");
-
     wlroots.addImport("wayland", wayland);
     wlroots.addImport("xkbcommon", xkbcommon);
     wlroots.addImport("pixman", pixman);
 
-    // The dependency module has no target of its own; without this
-    // linkSystemLibrary panics.
+    // The dependency module is created without a target. Without this line
+    // linkSystemLibrary panics ("requires the Module to be created with a
+    // known 'target' field"), and @cImport would not see the include path
+    // pkg-config reports for wlroots.
     wlroots.resolved_target = target;
     wlroots.linkSystemLibrary("wlroots-0.20", .{});
 
@@ -495,34 +548,63 @@ fn addWlr(
             .{ .name = "backend", .module = backend },
         },
     });
+    // config.zig calls xkb_keysym_from_name / xkb_utf32_to_keysym.
+    model.linkSystemLibrary("xkbcommon", .{});
 
-    // ---- wlr-probe ----
-    const probe = b.addExecutable(.{
-        .name = "wlr-probe",
+    return .{
+        .wayland = wayland,
+        .xkbcommon = xkbcommon,
+        .wlroots = wlroots,
+        .pixman = pixman,
+        .backend = backend,
+        .model = model,
+    };
+}
+
+fn addWlrExecutable(
+    b: *std.Build,
+    wlr: WlrModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_llvm: bool,
+    name: []const u8,
+    root: []const u8,
+) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{
+        .name = name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src_wlr/probe.zig"),
+            .root_source_file = b.path(root),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "wayland", .module = wayland },
-                .{ .name = "xkbcommon", .module = xkbcommon },
-                .{ .name = "wlroots", .module = wlroots },
-                .{ .name = "model", .module = model },
-                .{ .name = "backend", .module = backend },
+                .{ .name = "model", .module = wlr.model },
+                .{ .name = "backend", .module = wlr.backend },
+                .{ .name = "wayland", .module = wlr.wayland },
+                .{ .name = "xkbcommon", .module = wlr.xkbcommon },
+                .{ .name = "wlroots", .module = wlr.wlroots },
             },
         }),
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
-    probe.root_module.linkSystemLibrary("wayland-server", .{});
-    probe.root_module.linkSystemLibrary("xkbcommon", .{});
-    probe.root_module.linkSystemLibrary("pixman-1", .{});
+    exe.root_module.linkSystemLibrary("wayland-server", .{});
+    exe.root_module.linkSystemLibrary("xkbcommon", .{});
+    exe.root_module.linkSystemLibrary("pixman-1", .{});
+    return exe;
+}
 
-    const probe_step = b.step("wlr-probe", "Build the wlroots compositor into zig-out/bin");
-    probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
+// The tests of the backend's pure parts (key matching, manage pass) with the
+// model they run on. Needs the scanner's `wl.list` types and libxkbcommon,
+// but no wlroots and no display.
 
-    // ---- wlr-model-check ----
+fn addWlrModelCheck(
+    b: *std.Build,
+    wlr: WlrModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    use_llvm: bool,
+) *std.Build.Step {
     const check = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src_wlr/model_check.zig"),
@@ -530,18 +612,14 @@ fn addWlr(
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "model", .module = model },
+                .{ .name = "model", .module = wlr.model },
+                .{ .name = "backend", .module = wlr.backend },
+                .{ .name = "xkbcommon", .module = wlr.xkbcommon },
             },
         }),
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
-    // config.zig calls xkb_keysym_from_name / xkb_utf32_to_keysym.
     check.root_module.linkSystemLibrary("xkbcommon", .{});
-
-    const check_step = b.step(
-        "wlr-model-check",
-        "Compile the data model with the wlroots backend (no river types)",
-    );
-    check_step.dependOn(&b.addRunArtifact(check).step);
+    return &b.addRunArtifact(check).step;
 }

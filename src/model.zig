@@ -19,3 +19,7 @@ pub const wm_attr = @import("wm_attr.zig");
 pub const wm_menu = @import("wm_menu.zig");
 pub const plist = @import("plist.zig");
 pub const proc = @import("process.zig");
+pub const wm_files = @import("wm_files.zig");
+pub const log = @import("log.zig");
+pub const trace = @import("trace.zig");
+pub const version = @import("version.zig");

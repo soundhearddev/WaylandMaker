@@ -40,9 +40,9 @@ river use outside the model (this is what the wlroots backend replaces):
 
 - [x] List every `river_*` use per file (table above)
 - [x] Handle types behind `backend` (types, config, action)
-- [ ] `zig build` and `zig build test` still pass with the `backend` module (river build unchanged)
-- [ ] `zig build wlr-model-check` passes; fix whatever it still finds in the model
-- [ ] Add `wm_dock.zig`, `dock.zig` (logic part), `wm_files.zig` to `model.zig` and the check
+- [x] `zig build` and `zig build test` still pass with the `backend` module (river build unchanged)
+- [x] `zig build wlr-model-check` passes; fix whatever it still finds in the model
+- [ ] Add `wm_dock.zig`, `dock.zig` (logic part) to `model.zig` and the check (`wm_files`, `log`, `trace`, `version` are in)
 - [ ] Define the real backend interface (window, output, seat, shell surface) from the `window/seat/output` call sites
 - [ ] Move `applyManage` / `applyRender` logic behind it
 - [ ] `ui.zig`: separate drawing (cairo/pango, stays) from surface creation and input (changes)
@@ -50,38 +50,39 @@ river use outside the model (this is what the wlroots backend replaces):
 
 ## 2. Minimal compositor (milestone A: can type in a terminal)
 
-All of this lives in `src_wlr/probe.zig` (tinywl + glue to the model). `src/` is not touched.
+Status: written in `src_wlr/`, **compiled and linked against the zig-wlroots 0.20.1 bindings, not yet run**
+(no wlroots 0.20 in the build sandbox). All 89 `wlr_*` symbols it uses exist in wlroots' headers. First real test:
+`zig build wlr && WLR_BACKENDS=wayland ./zig-out/bin/wmaker-wlr` inside river, then from a TTY.
+Build needs wayland-protocols >= 1.44 (or `-Dcolor-manager-version=1`).
 
-- [x] `wl_server`, backend, renderer, allocator, scene, output layout (tinywl)
-- [x] `wl_compositor`, `wl_subcompositor`, `wl_data_device_manager` (tinywl; `wl_shm` comes with the renderer)
-- [x] xdg-shell: toplevels, popups (tinywl)
-- [x] Seat: keyboard (xkb), pointer, cursor, xcursor theme (tinywl)
-- [x] Model output per wlr output (`Output.addModel`), workspaces from `workspace_count`
-- [x] Model window per mapped toplevel (`addWindow` / `removeWindow`), `placeTiled`
-- [x] Focus: manage pass applies `wm.focus_request` (`Server.manage`)
-- [x] Keybindings from config.lua: level-0 keysym + modifiers -> `wm.commands`
-- [x] Spawn with our `WAYLAND_DISPLAY`; `close` via `backend.close_fn`
-- [x] Clean exit: `exit` command sets `wm.quit`; `Alt+Esc` stays as emergency exit
-- [x] `spawn_at_startup` from config.lua
-- [ ] Autostart script (`enable_autostart`)
-- [ ] cursor-shape-v1
-- [ ] xdg `request_fullscreen` / `request_maximize` / `request_minimize` (map to `workspace.setFullscreen` etc., and always answer with a configure)
-- [ ] Alt+drag move/resize (`mouse_mod`), also for tiled windows
-- [ ] `SIGHUP` reload (`reload_config`)
-- [x] SIGCHLD ignored so spawned children do not stay zombies
-- [ ] VT switching, session, libinput devices on a real TTY
-- [ ] Outputs: mode changes, remove (windows move to another output), `wlr_output_layout` changes -> `Output.rect`
+Files: `main` (entry) `cli` `boot` (config/env, no wlroots) `server` (globals, loop, `Sink`) `output` `view` (xdg toplevel, popup)
+`keyboard` `cursor` `keys` (bind matching, no wlroots) `manage` (the manage pass, no wlroots) `probe`.
+`keys`, `manage`, `cli` have tests: `zig build wlr-model-check`.
 
-Testing nested: `Alt` counts as `Super` (`alt_as_super` in probe.zig) because the parent compositor grabs Super.
+- [x] `wl_server`, backend, renderer, allocator, scene, output layout
+- [x] Outputs: add, remove, mode (preferred), `wlr_output_layout`, model `Output` rect kept in sync
+- [x] `wl_compositor`, `wl_subcompositor`, `wl_shm` (via renderer), `wl_data_device_manager`, primary selection
+- [x] xdg-shell: toplevels, popups (unconstrained to the monitor), configure/ack cycle, xdg-decoration (`prefer_no_csd`)
+- [x] Seat: keyboard (xkb, env layout), pointer, cursor, xcursor theme, cursor-shape-v1
+- [x] Focus: keyboard focus follows the model (`seat.focused`, decided in `manage.resolveFocus`)
+- [x] Keybindings dispatched from the existing Lua config (`keys.find` -> `wm.commands` -> `action.run`)
+- [x] Clean exit (`exit` command), SIGINT/SIGTERM, `SIGHUP` reload
+- [x] VT switching (`XF86Switch_VT_n`), session via `Backend.autocreate`, libinput devices (keyboard, pointer)
+- [ ] Run it: nested, then from a TTY (open until someone has wlroots 0.20)
+- [ ] libinput settings (tap, natural scroll): no option in config.lua yet
+- [ ] Only keyboard and pointer are used; touch, tablet, switches are ignored
+
+Also done beyond the list: window placement, tiling, borders, fullscreen requests and multi-output migration
+already work through the model (`manage.zig`), so milestone B starts from a working base.
+Known gaps: DockApps (`dockapp:<n>`) are treated as normal windows until `dockhost` is split; no animations;
+`request_move/resize` are ignored; `monitor()` rules/profiles are not applied; no layer-shell, so no panels yet.
 
 ## 3. Tiling parity (milestone B: replaces river for daily layout)
 
-- [x] Feed `layout.zig` results into scene nodes (position, size); borders still missing
-- [ ] Borders (`win.borderWidth`, active/inactive colours) as scene rects
-- [ ] Check column strip scrolling, floating, fullscreen, maximize (model does it, nothing is applied for fullscreen/floating yet)
-- [x] Workspaces: windows of inactive workspaces are hidden; minimized windows hidden
-- [ ] Omnipresent windows, minimize/restore check
-- [x] Move/resize of floating windows by client request (`float_rect` in the model, only the dragged window is re-applied)
+- [ ] Feed `layout.zig` results into scene nodes (position, size, borders)
+- [ ] Column strip scrolling, floating, fullscreen, maximize
+- [ ] Workspaces, omnipresent windows, minimize/restore
+- [ ] Move/resize with pointer (state machine `idle -> requested -> running -> ending`)
 - [ ] Client requests: move, resize, maximize, fullscreen, minimize, `set_app_id`, `set_title`
 - [ ] `WMWindowAttributes` per `app_id` still applied on first placement
 - [ ] Animations driven directly (no manage/render roundtrip)
