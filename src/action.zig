@@ -6,7 +6,7 @@
 //
 // Actions edit the model (workspace.zig) and record what they want in
 // `focus_request`; main.zig then lays out, proposes dimensions and sends
-// the focus in that order. Actions never talk to river directly, except
+// the focus in that order. Actions never talk to the compositor directly, except
 // for `close`, which is a plain request that is legal in manage.
 
 const std = @import("std");
@@ -17,7 +17,7 @@ const config = @import("config.zig");
 const layout = @import("layout.zig");
 const workspace = @import("workspace.zig");
 const proc = @import("process.zig");
-const backend = @import("backend");
+const backend = @import("backend.zig");
 
 const Command = types.Command;
 const WindowManager = types.WindowManager;

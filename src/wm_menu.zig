@@ -697,7 +697,7 @@ test "which builtins are implemented" {
     try std.testing.expect(Builtin.shutdown.isImplemented());
     try std.testing.expect(Builtin.show_all.isImplemented());
     try std.testing.expect(Builtin.hide_others.isImplemented());
-    // Still not: a restart would cut the connection to river (docs/TODO.md).
+    // Still not: a restart would end the session (docs/TODO.md).
     try std.testing.expect(!Builtin.restart.isImplemented());
     try std.testing.expect(!Builtin.save_session.isImplemented());
 }

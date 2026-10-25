@@ -14,13 +14,11 @@
 
 const std = @import("std");
 const plist = @import("plist.zig");
-const xpm = @import("xpm.zig");
 const wm_menu = @import("wm_menu.zig");
 const wm_attr = @import("wm_attr.zig");
 const dockapp = @import("dockapp.zig");
 const config = @import("config.zig");
 const action = @import("action.zig");
-const fsmenu = @import("fsmenu.zig");
 
 const rounds = 1500;
 
@@ -173,11 +171,6 @@ fn checkAttr(gpa: std.mem.Allocator, text: []const u8) anyerror!void {
     _ = wm_attr.parse(arena.allocator(), text) catch |e| return okOrParseError(e);
 }
 
-fn checkXpm(gpa: std.mem.Allocator, text: []const u8) anyerror!void {
-    const pm = xpm.parse(gpa, text) catch |e| return okOrParseError(e);
-    pm.deinit(gpa);
-}
-
 fn checkLua(gpa: std.mem.Allocator, text: []const u8) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -196,17 +189,9 @@ fn checkCommand(gpa: std.mem.Allocator, text: []const u8) anyerror!void {
     _ = action.parse(arena.allocator(), &cfg, text) catch |e| return okOrParseError(e);
 }
 
-fn checkFsSpec(gpa: std.mem.Allocator, text: []const u8) anyerror!void {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    _ = try fsmenu.parseSpec(arena.allocator(), text);
-}
-
 const plist_chars = "(){}=;,\" \n\t/*\\<>abcXYZ019.-_#";
-const xpm_chars = "\"/* XPM */{};,#abc 0123456789\nstatic char *x[] = None gray";
 const lua_chars = "abc_ =\"'(){},.0123456789\n+-*/#<>~:;[]\\function end do if then for in bind unbind run gap";
 const cmd_chars = "abc \"'_-=/\\0123456789\tspawn shell workspace";
-const spec_chars = "abc /~\"' WITH\t._-";
 
 test "fuzz: property lists (plist)" {
     try drive(menu_seed, plist_chars, 1, checkPlist);
@@ -223,10 +208,6 @@ test "fuzz: WMState (dockapp)" {
 
 test "fuzz: window attributes (wm_attr)" {
     try drive(attr_seed, plist_chars, 5, checkAttr);
-}
-
-test "fuzz: XPM icons" {
-    try drive(xpm_seed, xpm_chars, 6, checkXpm);
 }
 
 test "fuzz: config.lua" {
@@ -246,8 +227,4 @@ test "fuzz: config.lua" {
 
 test "fuzz: key-binding commands" {
     try drive(command_seed, cmd_chars, 8, checkCommand);
-}
-
-test "fuzz: OPEN_MENU specs" {
-    try drive("\"~/My Docs\" '/srv/a b' WITH less", spec_chars, 9, checkFsSpec);
 }

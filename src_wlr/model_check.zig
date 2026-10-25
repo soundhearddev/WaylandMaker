@@ -23,4 +23,7 @@ test {
     _ = @import("keys.zig");
     _ = @import("manage.zig");
     _ = @import("cli.zig");
+    _ = @import("pointer_op.zig");
+    std.testing.refAllDecls(model.motion);
+    _ = model.motion;
 }

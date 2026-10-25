@@ -36,8 +36,7 @@
 
 const std = @import("std");
 // `wayland` is only used for the intrusive list types (wl.list). Everything
-// that belongs to the compositor connection comes from `backend`, see
-// backend_river.zig (river) and src_wlr/backend_wlr.zig (wlroots).
+// that belongs to the compositor comes from `backend`, see backend.zig.
 const wayland = @import("wayland");
 const config = @import("config.zig");
 const animation = @import("animation.zig");
@@ -45,7 +44,7 @@ const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
 const monitors = @import("monitors.zig");
-const backend = @import("backend");
+const backend = @import("backend.zig");
 const wl = wayland.client.wl;
 
 pub const Rect = struct {
@@ -103,11 +102,10 @@ pub const Window = struct {
     parent: ?*backend.Window = null,
 
     // ---- lifecycle --------------------------------------------------------
-    /// Not yet placed on a workspace (first manage_start places it).
+    /// Not yet placed on a workspace (the next manage pass places it).
     new: bool = true,
-    /// Has received a `dimensions` event, i.e. has content. Informational
-    /// only: a new window gets its first proposal BEFORE this is true (river
-    /// sends `dimensions` in reply to it), so nothing may wait on this.
+    /// The client has reported a size, i.e. has content. Informational only:
+    /// a new window is configured BEFORE this is true, so nothing may wait on it.
     ready: bool = false,
     closed: bool = false,
 
@@ -171,7 +169,7 @@ pub const Window = struct {
     max_w: i32 = 0,
     max_h: i32 = 0,
 
-    // ---- what we last told river (so we only send changes) ------------------
+    // ---- what we last told the client (so we only send changes) ------------------
     sent_w: i32 = -1,
     sent_h: i32 = -1,
     sent_tiled: ?bool = null,
@@ -339,15 +337,8 @@ pub const Workspace = struct {
     }
 };
 
-/// A bound `wl_output`: where a monitor's name, make and model come from.
-pub const WlOutput = struct {
-    obj: *backend.WlOutput,
-    info: monitors.Info = .{},
-};
-
 pub const Output = struct {
     obj: *backend.Output,
-    layer_shell: ?*backend.LayerShellOutput = null,
     link: wl.list.Link = .{ .prev = null, .next = null },
     removed: bool = false,
 
@@ -356,9 +347,6 @@ pub const Output = struct {
     /// has been seen; `mon.key()` is the identity used to find its rule and
     /// to give windows back after a reconnect.
     mon: monitors.Info = .{},
-    /// Global name of the `wl_output` river says belongs to this output
-    /// (0: not told yet).
-    wl_global: u32 = 0,
     /// A `monitor()` rule switched it off: it is ignored like a screen that is
     /// not there (see `liveOutput`), but stays known.
     disabled: bool = false,
@@ -420,45 +408,25 @@ pub const Output = struct {
 
 pub const PointerOp = enum { none, move, resize };
 
-/// Where the interactive pointer operation is in river's protocol.
+/// Where the interactive pointer operation is (pointer_op.zig).
 ///
-///   idle ──beginOp──▶ requested ──op_start_pointer──▶ running
-///     ▲                  │                               │
-///     │                  │ button up before start        │ op_release
-///     │                  ▼                               ▼
-///     └─────────── (cancelled, no op_end needed)      ending ──op_end──▶ idle
+///   idle ──begin──▶ requested ──startPending──▶ running
+///     ▲                │                            │
+///     │                │ button up before start     │ button up (or the window died)
+///     │                ▼                            ▼
+///     └──────── (cancelled)                      ending ──finish──▶ idle
 ///
-/// `requested`: we saw the binding press but have not sent op_start_pointer
-///   yet (that request is only legal inside a manage sequence). river knows
-///   nothing about the operation, so it will never send op_release.
-/// `running`: river is in cursor mode `op` and sends op_delta on every
-///   motion. Pointer input is NOT delivered to clients until we op_end().
-/// `ending`: op_release arrived (or the window died); op_end() goes out in
-///   the next manage sequence.
+/// `requested`: the binding press was seen; the next manage pass starts it.
+/// `running`: motion only changes `op_dx`/`op_dy`. Pointer input is NOT
+///   delivered to clients.
+/// `ending`: the button went up (or the window died); the pass that sees it
+///   applies the last delta and finishes the operation.
 pub const OpState = enum { idle, requested, running, ending };
-
-pub const XkbBinding = struct {
-    obj: *backend.XkbBinding,
-    link: wl.list.Link = .{ .prev = null, .next = null },
-    /// Index into wm.commands.
-    command: usize,
-};
-
-pub const PointerBinding = struct {
-    obj: *backend.PointerBinding,
-    link: wl.list.Link = .{ .prev = null, .next = null },
-    seat: *Seat,
-    op: PointerOp,
-};
 
 pub const Seat = struct {
     obj: *backend.Seat,
     link: wl.list.Link = .{ .prev = null, .next = null },
     removed: bool = false,
-    bindings_ready: bool = false,
-
-    xkb_bindings: wl.list.Head(XkbBinding, .link),
-    pointer_bindings: wl.list.Head(PointerBinding, .link),
 
     /// Keyboard focus as we last set it.
     focused: ?*Window = null,
@@ -500,10 +468,7 @@ pub const WindowManager = struct {
 
     obj: *backend.WindowManager,
     obj_version: u32,
-    xkb_bindings: ?*backend.XkbBindings = null,
-    layer_shell: ?*backend.LayerShell = null,
 
-    ui: ?*@import("ui.zig").Ui = null,
     pending_ui: ?UiAction = null,
 
     /// Source of `Window.min_order`.
@@ -517,9 +482,6 @@ pub const WindowManager = struct {
     outputs: wl.list.Head(Output, .link),
     /// External-monitor handling: rules, profiles, hot-plug settling.
     monitors: monitors.Manager = .{},
-    /// Every `wl_output` global bound so far (output.zig). They carry the
-    /// names of the monitors; river's outputs refer to them by global name.
-    wl_outputs: std.ArrayList(*WlOutput) = .empty,
     windows: wl.list.Head(Window, .link),
     /// The DockApps (role .dockapp), owned by dockhost.zig.
     dock_windows: wl.list.Head(Window, .link),
@@ -787,7 +749,7 @@ pub fn primaryOutput(wm: *WindowManager) ?*Output {
 }
 
 /// The live outputs, in the order `output_order` asks for (left to right by
-/// default, or the order river announced them). Fills `buf`, returns how many.
+/// default, or the order the monitors were announced). Fills `buf`, returns how many.
 pub fn liveOutputs(wm: *WindowManager, buf: *[monitors.max_monitors]*Output) usize {
     var n: usize = 0;
     var it = wm.outputs.first();

@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
 
     const display = wl.Display.connect(null) catch |err| {
         std.log.err("cannot connect to a Wayland compositor: {t}", .{err});
-        std.log.err("(is $WAYLAND_DISPLAY set? are you running inside river/wmaker-wl?)", .{});
+        std.log.err("(is $WAYLAND_DISPLAY set? are you running inside wmaker-wl?)", .{});
         return err;
     };
     defer display.disconnect();

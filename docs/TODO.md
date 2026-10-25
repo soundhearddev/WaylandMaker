@@ -4,8 +4,8 @@ Roughly in the order I care about them. Nothing here is promised.
 
 ## Window manager
 
-- [ ] **Title bars.** There are none; windows only have a border. river offers `river_decoration_v1`
-      for this. It also unlocks the `NoTitlebar`, `NoResizebar`, `NoCloseButton` and `NoMiniaturizeButton`
+- [ ] **Title bars.** There are none; windows only have a border. Draw them as scene
+      rectangles and text. It also unlocks the `NoTitlebar`, `NoResizebar`, `NoCloseButton` and `NoMiniaturizeButton`
       attributes (see [INTEGRATION.md](INTEGRATION.md)).
 - [ ] **Docks: space and overlap.** Under some conditions tiles or windows overlap the Dock. I still need to
       pin down which edge, how many outputs and which tiles are involved, then fix it.
@@ -18,8 +18,7 @@ Roughly in the order I care about them. Nothing here is promised.
       recognised and started again, which needs an `app_id` to start-command mapping first. The Dock
       entries already have the pieces for that.
 - [ ] **`wmaker-wl --restart` / `RESTART` menu entry.** Re-executing the process would drop the existing
-      `river_window_manager_v1` connection. I do not know whether and how river accepts a new
-      window-manager client afterwards without leaving every managed window unmanaged. `SIGHUP` reload
+      compositor, which would end the session. `SIGHUP` reload
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
 - [ ] **Icons from `~/.local/share/icons` and `~/.icons`.** Only `/usr/share/icons` and
       `/usr/share/pixmaps` are searched.
@@ -38,9 +37,8 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Workspace names per monitor.
 - [ ] Configure modes, scale and position directly through `wlr-output-management`, instead of only running
       an external command (kanshi, wlr-randr) from `monitor_profile`.
-- [ ] Test hotplug against a running river with real plugging and unplugging. The model side is tested
-      (debouncing, rules, windows returning). What needs checking is the order of `wl_output.done` and
-      river's events.
+- [ ] Test hotplug against real plugging and unplugging. The model side is tested
+      (debouncing, rules, windows returning). What needs checking is the order of the wlroots events.
 
 ## Performance
 
@@ -48,7 +46,7 @@ See [MONITORS.md](MONITORS.md).
 
 #### Must
 
-- [ ] Measure Manage + Render p50/p99 with real river and real clients, at 1, 10, and 50 windows, with and without animations. Current benchmarks only cover model-level performance in Debug builds.
+- [ ] Measure Manage + Render p50/p99 with real clients, at 1, 10, and 50 windows, with and without animations. Current benchmarks only cover model-level performance in Debug builds.
 - [ ] Add per-window probes for `applyManage` / `applyRender` and probes for `Ui.sync`, so 8 ms warnings can be traced to their source.
 - [ ] Benchmark all configurations in `ReleaseFast` and `ReleaseSafe`. Debug timings are not representative of real-world frame performance.
 - [ ] Make `Ui.sync` redraw only changed content. Check whether the menu, dock, and clip are redrawn on every manage sequence, even when nothing changes. If so, add per-panel dirty flags and row-/tile-level damage tracking instead of full redraws.
@@ -68,7 +66,7 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Benchmark multiple monitors: test 3–4 outputs with animations and rapid hotplug sequences, including repeated connect/disconnect cycles within a second.
 - [ ] Stress-test many clients. Open and close 100–200 terminals simultaneously. Measure time to first frame, frame time, and `move all windows`. The Debug benchmark currently shows around 10 ms for the latter with 1000 windows.
 - [ ] Measure startup time until the WM is ready, including Lua configuration, icon directories, `WMState`, and autostart. Introduce lazy loading if necessary.
-- [ ] Measure input latency from key press to `render_finish`. The path runs through the queue, `manage_dirty`, and Manage, requiring at least one river roundtrip.
+- [ ] Measure input latency from key press to the committed frame. The path runs through the queue, `manageDirty`, and one pass.
 - [ ] Measure configuration reload latency from `SIGHUP` to completion using large configurations with many includes. Reloading must not block a frame.
 - [ ] Investigate `process.spawn` overhead with large address spaces. Consider `posix_spawn` or `vfork` if they offer lower fork costs.
 

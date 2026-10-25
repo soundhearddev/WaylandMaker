@@ -76,4 +76,4 @@ meant to catch "layout became quadratic", not a bad day, and they only apply to 
 A run is checked in as `dump/bench_*.txt`. In that Debug build, with 1000 windows, a layout takes about
 0.1 ms, the invariant check about 0.07 ms, and moving all windows to another workspace about 10 ms. The
 model scales roughly linearly, so stutter is more likely to come from clients, rendering or the config
-than from the model. I have not measured against a real river with real clients yet.
+than from the model. I have not measured with real clients yet.

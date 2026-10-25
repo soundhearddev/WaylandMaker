@@ -8,7 +8,7 @@
 //
 // WindowMaker Compatibility Layer
 // Provides FFI bindings and abstraction for WindowMaker C code.
-// Bridges Wayland/River world with classic WindowMaker functionality:
+// Bridges the Wayland world with classic WindowMaker functionality:
 // - Docks (AppIcon/Clip)
 // - Configuration/Preferences
 // - Theme support
@@ -144,10 +144,8 @@ pub fn createDockApp(ctx: *WMakerContext, app_info: DockAppInfo) !void {
 
     // TODO: Draw the actual dock tile for this app (Phase 5, docs/TODO.md).
     //
-    // `river_layer_shell_v1` (protocol/river-layer-shell-v1.xml) is NOT a
-    // way for wmaker-wl to create its own layer-shell surface -- it only
-    // lets the *window manager* learn how much space layer-shell clients
-    // (bars, docks) have reserved (`non_exclusive_area`, see output.zig)
+    // The layer-shell server (panels, exclusive zones) is milestone B of
+    // docs/TODO wlroots.md.
     // and set focus rules for them. A real dock tile is therefore either:
     //   (a) drawn by wmaker-wl itself using the existing wl_shm/cairo path
     //       (shm.zig, gfx.zig, ui.zig -- the same infrastructure the root

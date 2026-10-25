@@ -1,9 +1,9 @@
 # WaylandMaker
 
 A Wayland window manager that tries to feel like [Window Maker](https://www.windowmaker.org/).
-It runs as the window-management client of [river](https://codeberg.org/river/river)
-(`river_window_management_v1`); river does compositing and input, this project does layout, focus,
-the root menu, the Dock and the Clip.
+It is a Wayland compositor of its own, built on [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)
+0.20: it does compositing, input, layout and focus. The root menu, the Dock and the Clip are being ported
+to it (see [docs/TODO wlroots.md](docs/TODO%20wlroots.md); the old drawing code is kept in `attic/`).
 
 Windows are laid out in a horizontally scrolling strip of columns (the niri / PaperWM idea), in a
 NeXTSTEP-style look. The parts of Window Maker I care about most are kept as they were: the root menu,
@@ -12,16 +12,17 @@ Dock, Clip and DockApps, and the `WMRootMenu`, `WMWindowAttributes` and `WMState
 
 ## Build
 
-Needs Zig **0.16.0** and the development files for wayland, xkbcommon, cairo, pango and glib
-(on Debian: `libwayland-dev libxkbcommon-dev libcairo2-dev libpango1.0-dev libglib2.0-dev`).
-Lua 5.4 is built from source as a Zig dependency, so no system Lua is needed. `librsvg` is loaded at
-run time if present; without it, icons that only exist as SVG show a placeholder tile.
+Needs Zig **0.16.0**, **wlroots 0.20** and the development files for wayland, wayland-protocols,
+xkbcommon and pixman (on Debian: `libwlroots-0.20-dev libwayland-dev wayland-protocols libxkbcommon-dev
+libpixman-1-dev`; wayland-protocols older than 1.44 needs `-Dcolor-manager-version=1`). wlprefs also
+needs cairo, pango and glib. Lua 5.4 is built from source as a Zig dependency, so no system Lua is needed.
 
 ```sh
 zig build                                # wmaker-wl and wlprefs into zig-out/bin
 zig build test                           # unit tests, no compositor needed
-zig build run                            # starts river with wmaker-wl
-river -c ./zig-out/bin/wmaker-wl         # the same, by hand
+zig build probe                          # can wlroots be used on this machine at all?
+zig build run                            # nested in the current session (WLR_BACKENDS=wayland)
+./zig-out/bin/wmaker-wl                  # from a TTY: DRM + libinput, no other session needed
 ```
 
 Nix and Scheme files are provided for Nix and Guix users.
@@ -77,7 +78,7 @@ An unknown option is an error and does not start a session.
 
 | | |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the code is organised and the rules it follows with river |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the code is organised and the rules it follows |
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | what is taken from Window Maker, and what is not |
 | [docs/DOCKAPPS.md](docs/DOCKAPPS.md) | Dock, Clip, Drawers, writing a DockApp |
 | [docs/MONITORS.md](docs/MONITORS.md) | multiple monitors and hotplug |

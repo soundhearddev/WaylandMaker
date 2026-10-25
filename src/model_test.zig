@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 //
 // Tests for the data model. They run without a compositor: workspace.zig
-// never sends Wayland requests, so the river object pointers inside Window
+// never sends Wayland requests, so the compositor object pointers inside Window
 // can be dummies that are never dereferenced.
 //
 // After every operation `check()` verifies the invariants documented at
@@ -11,15 +11,12 @@
 
 const std = @import("std");
 const wayland = @import("wayland");
-const river = wayland.client.river;
 
 const types = @import("types.zig");
 const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const config = @import("config.zig");
 const action_mod = @import("action.zig");
-const dockhost = @import("dockhost.zig");
-const dock_mod = @import("dock.zig");
 
 const Window = types.Window;
 const Workspace = types.Workspace;
@@ -497,15 +494,15 @@ test "focus only lands on windows of the shown workspace" {
 
     // Workspace 0 is shown: b (on workspace 1) must not be focusable.
     try std.testing.expect(f.out.active == 0);
-    try std.testing.expect(@import("main.zig").focusable(a));
-    try std.testing.expect(!@import("main.zig").focusable(b));
+    try std.testing.expect(@import("manage.zig").focusable(a));
+    try std.testing.expect(!@import("manage.zig").focusable(b));
 
     f.out.active = 1;
-    try std.testing.expect(@import("main.zig").focusable(b));
-    try std.testing.expect(!@import("main.zig").focusable(a));
+    try std.testing.expect(@import("manage.zig").focusable(b));
+    try std.testing.expect(!@import("manage.zig").focusable(a));
 }
 
-// Regression: river shows a new window only after we sent propose_dimensions,
+// Regression: a new window is shown only after it was configured,
 // and only then sends the first `dimensions` event. A window that has NOT had
 // that event yet (ready == false) must therefore be placed, laid out and get
 // a proposal, otherwise nothing ever opens.
@@ -517,7 +514,7 @@ test "a window without a dimensions event yet is still placed and laid out" {
     w.ready = false; // exactly the state of a freshly announced window
     w.target = .{};
 
-    const window_mod = @import("window.zig");
+    const window_mod = @import("manage.zig");
     window_mod.placeNew(&f.wm);
     try check(f);
 
@@ -529,7 +526,7 @@ test "a window without a dimensions event yet is still placed and laid out" {
     try std.testing.expect(w.target.w > 100);
     try std.testing.expect(w.target.h > 100);
     // and it may take focus
-    try std.testing.expect(@import("main.zig").focusable(w));
+    try std.testing.expect(@import("manage.zig").focusable(w));
 }
 
 test "maximize_column fills the work area and pushes the others aside" {
@@ -545,7 +542,7 @@ test "maximize_column fills the work area and pushes the others aside" {
 
     // Focus the middle window, then run the real action.
     workspace.activate(b);
-    var seat: types.Seat = .{ .obj = undefined, .xkb_bindings = undefined, .pointer_bindings = undefined };
+    var seat: types.Seat = .{ .obj = undefined };
     seat.focused = b;
     f.wm.seats.init();
     f.wm.seats.append(&seat);
@@ -586,7 +583,7 @@ test "maximize_column ignores a floating window" {
     workspace.floatWindow(&f.wm, b);
     const width_a = a.column.?.width;
 
-    var seat: types.Seat = .{ .obj = undefined, .xkb_bindings = undefined, .pointer_bindings = undefined };
+    var seat: types.Seat = .{ .obj = undefined };
     seat.focused = b;
     f.wm.seats.init();
     f.wm.seats.append(&seat);
@@ -622,7 +619,7 @@ test "StartWorkspace puts the window on that workspace" {
 
     const w = try attrWindow(f, arena.allocator(), "foot", "{ foot = { StartWorkspace = 2; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
 
     try std.testing.expect(w.workspace == &f.out.workspaces[1]);
@@ -643,7 +640,7 @@ test "StartWorkspace beyond the last workspace falls back to the current one" {
 
     const w = try attrWindow(f, arena.allocator(), "foot", "{ foot = { StartWorkspace = 9; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     try std.testing.expect(w.workspace == f.out.ws());
 }
@@ -656,7 +653,7 @@ test "Omnipresent windows float and follow the user across workspaces" {
 
     const w = try attrWindow(f, arena.allocator(), "clock", "{ clock = { Omnipresent = Yes; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     try std.testing.expect(w.mode == .floating);
     try std.testing.expect(w.isOmnipresent());
@@ -682,7 +679,7 @@ test "an ordinary window does not follow" {
 
     const w = try attrWindow(f, arena.allocator(), "foot", "{ clock = { Omnipresent = Yes; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     @import("action.zig").run(&f.wm, .{ .workspace = 1 });
     try std.testing.expect(w.workspace == &f.out.workspaces[0]);
 }
@@ -708,7 +705,7 @@ test "NoBorder removes the border from the slot" {
     normal.app_id = try std.testing.allocator.dupe(u8, "normal");
     defer std.testing.allocator.free(normal.app_id.?);
     normal.new = true;
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     layout.compute(f.cur(), &f.wm.cfg, true);
 
@@ -730,7 +727,7 @@ test "StartMaximized opens a full-width column" {
 
     const w = try attrWindow(f, arena.allocator(), "editor", "{ editor = { StartMaximized = Yes; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     try std.testing.expectEqual(layout.columnWidthFor(1920, 1.0, &f.wm.cfg), w.column.?.width);
     // and it toggles back like Super+d does
@@ -750,7 +747,7 @@ test "KeepOnTop floats; the Floating attribute overrides it" {
     b.app_id = try std.testing.allocator.dupe(u8, "pinned");
     defer std.testing.allocator.free(b.app_id.?);
     b.new = true;
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     try std.testing.expect(a.mode == .floating);
     try std.testing.expect(b.mode == .tiled);
@@ -764,9 +761,9 @@ test "Unfocusable windows never take keyboard focus" {
 
     const w = try attrWindow(f, arena.allocator(), "panel", "{ panel = { Unfocusable = Yes; }; }");
     defer std.testing.allocator.free(w.app_id.?);
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
-    try std.testing.expect(!@import("main.zig").focusable(w));
+    try std.testing.expect(!@import("manage.zig").focusable(w));
     try std.testing.expect(f.wm.focus_request == null);
 }
 
@@ -775,12 +772,12 @@ test "windows without rules behave exactly as before" {
     defer f.deinit();
     const w = try f.newWindow();
     w.new = true;
-    @import("window.zig").placeNew(&f.wm);
+    @import("manage.zig").placeNew(&f.wm);
     try check(f);
     try std.testing.expect(w.mode == .tiled);
     try std.testing.expect(w.workspace == f.out.ws());
     try std.testing.expect(!w.sticky);
-    try std.testing.expect(@import("main.zig").focusable(w));
+    try std.testing.expect(@import("manage.zig").focusable(w));
     try std.testing.expect(f.wm.focus_request == w);
 }
 
@@ -790,39 +787,6 @@ test "windows without rules behave exactly as before" {
 // shows up only after it was already tiled must not be stuck that way.
 // ----------------------------------------------------------------------------
 
-test "adopt: a DockApp tag arriving after tiling takes the window out of the strip and the window list" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const other = try f.newWindow();
-    const w = try f.newWindow();
-    try workspace.placeTiled(&f.wm, f.cur(), other);
-    try workspace.placeTiled(&f.wm, f.cur(), w);
-    w.new = false;
-    try check(f);
-    try std.testing.expect(w.mode == .tiled);
-
-    dockhost.adopt(&f.wm, w);
-    try std.testing.expect(w.role == .dockapp);
-    try std.testing.expect(w.workspace == null and w.column == null);
-    try check(f);
-
-    // Out of the window list, in the DockApp list: nothing that loops over
-    // the windows can reach it any more.
-    var seen_normal = false;
-    var it = f.wm.windows.first();
-    while (it) |x| : (it = types.nextWindow(x, &f.wm)) {
-        if (x == w) seen_normal = true;
-    }
-    try std.testing.expect(!seen_normal);
-    try std.testing.expect(f.wm.dock_windows.first().? == w);
-    try std.testing.expect(types.nextDockWindow(w, &f.wm) == null);
-
-    // Adopting twice changes nothing.
-    dockhost.adopt(&f.wm, w);
-    try std.testing.expect(f.wm.dock_windows.first().? == w);
-    // The other window is untouched.
-    try std.testing.expect(other.mode == .tiled and other.workspace != null);
-}
 test "recheckFloating: a fixed-size hint arriving after tiling floats it too" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -837,7 +801,7 @@ test "recheckFloating: a fixed-size hint arriving after tiling floats it too" {
     w.min_h = 64;
     w.max_w = 64;
     w.max_h = 64;
-    @import("window.zig").recheckFloating(&f.wm, w);
+    @import("manage.zig").recheckFloating(&f.wm, w);
     try check(f);
 
     try std.testing.expect(w.mode == .floating);
@@ -851,7 +815,7 @@ test "recheckFloating: Omnipresent arriving late also sets sticky" {
     w.new = false; // see the comment in the DockApp test above
 
     w.attrs = .{ .omnipresent = true };
-    @import("window.zig").recheckFloating(&f.wm, w);
+    @import("manage.zig").recheckFloating(&f.wm, w);
     try check(f);
 
     try std.testing.expect(w.mode == .floating);
@@ -864,7 +828,7 @@ test "recheckFloating: does nothing for an ordinary window" {
     const w = try f.newWindow();
     try workspace.placeTiled(&f.wm, f.cur(), w);
 
-    @import("window.zig").recheckFloating(&f.wm, w);
+    @import("manage.zig").recheckFloating(&f.wm, w);
     try check(f);
     try std.testing.expect(w.mode == .tiled);
 }
@@ -878,7 +842,7 @@ test "recheckFloating: a no-longer-new but already-floating window is untouched"
 
     // Should stay floating and not, say, get pulled into a column.
     w.attrs = .{ .floating = true, .omnipresent = true };
-    @import("window.zig").recheckFloating(&f.wm, w);
+    @import("manage.zig").recheckFloating(&f.wm, w);
     try check(f);
     try std.testing.expect(w.mode == .floating);
 }
@@ -890,7 +854,7 @@ test "recheckFloating: a window still in its initial placement (new) is left for
     w.new = true; // never placed yet -- placeNew(), not recheckFloating, owns this one
 
     w.attrs = .{ .floating = true, .omnipresent = true };
-    @import("window.zig").recheckFloating(&f.wm, w);
+    @import("manage.zig").recheckFloating(&f.wm, w);
 
     try std.testing.expect(w.workspace == null);
     try std.testing.expect(w.mode == .tiled); // untouched Window{} default, not yet placed
@@ -910,104 +874,6 @@ fn parseWithCompositor(gpa: std.mem.Allocator, text: []const u8) !config.Config 
     var binds: std.ArrayList(config.Bind) = .empty;
     try config.parse(cfg.arena.allocator(), text, &cfg, &binds, "<wlprefs>");
     return cfg;
-}
-
-test "adopt drops the focus request and a pending menu focus for the window" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const w = try f.newWindow();
-    try workspace.placeTiled(&f.wm, f.cur(), w);
-    w.new = false;
-    f.wm.focus_request = w;
-    f.wm.pending_ui = .{ .focus = w };
-    dockhost.adopt(&f.wm, w);
-    try std.testing.expect(f.wm.focus_request == null);
-    try std.testing.expect(f.wm.pending_ui == null);
-    try check(f);
-}
-
-test "syncModel: a DockApp gets a temporary tile while it runs and loses it with the program" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const a = std.testing.allocator;
-    const kept = [_]dockapp_mod.DockApp{.{ .name = "clock", .command = &.{"wl-clock"}, .y = 1 }};
-    var m = try dock_mod.Model.init(a, .{ .apps = &kept }, &.{}, 1);
-    defer m.deinit();
-
-    const clock = try f.newWindow();
-    const tokyo = try f.newWindow();
-    const term = try f.newWindow();
-    clock.app_id = try a.dupe(u8, "dockapp:clock");
-    tokyo.app_id = try a.dupe(u8, "dockapp:tokyo");
-    term.app_id = try a.dupe(u8, "foot");
-    defer for ([_]*Window{ clock, tokyo, term }) |w| a.free(w.app_id.?);
-    dockhost.adopt(&f.wm, clock);
-    dockhost.adopt(&f.wm, tokyo);
-    try workspace.placeTiled(&f.wm, f.cur(), term);
-    term.new = false;
-    try check(f);
-
-    // The kept tile of "clock" is its home and is marked running; "tokyo"
-    // has no entry and gets a temporary tile; "foot" is a normal window and
-    // gets none.
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.slots.items[0].running);
-    const ti = m.dockSlotFor("dockapp:tokyo").?;
-    try std.testing.expect(m.slots.items[ti].app.attached and m.slots.items[ti].running);
-    try std.testing.expect(!m.hasApp("foot"));
-    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == clock);
-    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[ti].app) == tokyo);
-    // Nothing changed: nothing reported.
-    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
-
-    // The program ends: its temporary tile goes, the kept tile stays and is
-    // not running any more.
-    tokyo.closed = true;
-    clock.closed = true;
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.dockSlotFor("dockapp:tokyo") == null);
-    try std.testing.expect(m.slot(0) != null and !m.slots.items[0].running);
-    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == null);
-}
-
-test "syncModel: every minimized window gets a Dock tile of its own, gone when it is restored" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    var m = try dock_mod.Model.init(std.testing.allocator, .{}, &.{}, 1);
-    defer m.deinit();
-    const a = try f.newWindow();
-    const b = try f.newWindow();
-    for ([_]*Window{ a, b }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
-
-    // Nothing minimized: no tile.
-    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
-
-    workspace.minimize(&f.wm, a);
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(a.min_order) != null);
-    try std.testing.expect(!dockhost.syncModel(&f.wm, &m)); // nothing new: no change
-
-    workspace.minimize(&f.wm, b);
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(a.min_order) != null and m.miniSlotFor(b.min_order) != null);
-    try std.testing.expect(m.miniSlotFor(a.min_order) != m.miniSlotFor(b.min_order));
-
-    // `a` is restored: only its tile goes.
-    const order_a = a.min_order;
-    try workspace.restore(&f.wm, a, f.cur());
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(order_a) == null);
-    try std.testing.expect(m.miniSlotFor(b.min_order) != null);
-
-    // mini_dock = false: no tiles at all, and the existing one goes.
-    f.wm.cfg.mini_dock = false;
-    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(b.min_order) == null);
-    workspace.minimize(&f.wm, a);
-    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
-    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
-    try check(f);
 }
 
 test "wlprefs defaults are the compositor's defaults" {
@@ -1391,39 +1257,6 @@ test "restore brings back the window minimized last; show_all brings back all" {
     try check(f);
 }
 
-test "hide_others minimizes other applications only; hide_app the focused one's" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const t1 = try f.newWindow();
-    const t2 = try f.newWindow();
-    const web = try f.newWindow();
-    const clock = try f.newWindow();
-    t1.app_id = try std.testing.allocator.dupe(u8, "foot");
-    t2.app_id = try std.testing.allocator.dupe(u8, "foot");
-    web.app_id = try std.testing.allocator.dupe(u8, "firefox");
-    clock.app_id = try std.testing.allocator.dupe(u8, "dockapp:clock");
-    defer for ([_]*Window{ t1, t2, web, clock }) |w| std.testing.allocator.free(w.app_id.?);
-    dockhost.adopt(&f.wm, clock); // a DockApp is in no workspace and not in the window list
-    for ([_]*Window{ t1, t2, web }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
-    workspace.activate(t1);
-
-    // Nothing is focused through a seat in the fixture: `focusedWindow` falls
-    // back on the workspace's last focused window, which is t1.
-    action_mod.run(&f.wm, .hide_others);
-    try std.testing.expect(!t1.minimized and !t2.minimized); // same application
-    try std.testing.expect(web.minimized);
-    try std.testing.expect(!clock.minimized); // a DockApp is never "hidden"
-    try check(f);
-
-    action_mod.run(&f.wm, .show_all);
-    try std.testing.expect(!web.minimized);
-
-    action_mod.run(&f.wm, .hide_app);
-    try std.testing.expect(t1.minimized and t2.minimized);
-    try std.testing.expect(!web.minimized and !clock.minimized);
-    try check(f);
-}
-
 // ----------------------------------------------------------------------------
 // Several outputs
 // ----------------------------------------------------------------------------
@@ -1558,9 +1391,7 @@ test "a removed active output is never returned as the working output" {
 
 fn testSeatFor(f: *Fixture) !*types.Seat {
     const s = try std.testing.allocator.create(types.Seat);
-    s.* = .{ .obj = @ptrCast(&dummy_byte), .xkb_bindings = undefined, .pointer_bindings = undefined };
-    s.xkb_bindings.init();
-    s.pointer_bindings.init();
+    s.* = .{ .obj = @ptrCast(&dummy_byte) };
     f.wm.seats.append(s);
     return s;
 }
@@ -1610,7 +1441,7 @@ test "the view stays on a maximized column, even when it drifts or the work area
 test "maximize_keep_focus: a new tiled window opens beside a maximized one without taking the focus" {
     const f = try Fixture.init();
     defer f.deinit();
-    const window_mod = @import("window.zig");
+    const window_mod = @import("manage.zig");
     const seat = try testSeatFor(f);
     defer dropSeat(seat);
 
@@ -1893,15 +1724,15 @@ test "center_single_column centres a lone narrow column, and only that" {
 }
 
 test "clicking a window makes it the active one, so the view follows it (focus path)" {
-    // main.onManage activates the focus target before the layout; pin the order.
-    const src = @embedFile("main.zig");
-    const body_start = std.mem.indexOf(u8, src, "fn onManage(wm: *WindowManager) void {").?;
-    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}").?;
+    // manage.run activates the focus target before the layout; pin the order.
+    const src = @embedFile("manage.zig");
+    const body_start = std.mem.indexOf(u8, src, "pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {").?;
+    const body_end = std.mem.indexOfPos(u8, src, body_start, "\n}\n").?;
     const body = src[body_start..body_end];
     const resolve = std.mem.indexOf(u8, body, "resolveFocus(wm)").?;
     const activate = std.mem.indexOf(u8, body, "workspace.activate(w)").?;
     const lay = std.mem.indexOf(u8, body, "layoutAll(wm)").?;
     try std.testing.expect(resolve < activate and activate < lay);
-    // and the reload runs after the queued actions
-    try std.testing.expect(std.mem.indexOf(u8, body, "reloadConfig(wm);\n    }").? > std.mem.indexOf(u8, body, "runPending(wm);").?);
+    // and the `reload_config` command reloads after the queued actions ran
+    try std.testing.expect(std.mem.lastIndexOf(u8, body, "reload(wm);").? > std.mem.indexOf(u8, body, "runPending(wm);").?);
 }

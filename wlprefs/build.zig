@@ -347,18 +347,15 @@ pub fn build(b: *std.Build) void {
     wlprefs_test_step.dependOn(&b.addRunArtifact(wlprefs_tests).step);
 
     // ---- run ------------------------------------------------------------
+    //
+    // wlprefs is a Wayland client: run it inside a wmaker-wl session.
 
-    const run_cmd = b.addSystemCommand(&.{
-        "river",
-        "-c",
-        "zig-out/bin/wmaker-wl",
-    });
-
-    run_cmd.step.dependOn(b.getInstallStep());
+    const run_cmd = b.addRunArtifact(exe);
+    if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step(
         "run",
-        "Run river with wmaker-wl as window manager",
+        "Run wlprefs (inside a Wayland session)",
     );
 
     run_step.dependOn(&run_cmd.step);

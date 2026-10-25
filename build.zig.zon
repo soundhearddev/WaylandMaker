@@ -34,7 +34,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "protocol",
         "wlprefs",
         "examples",
         "tools",

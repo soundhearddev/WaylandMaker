@@ -2,7 +2,7 @@
 //
 // External-monitor management: the part that needs no Wayland.
 //
-// What river gives a window manager about an output is little: a position, a
+// What the compositor knows about an output is little: a position, a
 // size and the global name of the matching `wl_output`. Everything that makes
 // a monitor *recognisable* (connector name, make, model) comes from that
 // `wl_output` (output.zig binds it). This file turns that into decisions:
@@ -13,7 +13,7 @@
 //                 workspace count, first workspace, commands on connect.
 //   * `Profile`   what to run when a certain SET of monitors is connected
 //                 (`monitor_profile{ ... }`): the hook for tools that really
-//                 configure outputs (kanshi, wlr-randr). river does not let a
+//                 configure outputs (kanshi, wlr-randr). wmaker-wl does not set modes yet: a
 //                 window manager change modes or positions, so this is how
 //                 "plug it in and it is set up" is reached.
 //   * `Settle`    hot-plugging announces monitors one after the other; a
@@ -62,8 +62,8 @@ pub const Text = struct {
 /// `wl_output` events: `name`, `description`, `geometry`, `scale`), any of them
 /// may stay empty (`name` and `description` need wl_output v4).
 pub const Info = struct {
-    /// Global name of the `wl_output` (what river's `wl_output` event carries);
-    /// 0: not known yet.
+    /// Global name of the `wl_output` (unused with wlroots, kept for the
+    /// monitor-identity code and its tests); 0: not known yet.
     global: u32 = 0,
     name: Text = .{}, // connector: "DP-1", "eDP-1", "HDMI-A-2"
     make: Text = .{},
@@ -286,7 +286,7 @@ pub fn pickProfile(profiles: []const Profile, infos: []const Info) ?usize {
 // Hot-plug settling
 // ----------------------------------------------------------------------------
 
-/// Plugging in a monitor makes river announce an output, then its position,
+/// Plugging in a monitor makes the compositor announce an output, then its position,
 /// then its size, and `wl_output` its name some milliseconds later; a dock
 /// with three screens does this three times in a burst. Acting on every
 /// intermediate state would move windows back and forth, so a change only
@@ -351,7 +351,7 @@ pub const Box = struct { x: i32 = 0, y: i32 = 0, w: i32 = 0, h: i32 = 0 };
 pub const Order = enum {
     /// Left to right, then top to bottom: what the user sees on the desk.
     position,
-    /// The order river announced them in (what wmaker-wl did until now).
+    /// The order the monitors were announced in.
     connection,
 };
 

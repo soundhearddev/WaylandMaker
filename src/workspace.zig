@@ -3,7 +3,7 @@
 // Every structural change to the window tree lives here, so the
 // invariants documented in types.zig hold by construction. No Wayland
 // requests are made in this file: it only edits our own model. main.zig /
-// action.zig decide what to tell river afterwards.
+// action.zig decide what to tell the compositor afterwards.
 //
 // All functions that can fail to allocate leave the model unchanged when
 // they return an error.
@@ -550,7 +550,7 @@ pub fn toggleMaximized(wm: *WindowManager, col: *Column) void {
 
 /// Make `win` the active window of its workspace in our model (the strip's
 /// active column / the workspace's last-focused floating window). Does not
-/// talk to river; see seat.focus.
+/// talk to the compositor; see manage.run.
 pub fn activate(win: *Window) void {
     const ws = win.workspace orelse return;
     ws.last_focused = win;

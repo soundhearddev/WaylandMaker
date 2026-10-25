@@ -84,6 +84,8 @@ pub const Monitor = struct {
         var now: std.posix.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.CLOCK.MONOTONIC, &now);
         m.scene_output.sendFrameDone(&now);
+        // An animation advances once per displayed frame.
+        if (m.server.wm.anim_active) m.server.scheduleManage();
     }
 
     fn onRequestState(listener: *wl.Listener(*wlr.Output.event.RequestState), event: *wlr.Output.event.RequestState) void {

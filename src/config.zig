@@ -40,7 +40,7 @@
 // state then stays alive (`Config.script`) until the config is replaced.
 //
 // Key names are resolved through xkbcommon, so they are layout-correct.
-// River matches bindings against the *active* layout; no manual QWERTZ /
+// Bindings are matched against the *active* layout (keys.zig); no manual QWERTZ /
 // AZERTY remapping is needed (the old layoutMapKeysym() was wrong).
 //
 // A key can be named by its keysym (`Return`, `udiaeresis`, `U00FC`) or, for
@@ -56,14 +56,14 @@
 // By default a binding is translated with whichever layout is active at the
 // moment. `bind_layout = 0` (or 1, 2, 3) pins all bindings to that layout of
 // the keyboard instead, so a binding written as `Super+q` keeps working
-// after switching from `us` to `de` and back (river_xkb_binding_v1.
+// after switching from `us` to `de` and back (keys.zig).
 // set_layout_override). `bind_layout = "current"` follows the active one.
 
 const std = @import("std");
 const log = std.log.scoped(.config);
 const xkb = @import("xkbcommon");
 const animation = @import("animation.zig");
-const backend = @import("backend");
+const backend = @import("backend.zig");
 
 pub const Modifiers = backend.Modifiers;
 

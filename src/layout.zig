@@ -6,7 +6,7 @@
 //
 // Terminology
 //   outer box  - what the user sees: content + border on every side.
-//   content    - what river's `dimensions`/`set_position` refer to.
+//   content    - what the client is asked to size (`Configure.size`) and where it is placed.
 //   strip x    - x inside the endless horizontal strip; 0 is the left edge of
 //                the strip's padding, columns start at `outer_gap`.
 //   viewport   - the part of the strip currently visible = the work area.
@@ -271,7 +271,7 @@ fn computeFloating(ws: *Workspace, cfg: *const config.Config) void {
 
 fn computeFullscreen(ws: *Workspace) void {
     const win = ws.fullscreen orelse return;
-    // river owns fullscreen geometry; we only record it for hit-testing.
+    // The output owns fullscreen geometry; we only record it for hit-testing.
     win.target = ws.output.rect;
 }
 

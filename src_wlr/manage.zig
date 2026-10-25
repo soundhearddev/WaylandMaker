@@ -33,6 +33,8 @@ const layout = model.layout;
 const workspace = model.workspace;
 const action = model.action;
 const boot = @import("boot.zig");
+const pointer_op = @import("pointer_op.zig");
+const motion = model.motion;
 const backend = @import("backend");
 
 const Window = types.Window;
@@ -64,6 +66,12 @@ pub const Placement = struct {
     mode: types.Mode = .tiled,
     /// The window holds the keyboard focus: it goes on top of its layer.
     raise: bool = false,
+    /// The part of the frame (content plus border) to show, relative to the
+    /// content's top-left corner. Null: all of it. Set while a window opens
+    /// and while a column is scrolled under the Dock.
+    clip: ?types.Rect = null,
+    /// Its column fills the work area (told to the client as `maximized`).
+    maximized: bool = false,
 };
 
 pub const Sink = struct {
@@ -194,6 +202,39 @@ pub fn requestFullscreen(wm: *WindowManager, win: *Window, on: bool) void {
     backend.manageDirty(wm.obj);
 }
 
+/// A client asked for its column to be (un)maximized. Maximize in a tiling
+/// layout means the column fills the work area.
+pub fn requestMaximize(wm: *WindowManager, win: *Window, on: bool) void {
+    const col = win.column orelse return;
+    if (col.isMaximized() != on) workspace.toggleMaximized(wm, col);
+    wm.follow_request = true;
+    backend.manageDirty(wm.obj);
+}
+
+/// A client asked to be minimized (Window Maker: miniaturized).
+pub fn requestMinimize(wm: *WindowManager, win: *Window) void {
+    if (win.workspace == null) return;
+    workspace.minimize(wm, win);
+    wm.follow_request = true;
+    backend.manageDirty(wm.obj);
+}
+
+/// The client's app_id arrived or changed: its Window Maker attributes
+/// (WMWindowAttributes) follow it. Whether it floats is only revisited for a
+/// window that is already placed (a DockApp declares itself late); a new one
+/// is decided by `placeNew`.
+pub fn appIdChanged(wm: *WindowManager, win: *Window) void {
+    win.attrs = wm.attrs.lookup(win.app_id);
+    if (win.new or win.mode != .tiled) return;
+    win.sticky = win.attrs.is("omnipresent");
+    const should_float = win.attrs.floating orelse
+        (wantsFloating(win) or win.attrs.is("omnipresent") or win.attrs.is("keep_on_top"));
+    if (should_float) {
+        workspace.floatWindow(wm, win);
+        backend.manageDirty(wm.obj);
+    }
+}
+
 /// The window is gone (unmapped or destroyed). The pass frees it.
 pub fn closeWindowObject(wm: *WindowManager, win: *Window) void {
     win.closed = true;
@@ -204,7 +245,15 @@ pub fn closeWindowObject(wm: *WindowManager, win: *Window) void {
 // The pass
 // ============================================================================
 
-pub fn run(wm: *WindowManager, sink: Sink) void {
+/// One pass. `now_ms` is the time on a clock that only goes forward, read once
+/// so that every animation of the pass sees the same moment.
+pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
+    // 0. Time. `anim_active` is raised again below by whatever still moves;
+    //    when nothing does, the compositor asks for no further frames.
+    wm.clock.setSlowdown(wm.cfg.anim_slowdown);
+    wm.clock.advance(now_ms);
+    wm.anim_active = false;
+
     // 1. Drop what is gone.
     reapWindows(wm, sink);
     reapOutputs(wm);
@@ -218,6 +267,8 @@ pub fn run(wm: *WindowManager, sink: Sink) void {
 
     // 3. New windows, then what the user pressed since the last pass.
     placeNew(wm);
+    pointer_op.startPending(wm);
+    pointer_op.apply(wm);
     runPending(wm);
 
     // 3b. The `reload_config` command. After the queue ran.
@@ -264,7 +315,11 @@ pub fn run(wm: *WindowManager, sink: Sink) void {
         if (setSeatFocus(s, focus_target)) sink.focus(focus_target);
     }
 
-    // 10. Consumed.
+    // 10. End a finished pointer operation (after layout, so its last delta is
+    //     in the final frame).
+    pointer_op.finish(wm);
+
+    // 11. Consumed.
     wm.focus_request = null;
     wm.follow_request = false;
     wm.focus_by_pointer = false;
@@ -358,11 +413,7 @@ fn forgetWindow(wm: *WindowManager, sink: Sink, win: *Window) void {
         }
         if (s.previous == win) s.previous = null;
         if (s.hovered == win) s.hovered = null;
-        if (s.op_window == win) {
-            s.op_window = null;
-            s.op_state = .idle;
-            s.op = .none;
-        }
+        pointer_op.forget(s, win);
     }
 }
 
@@ -708,11 +759,12 @@ fn applyManage(wm: *WindowManager, sink: Sink, win: *Window) void {
     if (c.size != null or c.tiled != null or c.fullscreen != null) sink.configure(win, c);
 }
 
-/// Rendering state: visibility, position, borders.
+/// Rendering state: visibility, position, borders, clip.
 fn applyRender(wm: *WindowManager, sink: Sink, win: *Window, focused: bool) void {
     const cfg = &wm.cfg;
 
     if (!isVisible(win)) {
+        motion.stopAnimations(win);
         if (win.visible != false) {
             log.debug("window `{s}` hidden", .{win.app_id orelse "?"});
             win.visible = false;
@@ -723,37 +775,63 @@ fn applyRender(wm: *WindowManager, sink: Sink, win: *Window, focused: bool) void
     win.visible = true;
 
     const bw = win.borderWidth(cfg);
-    var p: Placement = .{
-        .visible = true,
-        .rect = win.target,
-        .mode = win.mode,
-        .raise = focused,
-    };
 
     if (win.mode == .fullscreen) {
-        // Fullscreen covers its output and has no border.
-        p.rect = win.workspace.?.output.rect;
-        p.border = .none;
-        p.border_width = 0;
-    } else {
-        const kind: types.BorderKind = if (bw == 0)
-            .none
-        else if (focused)
-            .focused
-        else if (win.mode == .floating)
-            .floating
-        else
-            .unfocused;
-        // A focused floating window keeps the floating tint so the layer
-        // stays recognisable; the focused colour is only for the tiled strip.
-        p.border = if (focused and win.mode == .floating) .floating else kind;
-        p.border_width = bw;
+        // Fullscreen covers its output and has no border, and does not travel.
+        motion.stopAnimations(win);
+        if (win.ready) win.opened = true; // leaving fullscreen is not an opening
+        sink.place(win, .{
+            .visible = true,
+            .rect = win.workspace.?.output.rect,
+            .mode = .fullscreen,
+            .raise = focused,
+        });
+        return;
     }
 
-    win.sent_x = p.rect.x;
-    win.sent_y = p.rect.y;
-    win.sent_border = p.border;
-    sink.place(win, p);
+    // Where it is drawn now: its target, or on the way there.
+    const vis = motion.visualState(wm, win);
+    const rect: types.Rect = .{ .x = vis.x, .y = vis.y, .w = win.target.w, .h = win.target.h };
+
+    const kind: types.BorderKind = if (bw == 0)
+        .none
+    else if (focused)
+        .focused
+    else if (win.mode == .floating)
+        .floating
+    else
+        .unfocused;
+    // A focused floating window keeps the floating tint so the layer stays
+    // recognisable; the focused colour is only for the tiled strip.
+    const shown: types.BorderKind = if (focused and win.mode == .floating) .floating else kind;
+
+    // A tiled window scrolled sideways slides under the edge of the work area
+    // (next to the Dock), not under the Dock. Floating windows are not clipped.
+    const work: ?types.Rect = if (win.mode == .tiled) win.workspace.?.output.workArea() else null;
+
+    win.sent_x = rect.x;
+    win.sent_y = rect.y;
+    win.sent_border = shown;
+    sink.place(win, .{
+        .visible = true,
+        .rect = rect,
+        .border = shown,
+        .border_width = bw,
+        .mode = win.mode,
+        .raise = focused,
+        .clip = motion.visibleBox(rect, bw, work, vis.reveal),
+        .maximized = if (win.column) |c| c.isMaximized() else false,
+    });
+}
+
+/// The overlap of two rectangles, null when they do not touch.
+pub fn intersect(a: types.Rect, b: types.Rect) ?types.Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.w, b.x + b.w);
+    const y1 = @min(a.y + a.h, b.y + b.h);
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
 }
 
 /// 0xRRGGBB of a border kind, from the config.
@@ -876,6 +954,7 @@ const Fixture = struct {
     wm: WindowManager,
     rec: Rec = .{},
     out: *Output = undefined,
+    now: u64 = 1000,
 
     fn init(f: *Fixture) !void {
         const a = testing.allocator;
@@ -915,7 +994,8 @@ const Fixture = struct {
     }
 
     fn pass(f: *Fixture) void {
-        run(&f.wm, f.rec.sink());
+        f.now += 16;
+        run(&f.wm, f.rec.sink(), f.now);
     }
 
     fn press(f: *Fixture, cmd: types.Command) void {
@@ -1106,4 +1186,102 @@ test "rgba splits 0xRRGGBB" {
     try testing.expect(c[1] > 0.5 and c[1] < 0.51);
     try testing.expectEqual(@as(f32, 0), c[2]);
     try testing.expectEqual(@as(f32, 1.0), c[3]);
+}
+
+test "a column that makes room travels there frame by frame, then everything is still" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = try f.open("a");
+    f.pass();
+    f.pass();
+    try testing.expect(!f.wm.anim_active);
+    const home_x = a.target.x;
+    // The second window opens to the right and scrolls the first one aside.
+    const b = try f.open("b");
+    f.pass();
+    _ = b;
+    _ = home_x;
+
+    // Whatever moved is on its way: positions are not the targets yet, and
+    // the pass says it wants another frame.
+    var frames: usize = 0;
+    while (frames < 200) : (frames += 1) {
+        const p = f.rec.lastPlace(a).?;
+        // Never outside the output while travelling.
+        try testing.expect(p.rect.x > -4000 and p.rect.x < 6000);
+        if (!f.wm.anim_active) break;
+        f.pass();
+    }
+    try testing.expect(frames < 200); // it stops by itself
+    try testing.expect(!f.wm.anim_active);
+    try testing.expectEqual(a.target.x, f.rec.lastPlace(a).?.rect.x);
+}
+
+test "dragging a tiled window past the threshold floats it; the button ends it" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const w = try f.open("a");
+    f.pass();
+    const seat = f.wm.seats.first().?;
+
+    try testing.expect(pointer_op.begin(&f.wm, seat, .move, w));
+    f.pass(); // requested -> running
+    try testing.expectEqual(types.OpState.running, seat.op_state);
+
+    // A small wiggle changes nothing.
+    pointer_op.setDelta(seat, 3, 2);
+    f.pass();
+    try testing.expectEqual(types.Mode.tiled, w.mode);
+
+    pointer_op.setDelta(seat, 200, 100);
+    f.pass();
+    try testing.expectEqual(types.Mode.floating, w.mode);
+    const start_x = seat.op_start_rect.x;
+    try testing.expectEqual(start_x + 200, w.float_rect.x);
+
+    pointer_op.release(seat);
+    f.pass();
+    try testing.expectEqual(types.OpState.idle, seat.op_state);
+    try testing.expectEqual(types.Mode.floating, w.mode);
+}
+
+test "a client's maximize request fills the work area with its column" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const w = try f.open("a");
+    f.pass();
+    try testing.expect(!w.column.?.isMaximized());
+    requestMaximize(&f.wm, w, true);
+    f.pass();
+    try testing.expect(w.column.?.isMaximized());
+    requestMaximize(&f.wm, w, false);
+    f.pass();
+    try testing.expect(!w.column.?.isMaximized());
+}
+
+test "a client's minimize request hides the window and moves focus on" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = try f.open("a");
+    f.pass();
+    const b = try f.open("b");
+    f.pass();
+    requestMinimize(&f.wm, b);
+    f.pass();
+    try testing.expect(!f.rec.lastPlace(b).?.visible);
+    try testing.expect(f.rec.focused == a);
+}
+
+test "intersect" {
+    const a: types.Rect = .{ .x = 0, .y = 0, .w = 100, .h = 50 };
+    try testing.expectEqual(@as(?types.Rect, .{ .x = 10, .y = 0, .w = 90, .h = 20 }), intersect(a, .{ .x = 10, .y = -30, .w = 500, .h = 50 }));
+    try testing.expectEqual(@as(?types.Rect, null), intersect(a, .{ .x = 100, .y = 0, .w = 5, .h = 5 }));
 }

@@ -1,28 +1,28 @@
 # Multiple monitors
 
 What wmaker-wl does with external monitors, what it cannot do, and how to set it up. The logic is in
-`src/monitors.zig`; the connection to river is in `src/output.zig`.
+`src/monitors.zig`; the connection to wlroots is in `src/output.zig`.
 
-## What river allows
+## What wmaker-wl does
 
-For each output, river gives a window manager a position, a size and the global name of the matching
-`wl_output`. **A window manager under river cannot change modes, scale or arrangement.** Tools do that
-through `wlr-output-management` (kanshi, wlr-randr, wdisplays). So wmaker-wl does two things:
+Every output wlroots announces gets its preferred mode and a place on the desk (`wlr_output_layout`).
+wmaker-wl does not change modes, scale or arrangement yet: tools do that through
+`wlr-output-management` (kanshi, wlr-randr, wdisplays), once that protocol is served. Until then wmaker-wl
+does two things:
 
-1. It recognises monitors (connector such as `DP-1`, make, model, description) through the `wl_output` it
-   binds on the side, and then manages windows and workspaces per monitor.
+1. It recognises monitors (connector such as `DP-1`, make, model, description) through the wlroots output, and then manages windows and workspaces per monitor.
 2. It starts the right tool when exactly a given set of monitors is connected (`monitor_profile`).
 
 ## What happens automatically
 
-- **Debouncing.** Plugging in a dock with three screens makes river report output, position and size one
+- **Debouncing.** Plugging in a dock with three screens makes wlroots report output, position and size one
   after another, three times. A change only counts after `monitor_settle_ms` (default 400 ms) without
   another one, and only then are rules applied.
 - **Windows remember their monitor.** When a monitor disappears, its windows move to the primary monitor
   (same workspace index) and remember where they came from. When the monitor comes back (same identity,
   same connector) they return. Moving a window yourself clears that memory.
 - **Order by position.** `focus_output_next` / `focus_output_prev` go left to right
-  (`output_order = "position"`), not in the order river announced the monitors. `"connection"` gives that
+  (`output_order = "position"`), not in the order the monitors were announced. `"connection"` gives that
   old behaviour back.
 - **Primary monitor.** New windows, the Dock and the Clip go there unless something else decides.
 - The only connected monitor can never be disabled.
@@ -78,5 +78,5 @@ the profile chosen last, and for windows `home=<key>/wsN`. See [DEBUGGING.md](DE
 - Setting modes, scale and position directly through `wlr-output-management` instead of only running hook
   commands.
 - Dock and Clip per monitor, and separate workspace names per monitor.
-- Real hotplug testing. Everything is tested on the model, not against a running river with a monitor
+- Real hotplug testing. Everything is tested on the model, not against a running compositor with a monitor
   actually being plugged in and out.

@@ -503,7 +503,7 @@ test "process matching: only wmaker-wl, only real pids" {
     try std.testing.expect(isCompositorComm("wmaker-wl\n"));
     try std.testing.expect(isCompositorComm("wmaker-wl"));
     try std.testing.expect(!isCompositorComm("wmaker-wl-prefs\n"));
-    try std.testing.expect(!isCompositorComm("river\n"));
+    try std.testing.expect(!isCompositorComm("sway\n"));
     try std.testing.expect(!isCompositorComm(""));
 
     try std.testing.expect(parsePid("1234") != null);

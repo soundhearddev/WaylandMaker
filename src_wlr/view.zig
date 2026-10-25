@@ -27,8 +27,19 @@ const backend = @import("backend");
 const manage = @import("manage.zig");
 
 const Server = @import("server.zig").Server;
+const Rect = types.Rect;
+const intersect = manage.intersect;
 
 const all_edges: wlr.Edges = .{ .top = true, .bottom = true, .left = true, .right = true };
+
+/// Everything `place` depends on; equal means nothing to do.
+const Drawn = struct {
+    p: manage.Placement,
+    geo_x: i32,
+    geo_y: i32,
+    /// The three border colours (a reload changes them).
+    colors: [3]u32,
+};
 
 pub const View = struct {
     server: *Server,
@@ -40,6 +51,10 @@ pub const View = struct {
     /// The model's window while mapped.
     win: ?*types.Window = null,
     layer: ?types.Mode = null,
+    /// What `place` did last. A pass places every visible window; most of
+    /// them have not changed, and the scene calls are skipped for those.
+    last: ?Drawn = null,
+    sent_maximized: bool = false,
 
     commit: wl.Listener(*wlr.Surface) = .init(onCommit),
     map: wl.Listener(void) = .init(onMap),
@@ -105,10 +120,23 @@ pub const View = struct {
     pub fn place(view: *View, cfg: *const config.Config, p: manage.Placement) void {
         const toplevel = view.toplevel orelse return;
         if (!p.visible) {
-            view.tree.node.setEnabled(false);
+            if (view.last != null) view.tree.node.setEnabled(false);
+            view.last = null;
             return;
         }
-        view.tree.node.setEnabled(true);
+
+        const geo = toplevel.base.geometry;
+        const drawn: Drawn = .{
+            .p = p,
+            .geo_x = geo.x,
+            .geo_y = geo.y,
+            .colors = .{ cfg.border_focused, cfg.border_unfocused, cfg.border_floating },
+        };
+        if (view.last) |l| if (std.meta.eql(l, drawn)) return;
+        const was_hidden = view.last == null;
+        view.last = drawn;
+
+        if (was_hidden) view.tree.node.setEnabled(true);
 
         // The layer decides what is drawn over what.
         if (view.layer != p.mode) {
@@ -117,14 +145,26 @@ pub const View = struct {
         }
         if (p.raise) view.tree.node.raiseToTop();
 
+        if (view.sent_maximized != p.maximized) {
+            view.sent_maximized = p.maximized;
+            _ = toplevel.setMaximized(p.maximized);
+        }
+
         view.tree.node.setPosition(p.rect.x, p.rect.y);
 
         // The client draws its geometry box (shadows and the like lie outside
-        // it); that box is what fills the content rectangle.
-        const geo = toplevel.base.geometry;
+        // it); that box is what fills the content rectangle. `clip` (relative
+        // to the content's corner) cuts it further.
         view.surface_tree.node.setPosition(-geo.x, -geo.y);
-        const clip: wlr.Box = .{ .x = geo.x, .y = geo.y, .width = p.rect.w, .height = p.rect.h };
-        view.surface_tree.node.subsurfaceTreeSetClip(&clip);
+        const content: Rect = .{ .x = 0, .y = 0, .w = p.rect.w, .h = p.rect.h };
+        const shown = if (p.clip) |c| intersect(content, c) else content;
+        if (shown) |r| {
+            const clip: wlr.Box = .{ .x = geo.x + r.x, .y = geo.y + r.y, .width = r.w, .height = r.h };
+            view.surface_tree.node.setEnabled(true);
+            view.surface_tree.node.subsurfaceTreeSetClip(&clip);
+        } else {
+            view.surface_tree.node.setEnabled(false);
+        }
 
         view.placeBorders(cfg, p);
     }
@@ -147,16 +187,20 @@ pub const View = struct {
         const w = p.rect.w;
         const h = p.rect.h;
         // top, bottom, left, right
-        const boxes = [4]struct { x: i32, y: i32, w: i32, h: i32 }{
+        const boxes = [4]Rect{
             .{ .x = -bw, .y = -bw, .w = w + 2 * bw, .h = bw },
             .{ .x = -bw, .y = h, .w = w + 2 * bw, .h = bw },
             .{ .x = -bw, .y = 0, .w = bw, .h = h },
             .{ .x = w, .y = 0, .w = bw, .h = h },
         };
         for (view.borders, boxes) |b, box| {
+            const r = (if (p.clip) |c| intersect(box, c) else box) orelse {
+                b.node.setEnabled(false);
+                continue;
+            };
             b.node.setEnabled(true);
-            b.node.setPosition(box.x, box.y);
-            b.setSize(box.w, box.h);
+            b.node.setPosition(r.x, r.y);
+            b.setSize(r.w, r.h);
             b.setColor(&color);
         }
     }
@@ -202,6 +246,7 @@ pub const View = struct {
         };
         view.win = win;
         view.layer = null;
+        view.last = null;
 
         manage.setString(wm, &win.app_id, if (toplevel.app_id) |s| std.mem.span(s) else null);
         manage.setString(wm, &win.title, if (toplevel.title) |s| std.mem.span(s) else null);
@@ -253,22 +298,26 @@ pub const View = struct {
 
     // ---- client requests ---------------------------------------------------------------------
 
-    /// Interactive move/resize with the pointer is milestone B; until then
-    /// the request is acknowledged by ignoring it, which the protocol allows.
-    fn onRequestMove(_: *wl.Listener(*wlr.XdgToplevel.event.Move), _: *wlr.XdgToplevel.event.Move) void {
-        log.debug("request_move ignored (milestone B)", .{});
+    /// Client-initiated move/resize (a CSD title bar, a resize handle). Honoured
+    /// only while a pointer button is down, as the protocol says.
+    fn onRequestMove(listener: *wl.Listener(*wlr.XdgToplevel.event.Move), _: *wlr.XdgToplevel.event.Move) void {
+        const view: *View = @fieldParentPtr("request_move", listener);
+        const win = view.win orelse return;
+        view.server.cursor.beginClientOp(.move, win, null);
     }
 
-    fn onRequestResize(_: *wl.Listener(*wlr.XdgToplevel.event.Resize), _: *wlr.XdgToplevel.event.Resize) void {
-        log.debug("request_resize ignored (milestone B)", .{});
+    fn onRequestResize(listener: *wl.Listener(*wlr.XdgToplevel.event.Resize), event: *wlr.XdgToplevel.event.Resize) void {
+        const view: *View = @fieldParentPtr("request_resize", listener);
+        const win = view.win orelse return;
+        view.server.cursor.beginClientOp(.resize, win, event.edges);
     }
 
-    /// Maximize in a tiling layout is the column filling the work area; a
-    /// client's wish for it changes nothing yet, but must be answered with a
-    /// configure or the client waits for it.
+    /// Maximize in a tiling layout is the column filling the work area. The
+    /// protocol wants an answer either way.
     fn onRequestMaximize(listener: *wl.Listener(void)) void {
         const view: *View = @fieldParentPtr("request_maximize", listener);
         const toplevel = view.toplevel orelse return;
+        if (view.win) |win| manage.requestMaximize(view.server.wm, win, toplevel.requested.maximized);
         if (toplevel.base.initialized) _ = toplevel.base.scheduleConfigure();
     }
 
@@ -285,6 +334,7 @@ pub const View = struct {
     fn onRequestMinimize(listener: *wl.Listener(void)) void {
         const view: *View = @fieldParentPtr("request_minimize", listener);
         const toplevel = view.toplevel orelse return;
+        if (view.win) |win| manage.requestMinimize(view.server.wm, win);
         if (toplevel.base.initialized) _ = toplevel.base.scheduleConfigure();
     }
 
@@ -300,6 +350,7 @@ pub const View = struct {
         const win = view.win orelse return;
         const toplevel = view.toplevel orelse return;
         manage.setString(view.server.wm, &win.app_id, if (toplevel.app_id) |s| std.mem.span(s) else null);
+        manage.appIdChanged(view.server.wm, win);
     }
 
     fn onSetParent(listener: *wl.Listener(void)) void {

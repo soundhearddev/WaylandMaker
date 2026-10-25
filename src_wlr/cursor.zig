@@ -3,8 +3,10 @@
 // The pointer: the cursor on the desk, the theme, what is under it, and what
 // a click or a hover does to the focus.
 //
-// Moving and resizing windows with the pointer (the `idle -> requested ->
-// running -> ending` state machine of types.OpState) is milestone B.
+// Moving and resizing with the pointer (mouse_mod + left/right button, or a
+// client's request) run the state machine of pointer_op.zig: while it grabs,
+// motion only changes the distance from where it began, and the manage pass
+// turns that into a rectangle.
 
 const std = @import("std");
 const log = std.log.scoped(.cursor);
@@ -15,17 +17,34 @@ const wlr = @import("wlroots");
 
 const model = @import("model");
 const action = model.action;
+const config = model.config;
+const types = model.types;
+const backend = @import("backend");
+const keys = @import("keys.zig");
+const pointer_op = @import("pointer_op.zig");
 
 const Server = @import("server.zig").Server;
 const View = @import("view.zig").View;
 
 const cursor_size = 24;
+const btn_left = 0x110;
+const btn_right = 0x111;
 
 pub const Cursor = struct {
     server: *Server,
     wlr_cursor: *wlr.Cursor,
     xcursor: *wlr.XcursorManager,
     shape_manager: *wlr.CursorShapeManagerV1,
+    /// The cursor already shows the default image: motion over nothing must
+    /// not set it again on every event.
+    image_default: bool = false,
+    /// Pointer buttons held (a client's move/resize request is valid only
+    /// while one is).
+    buttons_down: u32 = 0,
+    /// Where the running operation began, and the button that began it.
+    op_x: f64 = 0,
+    op_y: f64 = 0,
+    op_button: u32 = 0,
 
     motion: wl.Listener(*wlr.Pointer.event.Motion) = .init(onMotion),
     motion_absolute: wl.Listener(*wlr.Pointer.event.MotionAbsolute) = .init(onMotionAbsolute),
@@ -72,6 +91,7 @@ pub const Cursor = struct {
     /// The client under the pointer sets the cursor image (a surface).
     pub fn clientSetsCursor(c: *Cursor, event: *wlr.Seat.event.RequestSetCursor) void {
         if (event.seat_client != c.server.seat.pointer_state.focused_client) return;
+        c.image_default = false;
         c.wlr_cursor.setSurface(event.surface, event.hotspot_x, event.hotspot_y);
     }
 
@@ -80,6 +100,7 @@ pub const Cursor = struct {
         const c: *Cursor = @fieldParentPtr("request_shape", listener);
         if (event.device_type != .pointer) return;
         if (event.seat_client != c.server.seat.pointer_state.focused_client) return;
+        c.image_default = false;
         c.wlr_cursor.setXcursor(c.xcursor, wlr.CursorShapeManagerV1.shapeName(event.shape));
     }
 
@@ -113,18 +134,35 @@ pub const Cursor = struct {
     fn processMotion(c: *Cursor, time_msec: u32) void {
         const server = c.server;
         const wm = server.wm;
-        if (wm.seats.first()) |s| {
+        const seat = wm.seats.first();
+        if (seat) |s| {
             s.pointer_x = @intFromFloat(c.wlr_cursor.x);
             s.pointer_y = @intFromFloat(c.wlr_cursor.y);
+
+            // A move or resize owns the pointer: clients see nothing.
+            if (pointer_op.grabbing(s)) {
+                pointer_op.setDelta(
+                    s,
+                    @intFromFloat(c.wlr_cursor.x - c.op_x),
+                    @intFromFloat(c.wlr_cursor.y - c.op_y),
+                );
+                backend.manageDirty(wm.obj);
+                return;
+            }
         }
 
         const hit = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y) orelse {
-            c.wlr_cursor.setXcursor(c.xcursor, "default");
+            if (!c.image_default) {
+                c.wlr_cursor.setXcursor(c.xcursor, "default");
+                c.image_default = true;
+            }
             server.seat.pointerNotifyClearFocus();
+            if (seat) |s| s.hovered = null;
             return;
         };
         server.seat.pointerNotifyEnter(hit.surface, hit.sx, hit.sy);
         server.seat.pointerNotifyMotion(time_msec, hit.sx, hit.sy);
+        if (seat) |s| s.hovered = hit.view.win;
 
         // focus_follows_mouse: hovering is a focus request, once per window.
         if (wm.cfg.focus_follows_mouse and server.focused != hit.view) {
@@ -132,15 +170,72 @@ pub const Cursor = struct {
         }
     }
 
+    /// Modifiers held on the seat's keyboard.
+    fn heldMods(c: *Cursor) u32 {
+        const kb = c.server.seat.getKeyboard() orelse return 0;
+        return @bitCast(kb.getModifiers());
+    }
+
     fn onButton(listener: *wl.Listener(*wlr.Pointer.event.Button), event: *wlr.Pointer.event.Button) void {
         const c: *Cursor = @fieldParentPtr("button", listener);
         const server = c.server;
+        const wm = server.wm;
+        const seat = wm.seats.first();
+
+        if (event.state == .released) {
+            c.buttons_down -|= 1;
+            // The button that began a move/resize ends it, and clients never
+            // saw it pressed.
+            if (seat) |s| if (s.op_state != .idle and event.button == c.op_button) {
+                pointer_op.release(s);
+                backend.manageDirty(wm.obj);
+                return;
+            };
+            _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
+            return;
+        }
+
+        c.buttons_down += 1;
+        const hit = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y);
+
+        // mouse_mod + left = move, + right = resize.
+        const op: ?types.PointerOp = switch (event.button) {
+            btn_left => .move,
+            btn_right => .resize,
+            else => null,
+        };
+        if (op != null and keys.normalize(c.heldMods()) == keys.normalize(config.modsBits(wm.cfg.mouse_mod))) {
+            if (seat) |s| if (hit) |h| if (h.view.win) |win| {
+                c.beginOp(s, op.?, win, event.button);
+                return;
+            };
+        }
+
         _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
 
         // Click to focus.
-        if (event.state != .pressed) return;
-        const hit = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y) orelse return;
-        if (hit.view.win) |win| action.requestFocus(server.wm, win);
+        if (hit) |h| if (h.view.win) |win| action.requestFocus(wm, win);
+    }
+
+    fn beginOp(c: *Cursor, seat: *types.Seat, op: types.PointerOp, win: *types.Window, button: u32) void {
+        if (!pointer_op.begin(c.server.wm, seat, op, win)) return;
+        c.op_x = c.wlr_cursor.x;
+        c.op_y = c.wlr_cursor.y;
+        c.op_button = button;
+        backend.manageDirty(c.server.wm.obj);
+    }
+
+    /// A client asked to move or resize its window (CSD). Only while a button
+    /// is held; `edges` says which handle of a resize was grabbed.
+    pub fn beginClientOp(c: *Cursor, op: types.PointerOp, win: *types.Window, edges: ?wlr.Edges) void {
+        if (c.buttons_down == 0) return;
+        const seat = c.server.wm.seats.first() orelse return;
+        c.beginOp(seat, op, win, btn_left);
+        if (seat.op_state != .requested) return;
+        if (edges) |e| {
+            seat.op_resize_left = e.left;
+            seat.op_resize_top = e.top;
+        }
     }
 
     fn onAxis(listener: *wl.Listener(*wlr.Pointer.event.Axis), event: *wlr.Pointer.event.Axis) void {

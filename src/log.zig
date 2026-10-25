@@ -3,7 +3,7 @@
 // Which log messages wmaker-wl prints, decided at run time.
 //
 // Every source file logs through its own scope (`std.log.scoped(.window)` ...),
-// so a line reads `info(window): ...` like river's own `debug(wm): ...`. What is
+// so a line reads `info(window): ...` like wlroots' own `debug(wm): ...`. What is
 // printed is a filter, set with the environment variable WMAKER_LOG or the
 // option `--log`:
 //

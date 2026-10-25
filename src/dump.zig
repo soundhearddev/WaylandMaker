@@ -46,7 +46,7 @@ fn writeOutputs(wm: *WindowManager, w: *std.Io.Writer) Error!void {
         if (out.primary) try w.writeAll(" primary");
         if (wm.active_output == out) try w.writeAll(" [working]");
         if (!out.settled) try w.writeAll(" (not settled)");
-        try w.print("\n  key={x} wl_global={d} usable={s}\n", .{ out.mon.key(), out.wl_global, if (out.usable != null) "layer-shell" else "full" });
+        try w.print("\n  key={x} usable={s}\n", .{ out.mon.key(), if (out.usable != null) "layer-shell" else "full" });
         var wi: u32 = 0;
         while (wi < out.workspace_count) : (wi += 1) {
             const ws = &out.workspaces[wi];

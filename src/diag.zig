@@ -35,17 +35,10 @@ pub fn initFromEnv() void {
     }
 }
 
-fn onUsr1(_: std.os.linux.SIG) callconv(.c) void {
+/// Ask for a state dump in the next manage sequence (SIGUSR1; the compositor
+/// takes the signal through its event loop, so this is not a signal handler).
+pub fn requestDump() void {
     dump_requested.store(true, .monotonic);
-}
-
-pub fn installSignalHandler() void {
-    const act: std.posix.Sigaction = .{
-        .handler = .{ .handler = onUsr1 },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(.USR1, &act, null);
 }
 
 /// A SIGUSR1 came in and has not been served yet (the loop wakes up for it).

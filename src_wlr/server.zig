@@ -114,6 +114,15 @@ pub const Server = struct {
         _ = try wlr.PrimarySelectionDeviceManagerV1.create(wl_server);
         const decoration = try wlr.XdgDecorationManagerV1.create(wl_server);
 
+        // GPU clients hand over dmabufs; with this the scene can also show a
+        // fullscreen client's buffer on the display plane directly (direct
+        // scanout: no copy, no compositing, the biggest win for games and video).
+        const dmabuf = try wlr.LinuxDmabufV1.createWithRenderer(wl_server, 4, renderer);
+        scene.setLinuxDmabufV1(dmabuf);
+        _ = try wlr.Viewporter.create(wl_server);
+        _ = try wlr.SinglePixelBufferManagerV1.create(wl_server);
+        _ = try wlr.XdgOutputManagerV1.create(wl_server, output_layout);
+
         try server.cursor.init(server);
 
         wlr_backend.events.new_output.add(&server.new_output);
@@ -128,6 +137,7 @@ pub const Server = struct {
 
         // The model's view of the compositor.
         wm.obj = backend.handle(backend.WindowManager, server);
+        wm.obj_version = 2; // the scene can clip windows
         backend.hooks = .{ .manage_dirty = hookManageDirty, .close_window = hookCloseWindow };
         _ = try manage.createSeat(wm, backend.handle(backend.Seat, server));
 
@@ -210,7 +220,16 @@ pub const Server = struct {
 
     fn runManage(server: *Server) void {
         server.manage_idle = null;
-        manage.run(server.wm, server.sink());
+        manage.run(server.wm, server.sink(), server.nowMs());
+        // Something still moves: ask for the next frame. The pass after it is
+        // paced by the monitor (see Monitor.onFrame), so an animation costs
+        // one pass per displayed frame and nothing when it ends.
+        if (server.wm.anim_active) server.requestFrames();
+    }
+
+    fn requestFrames(server: *Server) void {
+        var it = server.monitors.iterator(.forward);
+        while (it.next()) |m| m.wlr_output.scheduleFrame();
     }
 
     fn hookManageDirty(wm_handle: *backend.WindowManager) void {

@@ -54,20 +54,17 @@ Everything about title bars (`NoTitlebar`, `NoResizebar`, `NoCloseButton`, `NoMi
 application icons (`Icon`, `NoAppIcon`, ...) has no effect, because there are no title bars and Dock
 tiles are not made from arbitrary windows.
 
-## What river provides
+## What the compositor serves
 
-The protocol files are in `protocol/`.
+wmaker-wl is the compositor, so there is no separate window manager protocol. It serves `wl_compositor`,
+`wl_subcompositor`, `wl_shm`, `wl_data_device_manager`, primary selection, `wl_seat`, `wl_output`,
+`xdg_wm_base`, `xdg-decoration` (server side: it draws only the border), `xdg-output`, `viewporter`,
+`single-pixel-buffer`, `linux-dmabuf` (and direct scanout of a fullscreen client through it) and
+`cursor-shape-v1`.
 
-- `river_decoration_v1`: `window.get_decoration_above` / `get_decoration_below` with `set_offset`. This is
-  what title bars would be drawn on. Not used yet.
-- `river_shell_surface_v1`: `get_shell_surface(wl_surface)` gives a surface with its own node, plus
-  `focus_shell_surface` and `shell_surface_interaction`. The root menu, window list, Dock and Clip are all
-  shell surfaces, so no layer-shell client is needed for them.
-- Clicks on a shell surface arrive as ordinary `wl_pointer` events in this process.
-
-Besides river's protocols the program binds `wl_compositor`, `wl_shm`, `wl_seat`, `wl_output`, and
-`wp_cursor_shape_manager_v1` if the compositor has it (without it the pointer keeps whatever shape the
-last window set). Drawing is cairo and pango.
+Not served yet: `wlr-layer-shell`, `ext-session-lock`, idle notify and inhibit, `xdg-activation`,
+foreign-toplevel, screencopy, `wlr-output-management`, pointer constraints. See
+[TODO wlroots.md](TODO%20wlroots.md) for the order.
 
 ## Differences that stay
 

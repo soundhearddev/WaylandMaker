@@ -1,63 +1,40 @@
-# TODO: wlroots backend (river -> own compositor)
+# TODO: wlroots compositor
 
-Goal: wmaker-wl runs as its own compositor on wlroots instead of being a client of river.
+wmaker-wl is its own compositor on wlroots; river is gone from the tree (branch `river_abandon_test`).
 Bindings: `zig-wlroots` 0.20.x (needs Zig 0.16, wlroots 0.20, zig-wayland, zig-xkbcommon, zig-pixman).
 
-Rules while doing this:
-- river backend keeps working until the wlroots backend is good enough to live in.
-- Model code (`types`, `layout`, `workspace`, `action`, `config`, `dock*`, `wm_*`, `monitors`) must not import wlroots.
+Rules:
+- Model code (`types`, `layout`, `workspace`, `action`, `config`, `manage`, `keys`, `wm_*`, `monitors`, ...) must not
+  import wlroots. Only `main`, `server`, `output`, `view`, `keyboard`, `cursor`, `probe` do.
+- `zig build test` must pass on a machine without wlroots.
 
-## 0. Probe (can wlroots be used from Zig here at all?)
+## 0. Probe
 
-- [x] Install system deps: wlroots 0.20 dev files, libinput, libevdev, pixman, xkbcommon, wayland-protocols, wayland-scanner
-- [x] `zig fetch --save` zig-wlroots and zig-pixman into `build.zig.zon`
-- [x] Separate target `wlr-probe` (own `src_wlr/probe.zig`), main exe untouched
-- [x] Probe builds with Zig 0.16
-- [x] Probe runs nested: `WLR_BACKENDS=wayland ./zig-out/bin/wlr-probe` opens a window inside the current river session
-- [x] Copy the wiring from zig-wlroots `tinywl/build.zig` (scanner `generate` list, imports, system libs)
-- [x] Decide: zig-wlroots bindings (works with Zig 0.16.0; xkbcommon 0.4.0 needs `switch (key) { .Escape => ... }` instead of the old u32 constants)
+- [x] `zig build probe` runs on real wlroots 0.20.2 (backend, renderer, allocator come up)
 
-## 1. Split model from backend
+## 1. River removed, model split from the compositor
 
-Done so far: model handles go through the `backend` module.
-
-- `src/backend_river.zig`: river build, aliases to the generated river types (no change at run time)
-- `src_wlr/backend_wlr.zig`: placeholder with opaque handles and the same `Modifiers` bits
-- `types.zig`, `config.zig`, `action.zig` no longer name `river`
-- `src/model.zig`: the files that must stay river-free (types, layout, workspace, action, config, ...)
-- `zig build wlr-model-check` compiles them with the wlroots placeholder
-
-river use outside the model (this is what the wlroots backend replaces):
-
-| File | `river`/`.obj`/`.node` uses |
-|---|---|
-| `ui.zig` | 45 |
-| `window.zig` | 38 |
-| `seat.zig` | 31 |
-| `output.zig` | 18 |
-| `main.zig` | 16 |
-| `dockhost.zig` | 11 |
-
-- [x] List every `river_*` use per file (table above)
-- [x] Handle types behind `backend` (types, config, action)
-- [x] `zig build` and `zig build test` still pass with the `backend` module (river build unchanged)
-- [x] `zig build wlr-model-check` passes; fix whatever it still finds in the model
-- [ ] Add `wm_dock.zig`, `dock.zig` (logic part) to `model.zig` and the check (`wm_files`, `log`, `trace`, `version` are in)
-- [ ] Define the real backend interface (window, output, seat, shell surface) from the `window/seat/output` call sites
-- [ ] Move `applyManage` / `applyRender` logic behind it
-- [ ] `ui.zig`: separate drawing (cairo/pango, stays) from surface creation and input (changes)
-- [ ] river backend still passes `zig build test` and runs
+- [x] `main`, `window`, `output`, `seat`, `backend_river`, `protocol/river-*.xml` deleted
+- [x] The river-bound UI (root menu, window list, Dock, Clip, miniaturize animation, drawing code) moved to `attic/`;
+      it is not built. It is what section 4 ports.
+- [x] Tests that needed river or the UI code were dropped (7 in `model_test.zig`: Dock/DockApp adoption,
+      `hide_others`; 2 fuzz tests for XPM and OPEN_MENU specs); the ones about placement, focus and floating
+      now run against `manage.zig`
+- [x] `types.zig` lost the river-shaped parts (`XkbBinding`, `PointerBinding`, `WlOutput`, `ui`, `layer_shell`)
+- [x] One module, one build: `zig build` (wmaker-wl + wlprefs), `zig build test`, `zig build probe`, `zig build run`
+- [ ] Move `wm_dock.zig`'s logic and the DockApp adoption (`attic/dockhost.zig`) onto the model
+- [ ] `Window.sent_*` / `Window.ready` still carry the names of the old protocol; rename when touching them
 
 ## 2. Minimal compositor (milestone A: can type in a terminal)
 
-Status: written in `src_wlr/`, **compiled and linked against the zig-wlroots 0.20.1 bindings, not yet run**
+Status: written in `src/`, **compiled and linked against the zig-wlroots 0.20.1 bindings, not yet run**
 (no wlroots 0.20 in the build sandbox). All 89 `wlr_*` symbols it uses exist in wlroots' headers. First real test:
-`zig build wlr && WLR_BACKENDS=wayland ./zig-out/bin/wmaker-wlr` inside river, then from a TTY.
+`zig build run` nested in a running session (or `WLR_BACKENDS=wayland ./zig-out/bin/wmaker-wl`), then from a TTY.
 Build needs wayland-protocols >= 1.44 (or `-Dcolor-manager-version=1`).
 
 Files: `main` (entry) `cli` `boot` (config/env, no wlroots) `server` (globals, loop, `Sink`) `output` `view` (xdg toplevel, popup)
 `keyboard` `cursor` `keys` (bind matching, no wlroots) `manage` (the manage pass, no wlroots) `probe`.
-`keys`, `manage`, `cli` have tests: `zig build wlr-model-check`.
+`keys`, `manage`, `pointer_op`, `cli` have tests: `zig build test`.
 
 - [x] `wl_server`, backend, renderer, allocator, scene, output layout
 - [x] Outputs: add, remove, mode (preferred), `wlr_output_layout`, model `Output` rect kept in sync
@@ -77,17 +54,23 @@ already work through the model (`manage.zig`), so milestone B starts from a work
 Known gaps: DockApps (`dockapp:<n>`) are treated as normal windows until `dockhost` is split; no animations;
 `request_move/resize` are ignored; `monitor()` rules/profiles are not applied; no layer-shell, so no panels yet.
 
-## 3. Tiling parity (milestone B: replaces river for daily layout)
+## 3. Tiling parity (milestone B: daily layout)
 
-- [ ] Feed `layout.zig` results into scene nodes (position, size, borders)
-- [ ] Column strip scrolling, floating, fullscreen, maximize
-- [ ] Workspaces, omnipresent windows, minimize/restore
-- [ ] Move/resize with pointer (state machine `idle -> requested -> running -> ending`)
-- [ ] Client requests: move, resize, maximize, fullscreen, minimize, `set_app_id`, `set_title`
-- [ ] `WMWindowAttributes` per `app_id` still applied on first placement
-- [ ] Animations driven directly (no manage/render roundtrip)
+- [x] Feed `layout.zig` results into scene nodes (position, size, borders)  (code + tests, not run)
+- [x] Column strip scrolling, floating, fullscreen, maximize  (code + tests, not run)
+- [x] Workspaces, omnipresent windows, minimize/restore  (code + tests, not run)
+- [x] Move/resize with pointer (state machine `idle -> requested -> running -> ending`): `pointer_op.zig`, mouse_mod + button, and client requests
+- [x] Client requests: move, resize, maximize, fullscreen, minimize, `set_app_id`, `set_title`
+- [x] `WMWindowAttributes` per `app_id` applied on first placement (and when app_id changes later)
+- [x] Animations driven directly: `src/motion.zig` (shared model code), one pass per displayed frame (`Monitor.onFrame`), nothing when idle
 - [ ] Layer-shell server (`wlr-layer-shell`): panels, exclusive zones, work area
 - [ ] Multi-monitor: hotplug, rules, profiles, `focus/move to output`
+
+Performance notes (the priority): a pass places only what changed (`View.last` skips unchanged windows);
+animations cost one pass per displayed frame and nothing afterwards; the cursor sets its image only on change;
+linux-dmabuf is connected to the scene, so a fullscreen client can be scanned out directly.
+Still open: layer-shell (`wlr-layer-shell` XML is not in wayland-protocols; needs the protocol file in `protocol/`),
+monitor rules/profiles, focus/move to output with the wlroots outputs.
 
 ## 4. Shell parts (milestone C: Window Maker feel)
 
@@ -106,7 +89,7 @@ Known gaps: DockApps (`dockapp:<n>`) are treated as normal windows until `dockho
 - [ ] ext-session-lock (screen locker)
 - [ ] wlr-output-management (kanshi, wlr-randr)
 - [ ] Screencopy / ext-image-copy-capture (grim, screen sharing via portal)
-- [ ] xdg-output, foreign-toplevel (taskbars), gamma control
+- [ ] foreign-toplevel (taskbars), gamma control  (xdg-output done)
 - [ ] Pointer constraints, relative pointer (games)
 - [ ] Tablet, text-input / input-method (only if needed)
 - [ ] XWayland (optional, decide later)
@@ -114,15 +97,15 @@ Known gaps: DockApps (`dockapp:<n>`) are treated as normal windows until `dockho
 
 ## 6. Switch-over
 
-- [ ] Run as real session from TTY for a full week without river
-- [ ] `zig build run` starts the wlroots backend, river backend behind an option
-- [ ] Update README, `docs/ARCHITECTURE.md`, `docs/TODO.md`
-- [ ] Remove `protocol/river-*.xml` and the river backend when no longer needed
-- [ ] Re-run benchmarks, tick off the Performance items that became obsolete
+- [ ] Run as a real session from a TTY for a full week
+- [x] `zig build run` starts the compositor
+- [x] README, `docs/ARCHITECTURE.md` and the other docs describe the wlroots build
+- [x] `protocol/river-*.xml` and the river backend removed
+- [ ] Re-run benchmarks, tick off the Performance items in `docs/TODO.md` that became obsolete
 
 ## Open questions / risks
 
-- zig-wlroots only binds what river needs; missing pieces mean own bindings or `@cImport`
+- zig-wlroots binds most of wlroots, but not `wlr-layer-shell`'s protocol XML (it is not in wayland-protocols): it has to be added under `protocol/`
 - wlroots minor releases break API; zig-wlroots tracks one wlroots version at a time
 - Distros may not ship wlroots 0.20 yet (build from source or pin via Nix)
 - Own compositor means own crash handling: a crash kills the whole session
