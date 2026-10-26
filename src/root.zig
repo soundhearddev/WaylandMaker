@@ -14,10 +14,10 @@ test {
     _ = @import("animation.zig");
     _ = @import("bench.zig");
     _ = @import("cli.zig");
-    _ = @import("compatibility.zig");
     _ = @import("config.zig");
     _ = @import("dockapp.zig");
     _ = @import("diag.zig");
+    _ = @import("diag_test.zig");
     _ = @import("dump.zig");
     _ = @import("fileutil.zig");
     _ = @import("fuzz_test.zig");
@@ -30,6 +30,10 @@ test {
     _ = @import("model_test.zig");
     _ = @import("monitors.zig");
     _ = @import("motion.zig");
+    _ = @import("outputs.zig");
+    _ = @import("dock_model.zig");
+    _ = @import("dockhost.zig");
+    _ = @import("dock_view.zig");
     _ = @import("perf.zig");
     _ = @import("plist.zig");
     _ = @import("pointer_op.zig");

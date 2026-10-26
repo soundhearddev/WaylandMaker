@@ -41,11 +41,6 @@ pub fn requestDump() void {
     dump_requested.store(true, .monotonic);
 }
 
-/// A SIGUSR1 came in and has not been served yet (the loop wakes up for it).
-pub fn dumpPending() bool {
-    return dump_requested.load(.monotonic);
-}
-
 /// Run the invariant check if it is switched on; log what it finds.
 pub fn maybeCheck(wm: *types.WindowManager) void {
     if (!checks_enabled) return;

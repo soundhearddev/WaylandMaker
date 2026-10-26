@@ -25,6 +25,7 @@ const diag = @import("diag.zig");
 const Monitor = @import("output.zig").Monitor;
 const View = @import("view.zig").View;
 const Popup = @import("view.zig").Popup;
+const Decoration = @import("view.zig").Decoration;
 const Keyboard = @import("keyboard.zig").Keyboard;
 const Cursor = @import("cursor.zig").Cursor;
 
@@ -56,6 +57,9 @@ pub const Server = struct {
     /// the compositor last set it).
     focused: ?*View = null,
     manage_idle: ?*wl.EventSource = null,
+    /// Wakes the loop when monitor changes have been quiet long enough to
+    /// apply the rules (`outputs.settle`); armed only while one is pending.
+    settle_timer: ?*wl.EventSource = null,
     quitting: bool = false,
 
     new_output: wl.Listener(*wlr.Output) = .init(onNewOutput),
@@ -138,7 +142,6 @@ pub const Server = struct {
 
         // The model's view of the compositor.
         wm.obj = backend.handle(backend.WindowManager, server);
-        wm.obj_version = 2; // the scene can clip windows
         backend.hooks = .{ .manage_dirty = hookManageDirty, .close_window = hookCloseWindow };
         _ = try manage.createSeat(wm, backend.handle(backend.Seat, server));
 
@@ -152,6 +155,8 @@ pub const Server = struct {
     pub fn destroy(server: *Server) void {
         if (server.manage_idle) |s| s.remove();
         server.manage_idle = null;
+        if (server.settle_timer) |t| t.remove();
+        server.settle_timer = null;
         server.wl_server.destroyClients();
 
         server.new_output.link.remove();
@@ -240,6 +245,28 @@ pub const Server = struct {
         // paced by the monitor (see Monitor.onFrame), so an animation costs
         // one pass per displayed frame and nothing when it ends.
         if (server.wm.anim_active) server.requestFrames();
+        server.armSettleTimer();
+    }
+
+    /// Monitor changes wait for a quiet time before the rules apply: sleep
+    /// until then, and nothing at all when no change is pending.
+    fn armSettleTimer(server: *Server) void {
+        const ms = model.outputs.settleWaitMs(server.wm, server.nowMs()) orelse return;
+        const timer = server.settle_timer orelse blk: {
+            const t = server.loop.addTimer(*Server, onSettleTimer, server) catch {
+                log.err("out of memory: cannot arm the monitor timer", .{});
+                return;
+            };
+            server.settle_timer = t;
+            break :blk t;
+        };
+        // A delay of 0 would disarm the timer.
+        timer.timerUpdate(@max(ms, 1)) catch |err| log.warn("monitor timer: {t}", .{err});
+    }
+
+    fn onSettleTimer(server: *Server) c_int {
+        server.scheduleManage();
+        return 0;
     }
 
     fn requestFrames(server: *Server) void {
@@ -377,7 +404,7 @@ pub const Server = struct {
     /// `prefer_no_csd`: we draw the (border) decoration; otherwise the client does.
     fn onNewDecoration(listener: *wl.Listener(*wlr.XdgToplevelDecorationV1), decoration: *wlr.XdgToplevelDecorationV1) void {
         const server: *Server = @fieldParentPtr("new_decoration", listener);
-        _ = decoration.setMode(if (server.wm.cfg.prefer_no_csd) .server_side else .client_side);
+        Decoration.create(server, decoration) catch |err| log.err("cannot create a decoration: {t}", .{err});
     }
 
     fn onRequestSetCursor(listener: *wl.Listener(*wlr.Seat.event.RequestSetCursor), event: *wlr.Seat.event.RequestSetCursor) void {

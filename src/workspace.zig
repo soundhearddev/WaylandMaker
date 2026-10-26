@@ -590,9 +590,3 @@ pub fn defaultFocus(ws: *Workspace) ?*Window {
     if (ws.strip.activeWindow()) |w| return w;
     return ws.floating.last();
 }
-
-pub fn wsIndexOf(wm: *WindowManager, win: *Window) ?u32 {
-    _ = wm;
-    const ws = win.workspace orelse return null;
-    return ws.index;
-}

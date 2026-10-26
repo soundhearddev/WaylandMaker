@@ -22,7 +22,6 @@ Roughly in the order I care about them. Nothing here is promised.
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
 - [ ] **Icons from `~/.local/share/icons` and `~/.icons`.** Only `/usr/share/icons` and
       `/usr/share/pixmaps` are searched.
-- [ ] **`compatibility.zig`** is a leftover stub that nothing uses at run time. Delete it, or finish it.
 
 ## Monitors
 

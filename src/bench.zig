@@ -50,7 +50,6 @@ const Model = struct {
                 .io = undefined,
                 .cfg = .{ .arena = .init(gpa) },
                 .obj = @ptrCast(&dummy_byte),
-                .obj_version = 6,
                 .outputs = undefined,
                 .windows = undefined,
                 .dock_windows = undefined,

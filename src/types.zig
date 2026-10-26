@@ -43,6 +43,7 @@ const animation = @import("animation.zig");
 const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
+const dock_model = @import("dock_model.zig");
 const monitors = @import("monitors.zig");
 const backend = @import("backend.zig");
 const wl = wayland.client.wl;
@@ -61,15 +62,6 @@ pub const Rect = struct {
     }
     pub fn contains(r: Rect, px: i32, py: i32) bool {
         return px >= r.x and px < r.right() and py >= r.y and py < r.bottom();
-    }
-    /// Shrink on every side by `n` (never below 1x1).
-    pub fn inset(r: Rect, n: i32) Rect {
-        return .{
-            .x = r.x + n,
-            .y = r.y + n,
-            .w = @max(1, r.w - 2 * n),
-            .h = @max(1, r.h - 2 * n),
-        };
     }
 };
 
@@ -210,10 +202,6 @@ pub const Window = struct {
     /// (output.restoreHomes). A hash and an index, not a pointer: the
     /// monitor is gone. Cleared when the window is moved on purpose.
     home: monitors.Home = .{},
-
-    pub fn isTiled(w: *const Window) bool {
-        return w.mode == .tiled;
-    }
 
     /// Shown on every workspace. A tiled window cannot be: it has a slot in
     /// exactly one strip.
@@ -467,9 +455,6 @@ pub const WindowManager = struct {
     cfg: config.Config,
 
     obj: *backend.WindowManager,
-    obj_version: u32,
-
-    pending_ui: ?UiAction = null,
 
     /// Source of `Window.min_order`.
     min_counter: u64 = 0,
@@ -499,6 +484,14 @@ pub const WindowManager = struct {
     /// and rebuilds when `dock_gen` changes (every (re)load bumps it).
     dockapps: dockapp.List = .{},
     dock_gen: u32 = 0,
+    /// The Dock model built from `dockapps` (dockhost.zig); null until the
+    /// first pass, or when it could not be built. Rebuilt when `dock_built`
+    /// differs from `dock_gen`.
+    dock: ?*dock_model.Model = null,
+    dock_built: ?u32 = null,
+    /// The compositor draws the Dock. Until it does the Dock reserves no room
+    /// (an undrawn Dock would only leave an empty strip at the screen edge).
+    dock_shown: bool = false,
     /// Where the Dock saves what the user changed (null: not saved). Owned
     /// by cfg's arena like `dockapps`.
     dock_state_path: ?[]const u8 = null,
@@ -637,19 +630,6 @@ pub const Command = union(enum) {
     move_to_output_prev,
 };
 
-/// What a root-menu click asks for. Executed in manage (focus and
-/// workspace changes are management state).
-pub const UiAction = union(enum) {
-    /// Focus `win`; a minimized one is brought back first.
-    focus: *Window,
-    show_all,
-    hide_others,
-    /// Window Maker's SHUTDOWN: ask every window to close, then leave.
-    shutdown,
-    workspace: u32,
-    workspace_next,
-    workspace_prev,
-};
 // ============================================================================
 // Safe intrusive-list helpers
 // ============================================================================
@@ -699,13 +679,6 @@ pub fn nextFloating(w: *Window) ?*Window {
     const n = w.floating_link.next orelse return null;
     if (n == &ws.floating.link) return null;
     return @fieldParentPtr("floating_link", n);
-}
-
-pub fn prevFloating(w: *Window) ?*Window {
-    const ws = w.workspace orelse return null;
-    const p = w.floating_link.prev orelse return null;
-    if (p == &ws.floating.link) return null;
-    return @fieldParentPtr("floating_link", p);
 }
 
 pub fn nextWindow(w: *Window, wm: *WindowManager) ?*Window {

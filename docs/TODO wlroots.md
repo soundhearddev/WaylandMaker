@@ -22,8 +22,11 @@ Rules:
       now run against `manage.zig`
 - [x] `types.zig` lost the river-shaped parts (`XkbBinding`, `PointerBinding`, `WlOutput`, `ui`, `layer_shell`)
 - [x] One module, one build: `zig build` (wmaker-wl + wlprefs), `zig build test`, `zig build probe`, `zig build run`
-- [ ] Move `wm_dock.zig`'s logic and the DockApp adoption (`attic/dockhost.zig`) onto the model
-- [ ] `Window.sent_*` / `Window.ready` still carry the names of the old protocol; rename when touching them
+- [x] The Dock model (`dock_model.zig`) and the DockApp adoption (`dockhost.zig`) are on the model and tested; `manage.run` adopts,
+      updates and places them every pass. The compositor has to set `wm.dock_shown` once it draws the Dock (until then it reserves no room)
+- [x] `compatibility.zig` deleted; `obj_version` and `UiAction` (river leftovers) removed
+- [x] Monitor rules, profiles and window homes are back as `outputs.zig` (model, tested in `manage.zig` and `diag_test.zig`); the
+      compositor still has to apply what they decide to the wlroots outputs (on/off, mode, scale, position)
 
 ## 2. Minimal compositor (milestone A: can type in a terminal)
 
@@ -52,7 +55,7 @@ Files: `main` (entry) `cli` `boot` (config/env, no wlroots) `server` (globals, l
 Also done beyond the list: window placement, tiling, borders, fullscreen requests and multi-output migration
 already work through the model (`manage.zig`), so milestone B starts from a working base.
 Known gaps: DockApps (`dockapp:<n>`) are treated as normal windows until `dockhost` is split; no animations;
-`request_move/resize` are ignored; `monitor()` rules/profiles are not applied; no layer-shell, so no panels yet.
+`request_move/resize` are ignored; `monitor()` rules/profiles are decided in the model (`outputs.zig`) but not yet applied to the wlroots outputs; no layer-shell, so no panels yet.
 
 ## 3. Tiling parity (milestone B: daily layout)
 
@@ -77,7 +80,7 @@ monitor rules/profiles, focus/move to output with the wlroots outputs.
 - [ ] Root menu as scene buffers (cairo -> `wlr_scene_buffer`)
 - [ ] Window list menu, window menus
 - [ ] Dock and Clip surfaces, hit testing, drag
-- [ ] DockApps: adopt `dockapp:<n>` toplevels, place in tile (`dockhost.zig`)
+- [x] DockApps: adopted and placed in their tile by the model (`dockhost.zig`); the Dock around them is still to be drawn
 - [ ] Miniaturize animation with real window snapshots
 - [ ] Title bars (own drawing) and the `No*` attributes; xdg-decoration (SSD vs CSD)
 - [ ] Dock/Clip on every output; several seats

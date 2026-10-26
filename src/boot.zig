@@ -2,7 +2,7 @@
 //
 // Start-up and reload steps that do not depend on the compositor library:
 // deriving everything from `wm.cfg`, the `environment` option, workspace
-// counts, SIGCHLD. 
+// counts, SIGCHLD.
 
 const std = @import("std");
 const log = std.log.scoped(.boot);

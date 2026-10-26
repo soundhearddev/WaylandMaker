@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0
 //
 // Tests for the diagnostics (invariants.zig, dump.zig) and for the monitor
-// handling on a model (types.zig output order, output.zig rules and homes).
+// handling on a model (types.zig output order, outputs.zig rules and homes).
 // They use the same fixture as model_test.zig: a window manager with dummy
 // Wayland objects, never talking to a compositor.
 
 const std = @import("std");
 const types = @import("types.zig");
 const workspace = @import("workspace.zig");
-const output = @import("output.zig");
+const outputs = @import("outputs.zig");
 const monitors = @import("monitors.zig");
 const invariants = @import("invariants.zig");
 const dump = @import("dump.zig");
@@ -302,20 +302,20 @@ test "windows of a monitor that goes away come back when it returns" {
     try workspace.placeTiled(&f.wm, f.cur(), b); // on the laptop
 
     // The monitor goes away: what output.migrate does, noting the home first.
-    output.rememberHome(&f.wm, second, a, 1);
+    outputs.rememberHome(&f.wm, second, a, 1);
     try expect(a.home.isSet() and a.home.ws == 1 and a.home.matches(second.mon.key()));
     try workspace.moveToWorkspace(&f.wm, a, &f.out.workspaces[1]);
     try expect(a.workspace.?.output == f.out);
     try expectClean(f);
 
     // It comes back: the window goes to the same workspace, b stays.
-    try expectEqual(@as(usize, 1), output.restoreHomes(&f.wm, second));
+    try expectEqual(@as(usize, 1), outputs.restoreHomes(&f.wm, second));
     try expect(a.workspace == &second.workspaces[1]);
     try expect(!a.home.isSet());
     try expect(b.workspace.?.output == f.out);
     try expectClean(f);
     // Nothing more to give back.
-    try expectEqual(@as(usize, 0), output.restoreHomes(&f.wm, second));
+    try expectEqual(@as(usize, 0), outputs.restoreHomes(&f.wm, second));
 }
 
 test "the first home wins when a window is moved twice" {
@@ -325,9 +325,9 @@ test "the first home wins when a window is moved twice" {
     defer mt.destroySecondOutput(second);
     const a = try f.newWindow();
     try workspace.placeTiled(&f.wm, &second.workspaces[0], a);
-    output.rememberHome(&f.wm, second, a, 0);
+    outputs.rememberHome(&f.wm, second, a, 0);
     const key = a.home.key;
-    output.rememberHome(&f.wm, f.out, a, 1); // later, from another monitor
+    outputs.rememberHome(&f.wm, f.out, a, 1); // later, from another monitor
     try expectEqual(key, a.home.key);
     try expectEqual(@as(u32, 0), a.home.ws);
 }
@@ -337,9 +337,9 @@ test "a monitor nobody can tell apart has no home to return to" {
     defer f.deinit();
     const a = try f.newWindow();
     try workspace.placeTiled(&f.wm, f.cur(), a);
-    output.rememberHome(&f.wm, f.out, a, 0); // f.out has no name yet
+    outputs.rememberHome(&f.wm, f.out, a, 0); // f.out has no name yet
     try expect(!a.home.isSet());
-    try expectEqual(@as(usize, 0), output.restoreHomes(&f.wm, f.out));
+    try expectEqual(@as(usize, 0), outputs.restoreHomes(&f.wm, f.out));
 }
 
 test "restore_windows = false: nothing is remembered" {
@@ -351,7 +351,7 @@ test "restore_windows = false: nothing is remembered" {
     f.wm.monitors.rules = &rules;
     const a = try f.newWindow();
     try workspace.placeTiled(&f.wm, &second.workspaces[0], a);
-    output.rememberHome(&f.wm, second, a, 0);
+    outputs.rememberHome(&f.wm, second, a, 0);
     try expect(!a.home.isSet());
 }
 
@@ -362,9 +362,9 @@ test "a minimized window loses its home note without being moved" {
     defer mt.destroySecondOutput(second);
     const a = try f.newWindow();
     try workspace.placeTiled(&f.wm, &second.workspaces[0], a);
-    output.rememberHome(&f.wm, second, a, 0);
+    outputs.rememberHome(&f.wm, second, a, 0);
     workspace.minimize(&f.wm, a);
-    try expectEqual(@as(usize, 0), output.restoreHomes(&f.wm, second));
+    try expectEqual(@as(usize, 0), outputs.restoreHomes(&f.wm, second));
     try expect(!a.home.isSet());
     try expect(a.workspace == null);
 }
@@ -379,7 +379,7 @@ test "applyRule: enabled = false sends the windows to the other monitor; a later
 
     var rules = [_]monitors.Rule{.{ .match = "DP-2", .enabled = false, .workspaces = 2 }};
     f.wm.monitors.rules = &rules;
-    output.applyRule(&f.wm, second);
+    outputs.applyRule(&f.wm, second);
     try expect(second.disabled and second.settled);
     try expect(a.workspace.?.output == f.out);
     try expectEqual(@as(u32, 1), a.workspace.?.index);
@@ -387,7 +387,7 @@ test "applyRule: enabled = false sends the windows to the other monitor; a later
     try expectClean(f);
 
     rules[0].enabled = true;
-    output.applyRule(&f.wm, second);
+    outputs.applyRule(&f.wm, second);
     try expect(!second.disabled);
     try expect(a.workspace == &second.workspaces[1]);
     try expectClean(f);
@@ -400,7 +400,7 @@ test "applyRule: the only monitor cannot be switched off" {
     named(f.out, "eDP-1");
     const rules = [_]monitors.Rule{.{ .match = "eDP-1", .enabled = false, .workspaces = 2 }};
     f.wm.monitors.rules = &rules;
-    output.applyRule(&f.wm, f.out);
+    outputs.applyRule(&f.wm, f.out);
     try expect(!f.out.disabled);
     try expect(types.liveOutput(f.out));
 }
@@ -412,7 +412,7 @@ test "applyRule: primary, first workspace and workspace count" {
     defer mt.destroySecondOutput(second);
     const rules = [_]monitors.Rule{.{ .match = "DP-2", .primary = true, .workspaces = 2, .start_workspace = 1 }};
     f.wm.monitors.rules = &rules;
-    output.applyRule(&f.wm, second);
+    outputs.applyRule(&f.wm, second);
     try expect(second.primary);
     try expectEqual(@as(u32, 1), second.active);
     try expectEqual(@as(u32, 2), second.workspace_count);
@@ -421,7 +421,7 @@ test "applyRule: primary, first workspace and workspace count" {
     // A second application (a config reload) must not reset the workspace
     // the user has switched to since.
     second.active = 0;
-    output.applyRule(&f.wm, second);
+    outputs.applyRule(&f.wm, second);
     try expectEqual(@as(u32, 0), second.active);
 }
 
@@ -431,7 +431,7 @@ test "applyRule on a removed output does nothing" {
     f.wm.cfg.workspace_count = 2;
     f.out.removed = true;
     defer f.out.removed = false;
-    output.applyRule(&f.wm, f.out);
+    outputs.applyRule(&f.wm, f.out);
     try expect(!f.out.settled);
 }
 
@@ -471,7 +471,7 @@ fn randomStep(f: *Fixture, second: *types.Output, rules: *[1]monitors.Rule, rng:
         7 => {
             // The second monitor is switched off or on by its rule.
             rules[0].enabled = rng.boolean();
-            output.applyRule(&f.wm, second);
+            outputs.applyRule(&f.wm, second);
         },
         8 => {
             // The second monitor "disappears and returns": remember homes,
@@ -480,7 +480,7 @@ fn randomStep(f: *Fixture, second: *types.Output, rules: *[1]monitors.Rule, rng:
                 for (0..second.workspace_count) |i| {
                     var it = f.wm.windows.first();
                     while (it) |x| : (it = types.nextWindow(x, &f.wm)) {
-                        if (x.workspace) |xs| if (xs.output == second and xs.index == i) output.rememberHome(&f.wm, second, x, @intCast(i));
+                        if (x.workspace) |xs| if (xs.output == second and xs.index == i) outputs.rememberHome(&f.wm, second, x, @intCast(i));
                     }
                 }
                 var it = f.wm.windows.first();
@@ -490,7 +490,7 @@ fn randomStep(f: *Fixture, second: *types.Output, rules: *[1]monitors.Rule, rng:
                         try workspace.moveToWorkspace(&f.wm, x, &f.out.workspaces[xs.index]);
                     };
                 }
-                _ = output.restoreHomes(&f.wm, second);
+                _ = outputs.restoreHomes(&f.wm, second);
             }
         },
         else => unreachable,

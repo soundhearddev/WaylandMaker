@@ -40,7 +40,6 @@ pub const Fixture = struct {
                 .io = undefined,
                 .cfg = .{ .arena = .init(a) },
                 .obj = @ptrCast(&dummy_byte),
-                .obj_version = 6,
                 .outputs = undefined,
                 .windows = undefined,
                 .dock_windows = undefined,
@@ -1735,4 +1734,232 @@ test "clicking a window makes it the active one, so the view follows it (focus p
     try std.testing.expect(resolve < activate and activate < lay);
     // and the `reload_config` command reloads after the queued actions ran
     try std.testing.expect(std.mem.lastIndexOf(u8, body, "reload(wm);").? > std.mem.indexOf(u8, body, "runPending(wm);").?);
+}
+
+// ---- boot.zig: what start-up and reload derive from the config -------------------------
+
+const boot = @import("boot.zig");
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+test "boot: environment variables are set for the programs we start; a too long value is skipped" {
+    const long = try std.testing.allocator.alloc(u8, 5000);
+    defer std.testing.allocator.free(long);
+    @memset(long, 'x');
+
+    boot.applyEnvironment(&.{
+        .{ .name = "WMAKER_WL_TEST_A", .value = "one" },
+        .{ .name = "WMAKER_WL_TEST_LONG", .value = long },
+        .{ .name = "WMAKER_WL_TEST_B", .value = "two" },
+    });
+    try std.testing.expectEqualStrings("one", std.mem.span(getenv("WMAKER_WL_TEST_A").?));
+    try std.testing.expectEqualStrings("two", std.mem.span(getenv("WMAKER_WL_TEST_B").?));
+    try std.testing.expect(getenv("WMAKER_WL_TEST_LONG") == null);
+
+    boot.applyEnvironment(&.{.{ .name = "WMAKER_WL_TEST_A", .value = "three" }});
+    try std.testing.expectEqualStrings("three", std.mem.span(getenv("WMAKER_WL_TEST_A").?));
+    boot.exportVar("WMAKER_WL_TEST_C", "four");
+    try std.testing.expectEqualStrings("four", std.mem.span(getenv("WMAKER_WL_TEST_C").?));
+}
+
+test "boot: a reload that changes workspace_count resizes every output, one that does not leaves them" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+
+    // A workspace added by a command since the last load survives a reload
+    // that did not touch workspace_count.
+    _ = workspace.setWorkspaceCount(&f.wm, f.out, 4);
+    boot.applyWorkspaceCount(&f.wm, f.wm.cfg.workspace_count);
+    try std.testing.expectEqual(@as(u32, 4), f.out.workspace_count);
+
+    const old = f.wm.cfg.workspace_count;
+    f.wm.cfg.workspace_count = 3;
+    boot.applyWorkspaceCount(&f.wm, old);
+    try std.testing.expectEqual(@as(u32, 3), f.out.workspace_count);
+    try std.testing.expectEqual(@as(u32, 3), second.workspace_count);
+    try std.testing.expect(f.wm.follow_request);
+}
+
+test "boot: a removed output is not resized by a reload" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+    second.removed = true;
+    const before = second.workspace_count;
+
+    const old = f.wm.cfg.workspace_count;
+    f.wm.cfg.workspace_count = before + 1;
+    boot.applyWorkspaceCount(&f.wm, old);
+    try std.testing.expectEqual(before, second.workspace_count);
+    try std.testing.expectEqual(before + 1, f.out.workspace_count);
+}
+
+// ---- DockApps and the Dock model (dockhost.zig) -------------------------------------------
+
+const dockhost = @import("dockhost.zig");
+const dock_model = @import("dock_model.zig");
+
+test "adopt: a DockApp tag arriving after tiling takes the window out of the strip and the window list" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const other = try f.newWindow();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), other);
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+    w.new = false;
+    try check(f);
+    try std.testing.expect(w.mode == .tiled);
+
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(w.role == .dockapp);
+    try std.testing.expect(w.workspace == null and w.column == null);
+    try check(f);
+
+    // Out of the window list, in the DockApp list: nothing that loops over
+    // the windows can reach it any more.
+    var seen_normal = false;
+    var it = f.wm.windows.first();
+    while (it) |x| : (it = types.nextWindow(x, &f.wm)) {
+        if (x == w) seen_normal = true;
+    }
+    try std.testing.expect(!seen_normal);
+    try std.testing.expect(f.wm.dock_windows.first().? == w);
+    try std.testing.expect(types.nextDockWindow(w, &f.wm) == null);
+
+    // Adopting twice changes nothing.
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(f.wm.dock_windows.first().? == w);
+    // The other window is untouched.
+    try std.testing.expect(other.mode == .tiled and other.workspace != null);
+}
+
+test "adopt drops the focus request for the window" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const w = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), w);
+    w.new = false;
+    f.wm.focus_request = w;
+    dockhost.adopt(&f.wm, w);
+    try std.testing.expect(f.wm.focus_request == null);
+    try check(f);
+}
+
+test "syncModel: a DockApp gets a temporary tile while it runs and loses it with the program" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = std.testing.allocator;
+    const kept = [_]dockapp_mod.DockApp{.{ .name = "clock", .command = &.{"wl-clock"}, .y = 1 }};
+    var m = try dock_model.Model.init(a, .{ .apps = &kept }, &.{}, 1);
+    defer m.deinit();
+
+    const clock = try f.newWindow();
+    const tokyo = try f.newWindow();
+    const term = try f.newWindow();
+    clock.app_id = try a.dupe(u8, "dockapp:clock");
+    tokyo.app_id = try a.dupe(u8, "dockapp:tokyo");
+    term.app_id = try a.dupe(u8, "foot");
+    defer for ([_]*Window{ clock, tokyo, term }) |w| a.free(w.app_id.?);
+    dockhost.adopt(&f.wm, clock);
+    dockhost.adopt(&f.wm, tokyo);
+    try workspace.placeTiled(&f.wm, f.cur(), term);
+    term.new = false;
+    try check(f);
+
+    // The kept tile of "clock" is its home and is marked running; "tokyo"
+    // has no entry and gets a temporary tile; "foot" is a normal window and
+    // gets none.
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.slots.items[0].running);
+    const ti = m.dockSlotFor("dockapp:tokyo").?;
+    try std.testing.expect(m.slots.items[ti].app.attached and m.slots.items[ti].running);
+    try std.testing.expect(!m.hasApp("foot"));
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == clock);
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[ti].app) == tokyo);
+    // Nothing changed: nothing reported.
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+
+    // The program ends: its temporary tile goes, the kept tile stays and is
+    // not running any more.
+    tokyo.closed = true;
+    clock.closed = true;
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.dockSlotFor("dockapp:tokyo") == null);
+    try std.testing.expect(m.slot(0) != null and !m.slots.items[0].running);
+    try std.testing.expect(dockhost.hostFor(&f.wm, &m.slots.items[0].app) == null);
+}
+
+test "syncModel: every minimized window gets a Dock tile of its own, gone when it is restored" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var m = try dock_model.Model.init(std.testing.allocator, .{}, &.{}, 1);
+    defer m.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    for ([_]*Window{ a, b }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+
+    // Nothing minimized: no tile.
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
+
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) != null);
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m)); // nothing new: no change
+
+    workspace.minimize(&f.wm, b);
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) != null and m.miniSlotFor(b.min_order) != null);
+    try std.testing.expect(m.miniSlotFor(a.min_order) != m.miniSlotFor(b.min_order));
+
+    // `a` is restored: only its tile goes.
+    const order_a = a.min_order;
+    try workspace.restore(&f.wm, a, f.cur());
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(order_a) == null);
+    try std.testing.expect(m.miniSlotFor(b.min_order) != null);
+
+    // mini_dock = false: no tiles at all, and the existing one goes.
+    f.wm.cfg.mini_dock = false;
+    try std.testing.expect(dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(b.min_order) == null);
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(!dockhost.syncModel(&f.wm, &m));
+    try std.testing.expect(m.miniSlotFor(a.min_order) == null);
+    try check(f);
+}
+
+test "hide_others minimizes other applications only; hide_app the focused one's" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const t1 = try f.newWindow();
+    const t2 = try f.newWindow();
+    const web = try f.newWindow();
+    const clock = try f.newWindow();
+    t1.app_id = try std.testing.allocator.dupe(u8, "foot");
+    t2.app_id = try std.testing.allocator.dupe(u8, "foot");
+    web.app_id = try std.testing.allocator.dupe(u8, "firefox");
+    clock.app_id = try std.testing.allocator.dupe(u8, "dockapp:clock");
+    defer for ([_]*Window{ t1, t2, web, clock }) |w| std.testing.allocator.free(w.app_id.?);
+    dockhost.adopt(&f.wm, clock); // a DockApp is in no workspace and not in the window list
+    for ([_]*Window{ t1, t2, web }) |w| try workspace.placeTiled(&f.wm, f.cur(), w);
+    workspace.activate(t1);
+
+    // Nothing is focused through a seat in the fixture: `focusedWindow` falls
+    // back on the workspace's last focused window, which is t1.
+    action_mod.run(&f.wm, .hide_others);
+    try std.testing.expect(!t1.minimized and !t2.minimized); // same application
+    try std.testing.expect(web.minimized);
+    try std.testing.expect(!clock.minimized); // a DockApp is never "hidden"
+    try check(f);
+
+    action_mod.run(&f.wm, .show_all);
+    try std.testing.expect(!web.minimized);
+
+    action_mod.run(&f.wm, .hide_app);
+    try std.testing.expect(t1.minimized and t2.minimized);
+    try std.testing.expect(!web.minimized and !clock.minimized);
+    try check(f);
 }

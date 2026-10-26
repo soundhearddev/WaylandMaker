@@ -25,8 +25,6 @@ pub fn stopAnimations(win: *Window) void {
     win.has_shown = false;
 }
 
-
-
 /// A pointer drag is going on that must not be smoothed: the window being
 /// dragged follows the pointer, and while a column is resized by hand its
 /// neighbours follow the edge.
@@ -85,7 +83,7 @@ pub fn visualState(wm: *WindowManager, win: *Window) Visual {
     // on a window that has nothing to show yet.
     if (!win.opened and win.ready) {
         win.opened = true;
-        if (cfg.animations and wm.obj_version >= 2) {
+        if (cfg.animations) {
             win.open_anim = animation.Animation.init(cfg.anim_window_open, 0.0, 1.0, 0.0, now);
             if (win.open_anim != null) {
                 anim_log.debug("window `{s}` opens ({d}x{d}) clock={d:.1}", .{ win.app_id orelse "?", win.target.w, win.target.h, now });
@@ -98,7 +96,6 @@ pub fn visualState(wm: *WindowManager, win: *Window) Visual {
             anim_log.debug("open animation finished clock={d:.1}", .{now});
         } else {
             vis.reveal = std.math.clamp(a.valueAt(now), 0.0, 1.0);
-            
         }
     }
 
@@ -170,7 +167,6 @@ test "clipBox: inside = no clip, scrolled under the Dock = cut at the edge, outs
     try std.testing.expectEqual(@as(i32, 1), o.w);
     try std.testing.expect(o.x >= 400);
 }
-
 
 test "axis: a new destination starts from where the window is, arrives exactly" {
     const spec = animation.Spec.default_movement;

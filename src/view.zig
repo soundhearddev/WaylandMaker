@@ -440,3 +440,50 @@ pub const Popup = struct {
         popup.server.gpa.destroy(popup);
     }
 };
+
+/// The decoration mode of one toplevel (xdg-decoration). A client asks for it
+/// before its first commit, and wlroots cannot configure a surface that has
+/// not been initialized yet (it aborts), so the mode is set at the initial
+/// commit, or at once when that has already happened.
+pub const Decoration = struct {
+    server: *Server,
+    decoration: *wlr.XdgToplevelDecorationV1,
+
+    commit: wl.Listener(*wlr.Surface) = .init(onCommit),
+    request_mode: wl.Listener(*wlr.XdgToplevelDecorationV1) = .init(onRequestMode),
+    destroy: wl.Listener(*wlr.XdgToplevelDecorationV1) = .init(onDestroy),
+
+    pub fn create(server: *Server, decoration: *wlr.XdgToplevelDecorationV1) !void {
+        const d = try server.gpa.create(Decoration);
+        d.* = .{ .server = server, .decoration = decoration };
+        decoration.toplevel.base.surface.events.commit.add(&d.commit);
+        decoration.events.request_mode.add(&d.request_mode);
+        decoration.events.destroy.add(&d.destroy);
+        d.apply();
+    }
+
+    /// `prefer_no_csd`: we draw the (border) decoration; otherwise the client does.
+    fn apply(d: *Decoration) void {
+        if (!d.decoration.toplevel.base.initialized) return;
+        _ = d.decoration.setMode(if (d.server.wm.cfg.prefer_no_csd) .server_side else .client_side);
+    }
+
+    fn onCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
+        const d: *Decoration = @fieldParentPtr("commit", listener);
+        if (d.decoration.toplevel.base.initial_commit) d.apply();
+    }
+
+    /// The protocol wants an answer; ours does not depend on what was asked.
+    fn onRequestMode(listener: *wl.Listener(*wlr.XdgToplevelDecorationV1), _: *wlr.XdgToplevelDecorationV1) void {
+        const d: *Decoration = @fieldParentPtr("request_mode", listener);
+        d.apply();
+    }
+
+    fn onDestroy(listener: *wl.Listener(*wlr.XdgToplevelDecorationV1), _: *wlr.XdgToplevelDecorationV1) void {
+        const d: *Decoration = @fieldParentPtr("destroy", listener);
+        d.commit.link.remove();
+        d.request_mode.link.remove();
+        d.destroy.link.remove();
+        d.server.gpa.destroy(d);
+    }
+};

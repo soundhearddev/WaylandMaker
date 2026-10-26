@@ -2,8 +2,7 @@
 
 `wlprefs` is the settings window for wmaker-wl. It is modelled on Window Maker's `WPrefs.app`: same window
 size, same row of section icons, same page layout where it makes sense. It is a separate program in
-`wlprefs/`; `zig build` in the root builds it together with the compositor, and `cd wlprefs && zig build`
-builds it alone.
+`wlprefs/`; `zig build` in the root builds it together with the compositor (it has no build.zig of its own).
 
 It is not a new source of truth. It reads and writes the same `config.lua` that you can edit by hand, and
 leaves everything it does not understand alone.

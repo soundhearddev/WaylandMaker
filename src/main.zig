@@ -122,7 +122,6 @@ pub fn main(init: std.process.Init) !void {
         .io = io,
         .cfg = try config.load(io, gpa),
         .obj = undefined,
-        .obj_version = 0,
         .outputs = undefined,
         .windows = undefined,
         .dock_windows = undefined,

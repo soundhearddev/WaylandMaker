@@ -39,9 +39,9 @@ pub fn requestFocus(wm: *WindowManager, win: *Window) void {
 /// (`focus_follows_mouse_scroll = false` asks for no scrolling).
 pub fn requestFocusFollow(wm: *WindowManager, win: *Window, follow: bool) void {
     // Hovering or clicking a DockApp (the clock in the Dock) must not touch
-    // the focus -- and not set follow_request either, which would scroll
+    // the focus (a DockApp is no window: dockhost.zig) -- and not set follow_request either, which would scroll
     // the strip back to the focused window under the user's hands.
-    if (win.attrs.is("unfocusable")) return;
+    if (win.attrs.is("unfocusable") or win.role == .dockapp) return;
     wm.focus_request = win;
     if (follow) wm.follow_request = true;
     wm.focus_by_pointer = true;

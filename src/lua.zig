@@ -426,4 +426,3 @@ test "load and call: a syntax error and a runtime error leave their message on t
     try std.testing.expect(!load(L, "\x1bLua", "=test"));
     pop(L, 1);
 }
-

@@ -200,7 +200,6 @@ test "command line: --log takes a filter, with a space or an equals sign" {
     }
 }
 
-
 test "main() takes its options from parseArgs and prints help and version on stdout" {
     const src = @embedFile("main.zig");
     const start = std.mem.indexOf(u8, src, "pub fn main(init: std.process.Init) !void {").?;

@@ -24,3 +24,4 @@ pub const log = @import("log.zig");
 pub const trace = @import("trace.zig");
 pub const version = @import("version.zig");
 pub const motion = @import("motion.zig");
+pub const outputs = @import("outputs.zig");

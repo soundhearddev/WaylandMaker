@@ -18,6 +18,10 @@ display. **Compositor** files talk to wlroots.
 | `motion.zig` | where a window is *drawn*: movement spring, opening animation, clip box | model |
 | `animation.zig` | spring and easing curves, parsing `anim_window_*` | model |
 | `monitors.zig` | monitor identification, rules, profiles, hotplug decisions | model |
+| `dock_model.zig` | Dock, Clip and Drawers: tiles, slots, grid, temporary tiles, geometry, hit testing | model |
+| `dock_view.zig` | what each Dock tile looks like (`Look`, cached by key) and what changed between two plans (`diff`); the contract for drawing, see `DOCK.md` | model |
+| `dockhost.zig` | DockApps (`dockapp:<name>`): adoption, tiles that follow the programs, the room the Dock reserves, where each DockApp goes | model |
+| `outputs.zig` | what follows from a monitor coming or going: windows move away and come back (`home`), `monitor()` rules, profile after the settle time | model |
 | `config.zig`, `lua.zig`, `share/default_config.lua` | Lua config and its defaults | model |
 | `plist.zig`, `wm_menu.zig`, `wm_attr.zig`, `wm_files.zig` | Window Maker files: property lists, root menu, `WMWindowAttributes`, where files live | model |
 | `wm_dock.zig`, `dockapp.zig` | Dock and Clip logic and data, `WMState` read/write | model |
@@ -42,6 +46,8 @@ display. **Compositor** files talk to wlroots.
 | `../attic/` | the root menu, Dock, Clip and drawing code of the river build; not built, to be ported | – |
 
 Anything that changes the model can be tested without a compositor, and so can the whole manage pass:
+`outputs.zig` runs inside the manage pass; the compositor only reports monitors and arms a timer (`server.armSettleTimer`) so the rules apply after `monitor_settle_ms`.
+
 `manage.zig` works against a `Sink` (configure a window, place it, focus it), and its tests use a fake.
 
 ### Registering tests

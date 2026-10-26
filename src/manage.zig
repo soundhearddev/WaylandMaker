@@ -28,6 +28,8 @@ const workspace = model.workspace;
 const action = model.action;
 const boot = @import("boot.zig");
 const pointer_op = @import("pointer_op.zig");
+const outputs = @import("outputs.zig");
+const dockhost = @import("dockhost.zig");
 const diag = @import("diag.zig");
 const motion = model.motion;
 const backend = @import("backend.zig");
@@ -85,10 +87,10 @@ pub const Sink = struct {
         quit: *const fn (ctx: *anyopaque) void,
     };
 
-    fn configure(s: Sink, win: *Window, c: Configure) void {
+    pub fn configure(s: Sink, win: *Window, c: Configure) void {
         s.vtable.configure(s.ctx, win, c);
     }
-    fn place(s: Sink, win: *Window, p: Placement) void {
+    pub fn place(s: Sink, win: *Window, p: Placement) void {
         s.vtable.place(s.ctx, win, p);
     }
     fn focus(s: Sink, win: ?*Window) void {
@@ -260,6 +262,13 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
     reapWindows(wm, sink);
     reapOutputs(wm);
 
+    // 1b. Monitors that have been quiet long enough: rules, profile. The
+    //     compositor wakes the loop for it (`outputs.settleWaitMs`).
+    outputs.settle(wm, now_ms);
+
+    // 1c. DockApps are icons, not windows: out of the model's windows now.
+    adoptDockApps(wm, sink);
+
     // 2. A config reload asked for by SIGHUP. Before the queue: it runs the
     //    queue itself first, on the config that produced it.
     if (wm.reload_pending) {
@@ -290,6 +299,10 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
         }
     }
 
+    // 4b. The Dock: tiles follow the programs and the config, and the room it
+    //     takes is known before the layout.
+    const dock_host = dockhost.update(wm, now_ms);
+
     // 5. Struts and dynamic workspaces, after everything that moves windows.
     prepareOutputs(wm);
 
@@ -310,6 +323,9 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
         applyManage(wm, sink, w);
         applyRender(wm, sink, w, w == focus_target);
     }
+
+    // 8b. Where the DockApps go.
+    dockhost.apply(wm, dock_host, sink);
 
     // 9. Keyboard focus.
     var sit = wm.seats.first();
@@ -338,6 +354,8 @@ pub fn shutdown(wm: *WindowManager, sink: Sink) void {
         destroyWindow(wm, sink, w);
         it = next;
     }
+    while (wm.dock_windows.first()) |w| destroyWindow(wm, sink, w);
+    dockhost.deinit(wm);
     while (wm.outputs.first()) |out| {
         types.unlink(&out.link);
         wm.gpa.destroy(out);
@@ -357,6 +375,28 @@ fn reapWindows(wm: *WindowManager, sink: Sink) void {
     while (it) |win| {
         const next = types.nextWindow(win, wm);
         if (win.closed) destroyWindow(wm, sink, win);
+        it = next;
+    }
+    var dit = wm.dock_windows.first();
+    while (dit) |win| {
+        const next = types.nextDockWindow(win, wm);
+        if (win.closed) destroyWindow(wm, sink, win);
+        dit = next;
+    }
+}
+
+/// Every window that carries the DockApp tag becomes a DockApp, before
+/// anything places it. (The tag may arrive late; then the window is already
+/// placed and leaves its strip.)
+fn adoptDockApps(wm: *WindowManager, sink: Sink) void {
+    var it = wm.windows.first();
+    while (it) |win| {
+        const next = types.nextWindow(win, wm);
+        if (!win.closed and dockhost.isDockApp(win.app_id)) {
+            forgetWindow(wm, sink, win);
+            dockhost.adopt(wm, win);
+            backend.manageDirty(wm.obj);
+        }
         it = next;
     }
 }
@@ -424,8 +464,9 @@ fn reapOutputs(wm: *WindowManager) void {
     while (it) |out| {
         const next = types.nextOutput(out, wm);
         if (out.removed) {
-            const target = pickOtherOutput(wm, out);
-            migrate(wm, out, target);
+            outputs.runHook(wm, out, .disconnect);
+            const target = outputs.pickOther(wm, out);
+            outputs.migrate(wm, out, target);
             if (wm.active_output == out) wm.active_output = target;
             types.unlink(&out.link);
             wm.gpa.destroy(out);
@@ -433,55 +474,6 @@ fn reapOutputs(wm: *WindowManager) void {
         }
         it = next;
     }
-}
-
-/// The live output that takes over the windows of `gone`.
-fn pickOtherOutput(wm: *WindowManager, gone: *Output) ?*Output {
-    var live: [model.monitors.max_monitors]*Output = undefined;
-    const n = types.liveOutputs(wm, &live);
-    for (live[0..n]) |o| if (o != gone and o.primary) return o;
-    for (live[0..n]) |o| if (o != gone) return o;
-    return null;
-}
-
-/// Move every window of `out` to the same workspace index on `dest`. With no
-/// destination the windows are left unplaced and placed again when an output
-/// appears (`win.new = true`).
-fn migrate(wm: *WindowManager, out: *Output, dest: ?*Output) void {
-    var wi: u32 = 0;
-    while (wi < out.workspace_count) : (wi += 1) {
-        const src = &out.workspaces[wi];
-        while (anyWindowOn(src)) |win| {
-            workspace.leaveFullscreen(win);
-            rememberHome(wm, out, win, wi);
-            if (dest) |d| {
-                const idx = @min(wi, d.workspace_count - 1);
-                workspace.moveToWorkspace(wm, win, &d.workspaces[idx]) catch {
-                    workspace.unplace(wm, win);
-                    win.new = true;
-                };
-            } else {
-                workspace.unplace(wm, win);
-                win.new = true;
-            }
-        }
-    }
-}
-
-fn anyWindowOn(ws: *types.Workspace) ?*Window {
-    if (ws.strip.columns.first()) |c| if (c.windows.first()) |w| return w;
-    if (ws.floating.first()) |w| return w;
-    return null;
-}
-
-/// Note on `win` where it lived: it goes back when that monitor returns.
-/// The first home wins.
-fn rememberHome(wm: *WindowManager, out: *Output, win: *Window, ws_index: u32) void {
-    if (win.home.isSet()) return;
-    const key = out.mon.key();
-    if (key == 0) return;
-    if (!model.monitors.effective(wm.monitors.rules, &out.mon, wm.cfg.workspace_count).restore_windows) return;
-    win.home = .{ .key = key, .ws = ws_index };
 }
 
 // ---- placement ---------------------------------------------------------------------
@@ -620,6 +612,7 @@ pub fn reload(wm: *WindowManager) void {
         boot.applyWorkspaceCount(wm, old_cfg.workspace_count);
         boot.applyEnvironment(wm.cfg.environment);
         old_cfg.deinit();
+        outputs.applyAll(wm);
         log.info("config reloaded: {s} ({d} binds)", .{ wm.cfg.config_file, wm.cfg.binds.len });
     } else |err| {
         // Something under the new config's arena failed (out of memory, most
@@ -963,10 +956,9 @@ const Fixture = struct {
         f.* = .{
             .wm = .{
                 .gpa = a,
-                .io = undefined,
+                .io = testing.io, // `outputs.settle` times itself
                 .cfg = .{ .arena = .init(a) },
                 .obj = @ptrCast(&dummy_byte),
-                .obj_version = 0,
                 .outputs = undefined,
                 .windows = undefined,
                 .dock_windows = undefined,
@@ -974,6 +966,7 @@ const Fixture = struct {
             },
         };
         f.wm.cfg.workspace_count = 2;
+        f.wm.cfg.anim_window_open = .off; // windows appear at full size in the tests
         f.wm.outputs.init();
         f.wm.windows.init();
         f.wm.dock_windows.init();
@@ -1286,4 +1279,370 @@ test "intersect" {
     const a: types.Rect = .{ .x = 0, .y = 0, .w = 100, .h = 50 };
     try testing.expectEqual(@as(?types.Rect, .{ .x = 10, .y = 0, .w = 90, .h = 20 }), intersect(a, .{ .x = 10, .y = -30, .w = 500, .h = 50 }));
     try testing.expectEqual(@as(?types.Rect, null), intersect(a, .{ .x = 100, .y = 0, .w = 5, .h = 5 }));
+}
+
+// ---- monitors through the pass (outputs.zig) ----------------------------------------
+
+/// A monitor that identifies itself, the way `Monitor.create` reports one.
+fn plugIn(f: *Fixture, name: []const u8, x: i32) !*Output {
+    const out = try createOutput(&f.wm, @ptrCast(&dummy_byte), f.now);
+    setOutputRect(&f.wm, out, .{ .x = x, .y = 0, .w = 1280, .h = 720 }, f.now);
+    setOutputInfo(&f.wm, out, name, "Acme", "M1", null, 1, f.now);
+    return out;
+}
+
+/// Passes until the monitors have been quiet for `monitor_settle_ms`.
+fn passUntilSettled(f: *Fixture) void {
+    f.now += f.wm.monitors.settle.ms + 1;
+    f.pass();
+}
+
+test "monitor changes settle only after a quiet time, then the rules apply once" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const dp = try plugIn(&f, "DP-1", 1920);
+    try testing.expect(f.wm.monitors.settle.pending());
+    try testing.expect(!dp.settled);
+
+    // Too early: nothing is applied, and the loop is told how long to sleep.
+    f.pass();
+    try testing.expect(!dp.settled);
+    const wait = outputs.settleWaitMs(&f.wm, f.now).?;
+    try testing.expect(wait > 0 and wait <= f.wm.monitors.settle.ms);
+
+    passUntilSettled(&f);
+    try testing.expect(dp.settled and f.out.settled);
+    try testing.expect(!f.wm.monitors.settle.pending());
+    try testing.expectEqual(@as(?i32, null), outputs.settleWaitMs(&f.wm, f.now));
+    try testing.expectEqual(@as(u32, 1), f.wm.monitors.settles);
+
+    // Nothing changed since: the next pass settles nothing again.
+    f.pass();
+    try testing.expectEqual(@as(u32, 1), f.wm.monitors.settles);
+}
+
+test "a monitor that returns gets its windows back, a different one does not" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    var dp = try plugIn(&f, "DP-1", 1920);
+    passUntilSettled(&f);
+
+    const w = try f.open("a");
+    f.pass();
+    try workspace.moveToWorkspace(&f.wm, w, &dp.workspaces[1]);
+    f.pass();
+    try testing.expect(w.workspace == &dp.workspaces[1]);
+
+    // Unplugged: the window goes to the monitor that is left, same workspace
+    // index, with a note where it lived.
+    removeOutput(&f.wm, dp, f.now);
+    f.pass();
+    try testing.expect(w.workspace == &f.out.workspaces[1]);
+    try testing.expect(w.home.isSet());
+
+    // A monitor of another model comes: the note stays.
+    const other = try createOutput(&f.wm, @ptrCast(&dummy_byte), f.now);
+    setOutputRect(&f.wm, other, .{ .x = 1920, .y = 0, .w = 1280, .h = 720 }, f.now);
+    setOutputInfo(&f.wm, other, "DP-1", "Other", "X9", null, 1, f.now);
+    passUntilSettled(&f);
+    try testing.expect(w.workspace == &f.out.workspaces[1]);
+    try testing.expect(w.home.isSet());
+
+    // The same monitor returns: the window goes home once it has settled.
+    dp = try plugIn(&f, "DP-1", 3200);
+    f.pass();
+    try testing.expect(w.workspace == &f.out.workspaces[1]); // not settled yet
+    passUntilSettled(&f);
+    try testing.expect(w.workspace == &dp.workspaces[1]);
+    try testing.expect(!w.home.isSet());
+}
+
+test "a monitor rule that switches a monitor off moves its windows, and a reload can switch it on again" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const dp = try plugIn(&f, "DP-1", 1920);
+    passUntilSettled(&f);
+    const w = try f.open("a");
+    f.pass();
+    try workspace.moveToWorkspace(&f.wm, w, &dp.workspaces[0]);
+
+    var rules = [_]model.monitors.Rule{.{ .match = "DP-1", .enabled = false }};
+    f.wm.monitors.rules = &rules;
+    f.wm.monitors.changed(f.now);
+    passUntilSettled(&f);
+    try testing.expect(dp.disabled);
+    try testing.expect(w.workspace.?.output == f.out);
+
+    // What a reload does after it has swapped the rules in.
+    rules[0].enabled = true;
+    outputs.applyAll(&f.wm);
+    try testing.expect(!dp.disabled);
+    try testing.expect(w.workspace.?.output == dp); // it had lived there
+}
+
+test "an output that is switched off by its rule is not given new windows" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const dp = try plugIn(&f, "DP-1", 1920);
+    var rules = [_]model.monitors.Rule{.{ .match = "DP-1", .enabled = false }};
+    f.wm.monitors.rules = &rules;
+    passUntilSettled(&f);
+    try testing.expect(dp.disabled);
+    try testing.expect(!types.liveOutput(dp));
+
+    f.wm.active_output = dp;
+    const w = try f.open("b");
+    f.pass();
+    try testing.expect(w.workspace != null);
+    try testing.expect(w.workspace.?.output == f.out);
+}
+
+// ---- DockApps and the Dock through the pass (dockhost.zig) -----------------------------
+
+test "a DockApp is adopted before it is placed: no column, no focus, drawn centred in its tile" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const term = try f.open("foot");
+    const clock = try f.open("dockapp:clock");
+    setHints(clock, 48, 48, 48, 48);
+    f.pass();
+
+    try testing.expectEqual(types.Role.dockapp, clock.role);
+    try testing.expect(clock.workspace == null and !clock.new);
+    try testing.expect(types.nextWindow(term, &f.wm) == null); // the only normal window
+    try testing.expect(f.wm.dock_windows.first() == clock);
+    try testing.expect(f.rec.focused == term);
+
+    const m = f.wm.dock.?;
+    const gi = m.slots.items[m.dockSlotFor("dockapp:clock").?].gi;
+    const p = f.rec.lastPlace(clock).?;
+    try testing.expect(p.visible);
+    try testing.expectEqual(types.Mode.floating, p.mode);
+    try testing.expectEqual(types.BorderKind.none, p.border);
+    try testing.expectEqual(@as(i32, 48), p.rect.w);
+    try testing.expectEqual(gi.x_pos + 8, p.rect.x);
+    try testing.expectEqual(gi.y_pos + 8, p.rect.y);
+
+    const c = f.rec.lastConfigure(clock).?;
+    try testing.expectEqual(@as(i32, 48), c.size.?.w);
+    try testing.expectEqual(@as(?bool, false), c.tiled);
+
+    // Nothing changed: the size is not proposed again (a placement is sent
+    // every pass, like for a normal window; the compositor drops repeats).
+    const sent = f.rec.events.items.len;
+    f.pass();
+    try testing.expectEqual(@as(usize, 0), configuresOf(&f.rec, clock, sent));
+}
+
+/// Configures after event `from` that are about `win`.
+fn configuresOf(r: *const Rec, win: *Window, from: usize) usize {
+    var n: usize = 0;
+    for (r.events.items[from..]) |e| switch (e) {
+        .configure => |c| if (c.win == win) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "a DockApp whose tag arrives late leaves its column and hands the focus on" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const other = try f.open("foot");
+    const late = try f.open("clock");
+    f.pass();
+    try testing.expect(late.workspace != null);
+
+    setString(&f.wm, &late.app_id, "dockapp:clock");
+    appIdChanged(&f.wm, late);
+    f.pass();
+
+    try testing.expectEqual(types.Role.dockapp, late.role);
+    try testing.expect(late.workspace == null);
+    try testing.expect(f.rec.focused == other);
+    try testing.expect(f.wm.seats.first().?.focused == other);
+    try testing.expect(f.rec.lastPlace(late).?.visible);
+}
+
+test "a DockApp's temporary tile goes with the program, and its window is freed" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const clock = try f.open("dockapp:clock");
+    f.pass();
+    const m = f.wm.dock.?;
+    const idx = m.dockSlotFor("dockapp:clock").?;
+    try testing.expect(m.slots.items[idx].running and m.slots.items[idx].app.attached);
+
+    closeWindowObject(&f.wm, clock);
+    f.pass();
+    try testing.expect(f.wm.dock_windows.first() == null);
+    try testing.expect(m.dockSlotFor("dockapp:clock") == null);
+}
+
+test "two DockApps of one name: only the older sits in the tile" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const first = try f.open("dockapp:clock");
+    const second = try f.open("dockapp:clock");
+    f.pass();
+
+    try testing.expect(f.rec.lastPlace(first).?.visible);
+    try testing.expect(!f.rec.lastPlace(second).?.visible);
+
+    // The older one goes: the other takes the tile.
+    closeWindowObject(&f.wm, first);
+    f.pass();
+    try testing.expect(f.rec.lastPlace(second).?.visible);
+}
+
+test "without a Dock on an output the DockApps are hidden, not placed anywhere" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.wm.cfg.dock_enabled = false;
+
+    const clock = try f.open("dockapp:clock");
+    f.pass();
+    try testing.expect(!f.rec.lastPlace(clock).?.visible);
+
+    f.wm.cfg.dock_enabled = true;
+    f.pass();
+    try testing.expect(f.rec.lastPlace(clock).?.visible);
+}
+
+test "the Dock reserves its column on the primary output once it is shown" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    // Not drawn yet: no room is taken.
+    f.pass();
+    try testing.expectEqual(@as(i32, 0), f.out.reserved.right);
+
+    f.wm.dock_shown = true;
+    f.pass();
+    try testing.expectEqual(@as(i32, 64), f.out.reserved.right);
+    try testing.expectEqual(@as(i32, 0), f.out.reserved.left);
+
+    f.wm.cfg.dock_edge = .left;
+    f.pass();
+    try testing.expectEqual(@as(i32, 64), f.out.reserved.left);
+    try testing.expectEqual(@as(i32, 0), f.out.reserved.right);
+
+    f.wm.cfg.dock_reserve_space = false;
+    f.pass();
+    try testing.expectEqual(types.Output.Insets{}, f.out.reserved);
+
+    f.wm.cfg.dock_reserve_space = true;
+    f.wm.cfg.dock_enabled = false;
+    f.pass();
+    try testing.expectEqual(types.Output.Insets{}, f.out.reserved);
+}
+
+test "the reserved column belongs to the primary output only" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.wm.dock_shown = true;
+    const dp = try plugIn(&f, "DP-1", 1920);
+    passUntilSettled(&f);
+
+    const primary = types.primaryOutput(&f.wm).?;
+    try testing.expectEqual(@as(i32, 64), primary.reserved.right);
+    const other = if (primary == f.out) dp else f.out;
+    try testing.expectEqual(types.Output.Insets{}, other.reserved);
+
+    // The other one becomes primary: the column moves with the Dock.
+    primary.primary = false;
+    other.primary = true;
+    f.pass();
+    try testing.expectEqual(@as(i32, 64), other.reserved.right);
+    try testing.expectEqual(types.Output.Insets{}, primary.reserved);
+}
+
+const dockapp_mod = @import("dockapp.zig");
+
+test "a config load that changes the Dock rebuilds the model; the tiles keep following the programs" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    _ = try f.open("dockapp:clock");
+    f.pass();
+    try testing.expect(f.wm.dock.?.slots.items.len == 1);
+
+    const apps = [_]dockapp_mod.DockApp{.{ .name = "terminal", .command = &.{"foot"}, .y = 1 }};
+    f.wm.dockapps = .{ .apps = &apps };
+    f.wm.dock_gen += 1;
+    f.pass();
+
+    const m = f.wm.dock.?;
+    // The entry from the file and a temporary tile for the running DockApp.
+    try testing.expect(m.dockSlotFor("dockapp:clock") != null);
+    try testing.expect(m.hasApp("terminal"));
+    f.wm.dockapps = .{};
+}
+
+test "a minimized window gets a Dock tile through the pass, and loses it when restored" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = try f.open("foot");
+    const b = try f.open("firefox");
+    f.pass();
+
+    requestMinimize(&f.wm, a);
+    f.pass();
+    const m = f.wm.dock.?;
+    try testing.expect(a.minimized);
+    try testing.expect(m.miniSlotFor(a.min_order) != null);
+    try testing.expect(m.miniSlotFor(b.min_order) == null);
+
+    const order = a.min_order;
+    try workspace.restore(&f.wm, a, f.out.ws());
+    f.pass();
+    try testing.expect(m.miniSlotFor(order) == null);
+}
+
+test "hovering or clicking a DockApp neither focuses it nor scrolls the view" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const term = try f.open("foot");
+    const clock = try f.open("dockapp:clock");
+    f.pass();
+    f.wm.follow_request = false;
+
+    requestFocus(&f.wm, clock);
+    try testing.expect(f.wm.focus_request == null);
+    try testing.expect(!f.wm.follow_request);
+    f.pass();
+    try testing.expect(f.rec.focused == term);
+
+    // It cannot be minimized, fullscreened or maximized either.
+    requestMinimize(&f.wm, clock);
+    requestFullscreen(&f.wm, clock, true);
+    requestMaximize(&f.wm, clock, true);
+    f.pass();
+    try testing.expect(!clock.minimized and f.out.ws().fullscreen == null);
+    try testing.expect(f.wm.pending_fullscreen == null);
 }
