@@ -20,15 +20,6 @@
 // nobody can tell the two apart. In the middle sits a recessed LCD with the
 // weekday and day, HH:MM in seven segments, the month (or --label), AM/PM in
 // 12-hour mode, and a bar that fills up second by second.
-//
-//     +------------------+
-//     |  .------------.  |
-//     |  |  FRI 02    |  |
-//     |  |  18:42     |  |
-//     |  |  OCT       |  |
-//     |  |  ######    |  |
-//     |  '------------'  |
-//     +------------------+
 
 const std = @import("std");
 const scale = @import("scale.zig");

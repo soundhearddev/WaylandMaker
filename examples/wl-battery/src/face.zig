@@ -12,14 +12,6 @@
 //
 // Same look as wl-clock / wmaker-wl's Dock tiles: bevelled tile, recessed LCD.
 //
-//     +------------------+
-//     |  .------------.  |
-//     |  | ⚡ 🔌   12W |  |   status icon, plug (AC), power
-//     |  |   8 7 8 %  |  |   percent, seven segments
-//     |  | ◷ 1:23     |  |   clock icon, time to empty / full
-//     |  | ######---- |  |   10-segment bar
-//     |  '------------'  |
-//     +------------------+
 //
 // Status is a symbol, not a word: bolt = charging, arrow down = discharging,
 // check = full, pause = not charging, ? = unknown, cross = no battery.
@@ -490,7 +482,6 @@ fn drawIcon(cv: Canvas, x: i32, y: i32, icon: Icon, color: u32) void {
         }
     }
 }
-
 
 /// Digits and bar: green normally, amber <= 20 %, red <= 10 % (not while
 /// charging or full).

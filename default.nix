@@ -12,11 +12,15 @@ let
   # build.zig.zon needs Zig 0.16.0: take a 0.16 package when nixpkgs has one.
   zig = pkgs.zig_0_16 or pkgs.zig;
 
-  # What build.zig links (see linkGraphics there). harfbuzz is only a header
-  # path for pango.
+  # wmaker-wl needs wlroots 0.20.
+  wlroots = pkgs.wlroots_0_20 or pkgs.wlroots;
+
+
   libs = with pkgs; [
+    wlroots
     wayland
     libxkbcommon
+    pixman
     cairo
     pango
     glib
@@ -28,10 +32,7 @@ pkgs.mkShell {
     pkg-config
     wayland-scanner
     wayland-protocols
-  ])
-  # wmaker-wl runs inside river (river_window_management_v1: river 0.4 or
-  # newer). Skipped if this nixpkgs has no `river` attribute.
-  ++ pkgs.lib.optional (pkgs ? river) pkgs.river;
+  ]);
 
   # Zig does not go through Nix's compiler wrapper: let the freshly built
   # wmaker-wl and wlprefs find the shared libraries anyway.
@@ -44,6 +45,7 @@ pkgs.mkShell {
     fi
     echo "  zig build          build wmaker-wl and wlprefs"
     echo "  zig build test     run the tests (test-wlprefs: wlprefs only)"
-    echo "  river -c ./zig-out/bin/wmaker-wl"
+    echo "  zig build run      start nested in the current session"
+    echo "  ./zig-out/bin/wmaker-wl   from a TTY"
   '';
 }

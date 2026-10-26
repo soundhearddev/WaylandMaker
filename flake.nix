@@ -1,5 +1,5 @@
 {
-  description = "wmaker-wl: scrollable tiling and a Window Maker Dock for river (development shell)";
+  description = "wmaker-wl: a Wayland compositor on wlroots, scrollable tiling with a Window Maker feel (development shell)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

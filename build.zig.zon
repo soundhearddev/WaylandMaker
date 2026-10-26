@@ -36,6 +36,8 @@
         "src",
         "wlprefs",
         "examples",
-        "tools",
+        "docs",
+        "README.md",
+        "LICENSE",
     },
 }

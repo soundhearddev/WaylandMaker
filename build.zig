@@ -29,20 +29,8 @@ fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
     for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
 }
 
-/// Build wlprefs as part of another Build.
-///
-/// `prefix` is empty when this build.zig is used standalone,
-/// and "wlprefs" when it is imported by the root project.
-///
-/// This allows both:
-///
-///     cd wlprefs && zig build
-///
-/// and:
-///
-///     cd .. && zig build
-///
-/// to build the same project.
+/// Build wlprefs: a separate Wayland client in `wlprefs/`, built by the root
+/// `zig build` together with the compositor (it has no build.zig of its own).
 pub const Wlprefs = struct {
     exe: *std.Build.Step.Compile,
     /// The library module (everything but main.zig); its tests are the
