@@ -28,6 +28,7 @@ const Popup = @import("view.zig").Popup;
 const Decoration = @import("view.zig").Decoration;
 const Keyboard = @import("keyboard.zig").Keyboard;
 const Cursor = @import("cursor.zig").Cursor;
+const DockUi = @import("dock_scene.zig").DockUi;
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
@@ -46,6 +47,12 @@ pub const Server = struct {
     scene_output_layout: *wlr.SceneOutputLayout,
     /// Bottom to top: tiled windows, floating windows, fullscreen windows.
     layers: [3]*wlr.SceneTree,
+    /// Where the Dock, the Clip and the Drawers are, by their level: `below`
+    /// under every window, `above` over the tiled and floating ones but
+    /// under a fullscreen window (dock_scene.zig).
+    dock_below: *wlr.SceneTree,
+    dock_above: *wlr.SceneTree,
+    dock_ui: *DockUi = undefined,
 
     xdg_shell: *wlr.XdgShell,
     seat: *wlr.Seat,
@@ -101,11 +108,13 @@ pub const Server = struct {
             .scene = scene,
             .output_layout = output_layout,
             .scene_output_layout = try scene.attachOutputLayout(output_layout),
+            .dock_below = try scene.tree.createSceneTree(),
             .layers = .{
                 try scene.tree.createSceneTree(),
                 try scene.tree.createSceneTree(),
                 try scene.tree.createSceneTree(),
             },
+            .dock_above = try scene.tree.createSceneTree(),
             .xdg_shell = try wlr.XdgShell.create(wl_server, 6),
             .seat = try wlr.Seat.create(wl_server, "seat0"),
         };
@@ -129,6 +138,10 @@ pub const Server = struct {
         _ = try wlr.XdgOutputManagerV1.create(wl_server, output_layout);
 
         try server.cursor.init(server);
+        // Created last in the scene, so raised into its place: above the
+        // floating windows, below the fullscreen ones.
+        server.dock_above.node.placeAbove(&server.layers[1].node);
+        server.dock_ui = try DockUi.create(server);
 
         wlr_backend.events.new_output.add(&server.new_output);
         wlr_backend.events.new_input.add(&server.new_input);
@@ -170,6 +183,7 @@ pub const Server = struct {
         server.request_set_primary.link.remove();
         server.cursor.deinit();
 
+        server.dock_ui.destroy();
         server.scene.tree.node.destroy();
         server.backend.destroy();
 
@@ -241,6 +255,8 @@ pub const Server = struct {
     fn runManage(server: *Server) void {
         server.manage_idle = null;
         manage.run(server.wm, server.sink(), server.nowMs());
+        // The Dock shows what the pass decided (tiles, workspace, config).
+        server.dock_ui.update();
         // Something still moves: ask for the next frame. The pass after it is
         // paced by the monitor (see Monitor.onFrame), so an animation costs
         // one pass per displayed frame and nothing when it ends.

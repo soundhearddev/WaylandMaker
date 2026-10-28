@@ -151,6 +151,17 @@ pub const Cursor = struct {
             }
         }
 
+        // The Dock (tiles, Clip, Drawers) has the pointer before any window.
+        if (server.dock_ui.motion(c.wlr_cursor.x, c.wlr_cursor.y)) {
+            if (!c.image_default) {
+                c.wlr_cursor.setXcursor(c.xcursor, "default");
+                c.image_default = true;
+            }
+            server.seat.pointerNotifyClearFocus();
+            if (seat) |s| s.hovered = null;
+            return;
+        }
+
         const hit = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y) orelse {
             if (!c.image_default) {
                 c.wlr_cursor.setXcursor(c.xcursor, "default");
@@ -181,6 +192,14 @@ pub const Cursor = struct {
         const server = c.server;
         const wm = server.wm;
         const seat = wm.seats.first();
+
+        // The Dock takes presses on its tiles, and the release of a press it
+        // took, wherever the pointer is by then. Clients never see either.
+        const pressed = event.state == .pressed;
+        if (server.dock_ui.button(c.wlr_cursor.x, c.wlr_cursor.y, event.button, pressed)) {
+            if (!pressed) c.buttons_down -|= 1 else c.buttons_down += 1;
+            return;
+        }
 
         if (event.state == .released) {
             c.buttons_down -|= 1;
@@ -240,6 +259,9 @@ pub const Cursor = struct {
 
     fn onAxis(listener: *wl.Listener(*wlr.Pointer.event.Axis), event: *wlr.Pointer.event.Axis) void {
         const c: *Cursor = @fieldParentPtr("axis", listener);
+        // The wheel over the Clip changes the workspace.
+        if (event.orientation == .vertical_scroll and
+            c.server.dock_ui.axis(c.wlr_cursor.x, c.wlr_cursor.y, event.delta)) return;
         c.server.seat.pointerNotifyAxis(
             event.time_msec,
             event.orientation,

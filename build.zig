@@ -29,6 +29,23 @@ fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
     for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
 }
 
+/// Cairo and Pango for the Dock's drawing (src/gfx.zig, src/wm_text.c). Used by
+/// the compositor and by the tests, so the drawing is tested without a compositor.
+fn linkCairo(b: *std.Build, module: *std.Build.Module) void {
+    const libs = [_][]const u8{ "cairo", "pango-1.0", "pangocairo-1.0", "gobject-2.0", "glib-2.0" };
+    for (libs) |name| module.linkSystemLibrary(name, .{});
+    module.addIncludePath(b.path("src"));
+    const includes = [_][]const u8{
+        "/usr/include/glib-2.0",
+        "/usr/lib/glib-2.0/include",
+        "/usr/include/cairo",
+        "/usr/include/pango-1.0",
+        "/usr/include/harfbuzz",
+    };
+    for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
+    module.addCSourceFile(.{ .file = b.path("src/wm_text.c"), .flags = &.{} });
+}
+
 /// Build wlprefs: a separate Wayland client in `wlprefs/`, built by the root
 /// `zig build` together with the compositor (it has no build.zig of its own).
 pub const Wlprefs = struct {
@@ -294,6 +311,7 @@ pub fn build(b: *std.Build) void {
         .imports = imports[0..3], // wayland, xkbcommon, zlua
     });
     test_module.linkSystemLibrary("xkbcommon", .{});
+    linkCairo(b, test_module);
     test_module.addImport("wlprefs_settings", wlprefs.settings);
     test_module.addImport("wlprefs_actions", wlprefs.actions);
 
@@ -314,6 +332,7 @@ pub fn build(b: *std.Build) void {
         .imports = imports[0..3],
     });
     bench_module.linkSystemLibrary("xkbcommon", .{});
+    linkCairo(b, bench_module);
     bench_module.addImport("wlprefs_settings", wlprefs.settings);
     bench_module.addImport("wlprefs_actions", wlprefs.actions);
     const bench_exe = b.addExecutable(.{
@@ -366,6 +385,11 @@ fn addCompositor(
     module.linkSystemLibrary("wayland-server", .{});
     module.linkSystemLibrary("xkbcommon", .{});
     module.linkSystemLibrary("pixman-1", .{});
+    linkCairo(b, module);
+    // wlr_buffer for the Dock's tiles (wlroots' buffer interface is C): the
+    // C file needs wlroots' headers, so this module links it too.
+    module.linkSystemLibrary("wlroots-0.20", .{});
+    module.addCSourceFile(.{ .file = b.path("src/wm_pixbuf.c"), .flags = &.{"-DWLR_USE_UNSTABLE"} });
     return b.addExecutable(.{
         .name = name,
         .root_module = module,

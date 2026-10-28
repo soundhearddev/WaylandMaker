@@ -11,6 +11,7 @@ pub const model = @import("model.zig");
 
 test {
     _ = @import("action.zig");
+    _ = @import("appicon.zig");
     _ = @import("animation.zig");
     _ = @import("bench.zig");
     _ = @import("cli.zig");
@@ -21,6 +22,7 @@ test {
     _ = @import("dump.zig");
     _ = @import("fileutil.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("gfx.zig");
     _ = @import("invariants.zig");
     _ = @import("keys.zig");
     _ = @import("layout.zig");
@@ -31,16 +33,23 @@ test {
     _ = @import("monitors.zig");
     _ = @import("motion.zig");
     _ = @import("outputs.zig");
+    _ = @import("dock_draw.zig");
+    _ = @import("dock_icons.zig");
+    _ = @import("dock_input.zig");
     _ = @import("dock_model.zig");
+    _ = @import("dock_sync.zig");
     _ = @import("dockhost.zig");
     _ = @import("dock_view.zig");
     _ = @import("perf.zig");
     _ = @import("plist.zig");
     _ = @import("pointer_op.zig");
+    _ = @import("scale.zig");
+    _ = @import("svg.zig");
     _ = @import("trace.zig");
     _ = @import("wm_attr.zig");
     _ = @import("wm_dock.zig");
     _ = @import("wm_files.zig");
+    _ = @import("xpm.zig");
     _ = @import("wm_menu.zig");
     _ = @import("workspace.zig");
 }

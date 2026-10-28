@@ -1963,3 +1963,70 @@ test "hide_others minimizes other applications only; hide_app the focused one's"
     try std.testing.expect(!web.minimized and !clock.minimized);
     try check(f);
 }
+
+// ---- What a click on a Dock tile asks for (dockhost.requestActivate / runRequests) ---------
+
+fn dockTileFor(name: []const u8, mini: u64) dockapp_mod.DockApp {
+    return .{ .name = name, .command = &.{name}, .app_id = if (mini == 0) name else null, .mini_window = mini };
+}
+
+test "windowFor: the application's window, a visible one first; a minimized window's tile finds that window" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a1 = try f.newWindow();
+    const a2 = try f.newWindow();
+    const b = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a1);
+    try workspace.placeTiled(&f.wm, f.cur(), a2);
+    try workspace.placeTiled(&f.wm, f.cur(), b);
+    a1.app_id = try f.wm.gpa.dupe(u8, "foo");
+    a2.app_id = try f.wm.gpa.dupe(u8, "foo");
+    b.app_id = try f.wm.gpa.dupe(u8, "bar");
+    defer f.wm.gpa.free(a1.app_id.?);
+    defer f.wm.gpa.free(a2.app_id.?);
+    defer f.wm.gpa.free(b.app_id.?);
+
+    const foo = dockTileFor("foo", 0);
+    try std.testing.expect(dockhost.windowFor(&f.wm, &foo) == a1);
+    workspace.minimize(&f.wm, a1);
+    // the visible one wins over the minimized one
+    try std.testing.expect(dockhost.windowFor(&f.wm, &foo) == a2);
+    workspace.minimize(&f.wm, a2);
+    try std.testing.expect(dockhost.windowFor(&f.wm, &foo) != null);
+
+    const mini = dockTileFor("foo", a1.min_order);
+    try std.testing.expect(dockhost.windowFor(&f.wm, &mini) == a1);
+    const none = dockTileFor("nothing", 0);
+    try std.testing.expect(dockhost.windowFor(&f.wm, &none) == null);
+    try check(f);
+}
+
+test "runRequests: a minimized window comes back and is focused, another is just focused, a dead one is ignored" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const a = try f.newWindow();
+    const b = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    try workspace.placeTiled(&f.wm, f.cur(), b);
+
+    workspace.minimize(&f.wm, a);
+    try std.testing.expect(a.minimized);
+    f.wm.dock_activate = a;
+    dockhost.runRequests(&f.wm);
+    try std.testing.expect(!a.minimized and a.workspace != null);
+    try std.testing.expect(f.wm.focus_request == a);
+    try std.testing.expect(f.wm.dock_activate == null);
+
+    f.wm.focus_request = null;
+    f.wm.dock_activate = b;
+    dockhost.runRequests(&f.wm);
+    try std.testing.expect(f.wm.focus_request == b);
+
+    f.wm.focus_request = null;
+    b.closed = true;
+    f.wm.dock_activate = b;
+    dockhost.runRequests(&f.wm);
+    try std.testing.expect(f.wm.focus_request == null);
+    b.closed = false;
+    try check(f);
+}

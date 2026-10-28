@@ -110,3 +110,19 @@ small enough to read in one go.
   keeps the tests that exist for it.
 - **Dock on every output or on the primary only**: today the model puts it on the primary output (as Window Maker's
   `Dock` is per screen). A per-output Dock would need one `Model` per output.
+
+## Status: the Dock on wlroots
+
+| layer | file | tested without a compositor |
+|---|---|---|
+| tiles and looks | `dock_model.zig`, `dock_view.zig` | yes |
+| pixels of a look | `dock_draw.zig`, `dock_icons.zig` | yes |
+| pointer state machine | `dock_input.zig` | yes |
+| model -> scene nodes | `dock_sync.zig` (generic over a backend) | yes, mock backend |
+| scene nodes, buffers, events | `dock_scene.zig`, `wm_pixbuf.c` | `wm_pixbuf.c` only |
+
+Click on a tile -> `Effect` -> `dock_scene.apply`: `launch` spawns and marks the tile launching,
+`activate` sets `wm.dock_activate` (executed by `dockhost.runRequests` in the next pass),
+`workspace` queues `workspace_next/prev`, `place_dock/place_clip` change `cfg` and relayout,
+`save` writes WMState. Not ported yet: context menus (`Effect.menu` is logged), info panel,
+AutoLaunch at session start, asynchronous icon loading.

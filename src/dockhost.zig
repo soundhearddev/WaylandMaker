@@ -46,6 +46,7 @@ const dock_model = @import("dock_model.zig");
 const workspace = @import("workspace.zig");
 const backend = @import("backend.zig");
 const manage = @import("manage.zig");
+const action = @import("action.zig");
 
 const Window = types.Window;
 const Output = types.Output;
@@ -354,6 +355,53 @@ pub fn update(wm: *WindowManager, now_ms: u64) Host {
         .right => primary.reserved.right = dock_model.tile,
     };
     return host;
+}
+
+// ----------------------------------------------------------------------------
+// What a click on a tile asks for
+// ----------------------------------------------------------------------------
+
+/// The window a click on `app`'s tile shows: for a minimized window's tile,
+/// that window; for an application's, the first of its windows that is
+/// visible, else the first one (a minimized one is then restored). Null: the
+/// application has no window.
+pub fn windowFor(wm: *WindowManager, app: *const dockapp.DockApp) ?*Window {
+    var first: ?*Window = null;
+    var it = wm.windows.first();
+    while (it) |w| : (it = types.nextWindow(w, wm)) {
+        if (w.closed) continue;
+        if (app.mini_window != 0) {
+            if (w.minimized and w.min_order == app.mini_window) return w;
+            continue;
+        }
+        const id = w.app_id orelse continue;
+        if (!app.matches(id)) continue;
+        if (!w.minimized) return w;
+        if (first == null) first = w;
+    }
+    return first;
+}
+
+/// Ask for `win` to be shown (executed by `runRequests` in the next pass).
+pub fn requestActivate(wm: *WindowManager, win: *Window) void {
+    wm.dock_activate = win;
+    backend.manageDirty(wm.obj);
+}
+
+/// Once per pass, after the queued commands: show the window a Dock tile
+/// asked for. A minimized window comes back on the active workspace of the
+/// output it was last on; any other is made the focus, and the pass that
+/// follows brings its workspace into view.
+pub fn runRequests(wm: *WindowManager) void {
+    const win = wm.dock_activate orelse return;
+    wm.dock_activate = null;
+    if (win.closed or win.role == .dockapp) return;
+    if (win.minimized) {
+        const out = types.workingOutput(wm) orelse return;
+        action.restoreWindow(wm, win, out);
+        return;
+    }
+    action.requestFocus(wm, win);
 }
 
 /// How long the event loop may sleep before a `launching` tile times out;

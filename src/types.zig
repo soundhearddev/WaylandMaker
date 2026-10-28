@@ -505,6 +505,10 @@ pub const WindowManager = struct {
     focus_request: ?*Window = null,
     /// The active column changed; scroll it into view during layout.
     follow_request: bool = false,
+    /// A click on a Dock tile asked to show this window (restore it if it is
+    /// minimized, change to its workspace, focus it). Executed by the next
+    /// manage pass (`dockhost.runRequests`), like every request.
+    dock_activate: ?*Window = null,
     /// Client asked to enter/leave fullscreen (executed in manage).
     pending_fullscreen: ?struct { win: *Window, on: bool } = null,
 

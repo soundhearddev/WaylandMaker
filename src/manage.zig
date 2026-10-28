@@ -281,6 +281,7 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
     pointer_op.startPending(wm);
     pointer_op.apply(wm);
     runPending(wm);
+    dockhost.runRequests(wm);
 
     // 3b. The `reload_config` command. After the queue ran.
     if (wm.reload_pending) {
@@ -423,6 +424,7 @@ fn destroyWindow(wm: *WindowManager, sink: Sink, win: *Window) void {
     forgetWindow(wm, sink, win);
 
     if (wm.focus_request == win) wm.focus_request = null;
+    if (wm.dock_activate == win) wm.dock_activate = null;
     if (wm.pending_fullscreen) |pf| if (pf.win == win) {
         wm.pending_fullscreen = null;
     };
