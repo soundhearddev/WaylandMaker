@@ -218,6 +218,11 @@ mini_dock = true                 -- every minimized window gets a tile in the Do
 -- in Window Maker's WMState are used (if enable_wmaker_compat is on).
 -- workspace_names = { "Main", "Web", "Code", "Mail" }
 
+
+repeat_rate = 25                 -- keys per second
+repeat_delay = 600               -- ms until it starts
+repeat_binds = true              -- false: a bind fires once per press, however long it is held
+
 -- ---- key bindings -----------------------------------------------------------
 -- Syntax: bind("Mod+Mod+Key", "command [arguments]")
 -- Key names are xkbcommon keysym names and follow your active layout.

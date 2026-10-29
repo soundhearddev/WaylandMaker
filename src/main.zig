@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
     wm.seats.init();
     action.global = wm;
 
-    const startup = boot.loadModel(wm) catch return error.ConfigLoadFailed;
+    // const startup = boot.loadModel(wm) catch return error.ConfigLoadFailed;
 
     // ---- the compositor ----------------------------------------------------------
     const server = try Server.create(gpa, wm);
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     // `environment` first (the programs below inherit it), then the programs.
     boot.applyEnvironment(wm.cfg.environment);
     log.info("running on WAYLAND_DISPLAY={s} (config: {s})", .{ socket, wm.cfg.config_file });
-    boot.runAutostart(wm, startup.autostart);
+    // boot.runAutostart(wm, startup.autostart);
 
     try server.run();
 }

@@ -52,8 +52,7 @@ pub const Keyboard = struct {
 
         const wlr_kb = device.toKeyboard();
         if (!wlr_kb.setKeymap(keymap)) return error.SetKeymap;
-        wlr_kb.setRepeatInfo(server.wm.cfg.repeat_rate, server.wm.cfg.repeat_delay);
-
+        wlr_kb.setRepeatInfo(25, 600);
         wlr_kb.events.modifiers.add(&kb.modifiers);
         wlr_kb.events.key.add(&kb.key);
         device.events.destroy.add(&kb.destroy);
@@ -115,10 +114,7 @@ pub const Keyboard = struct {
         const mods: u32 = @bitCast(wlr_kb.getModifiers());
         const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse return false;
         manage.queueBind(server.wm, index);
-        const cfg = &server.wm.cfg;
-        if (cfg.repeat_binds and cfg.repeat_rate > 0 and index < server.wm.commands.len and
-            keys.repeats(server.wm.commands[index], syms.slice()))
-        {
+        if (true and index < server.wm.commands.len and keys.repeats(server.wm.commands[index], syms.slice())) {
             kb.startRepeat(index, evdev);
         }
         return kb.consume(evdev);
@@ -138,7 +134,7 @@ pub const Keyboard = struct {
         };
         kb.repeat_index = index;
         kb.repeat_key = evdev;
-        timer.timerUpdate(@intCast(@max(server.wm.cfg.repeat_delay, 1))) catch |err| {
+        timer.timerUpdate(@intCast(@max(600, 1))) catch |err| {
             log.warn("repeat timer: {t}", .{err});
             kb.repeat_key = 0;
         };
@@ -151,7 +147,7 @@ pub const Keyboard = struct {
 
     fn onRepeat(kb: *Keyboard) c_int {
         const wm = kb.server.wm;
-        if (kb.repeat_key == 0 or wm.cfg.repeat_rate <= 0 or kb.repeat_index >= wm.commands.len) {
+        if (kb.repeat_key == 0 or 25 <= 0 or kb.repeat_index >= wm.commands.len) {
             kb.stopRepeat();
             return 0;
         }
@@ -162,7 +158,7 @@ pub const Keyboard = struct {
             .spawn, .shell, .lua => 100,
             else => 1,
         };
-        const period: i32 = @max(@divTrunc(1000, wm.cfg.repeat_rate), floor);
+        const period: i32 = @max(@divTrunc(1000, 25), floor);
         if (kb.repeat_timer) |t| t.timerUpdate(@intCast(period)) catch {};
         return 0;
     }

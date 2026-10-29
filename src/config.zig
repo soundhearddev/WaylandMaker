@@ -327,6 +327,8 @@ pub const Config = struct {
     /// null: bindings follow the active xkb layout. N: always translate key
     /// events with layout N (0-based) of the keyboard that produced them.
     bind_layout: ?u32 = null,
+    repeat_rate: u32 = 25,
+    repeat_delay: u32 = 600,
 
     // ---- Dock and Clip (dock_model.zig, dock_scene.zig) --------------------------
     /// Draw the Dock: a column of tiles on one screen edge. Its first tile is
