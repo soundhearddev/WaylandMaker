@@ -23,12 +23,14 @@ pub const usage =
     \\                      report what is wrong and exit (0: fine, 1: problems);
     \\                      needs no display
     \\      --paths         list the files wmaker-wl reads (and which exist), exit
+    \\      --binds         list the key bindings in effect (config.lua on top of the
+    \\                      defaults), one `KEYS  command` per line, and exit
     \\      --print-config  print the built-in default config.lua and exit, e.g.
     \\                      wmaker-wl --print-config > ~/.config/wmaker-wl/config.lua
     \\      --log FILTER    what to log, e.g. `debug`, `warn` or `info,anim=debug`
     \\                      (levels: off err warn info debug; a SCOPE=LEVEL pair
     \\                      changes one scope: main sequence window anim action
-    \\                      config seat ui dock dockhost dockapp files compat svg
+    \\                      config seat keyboard boot server ui dock dockhost dockapp files compat svg
     \\                      process output). The same as the environment variable
     \\                      WMAKER_LOG; the default is `info`
     \\
@@ -40,6 +42,7 @@ pub const usage =
 pub const Cli = struct {
     check_only: bool = false,
     show_paths: bool = false,
+    show_binds: bool = false,
     print_config: bool = false,
     config_path: ?[]const u8 = null,
     config_dir: ?[]const u8 = null,
@@ -71,6 +74,8 @@ pub fn parseArgs(args: anytype) Parsed {
             cli.check_only = true;
         } else if (std.mem.eql(u8, arg, "--paths")) {
             cli.show_paths = true;
+        } else if (std.mem.eql(u8, arg, "--binds")) {
+            cli.show_binds = true;
         } else if (std.mem.eql(u8, arg, "--print-config")) {
             cli.print_config = true;
         } else if (std.mem.eql(u8, arg, "--config")) {
@@ -112,7 +117,7 @@ fn parseTest(items: []const []const u8) Parsed {
 test "command line: no argument starts the session, nothing else is switched on" {
     switch (parseTest(&.{})) {
         .run => |cli| {
-            try std.testing.expect(!cli.check_only and !cli.show_paths and !cli.print_config);
+            try std.testing.expect(!cli.check_only and !cli.show_paths and !cli.show_binds and !cli.print_config);
             try std.testing.expect(cli.config_path == null and cli.config_dir == null);
         },
         else => return error.TestUnexpectedResult,
@@ -127,6 +132,13 @@ test "command line: --help and --version (long and short) are answered, whatever
     try std.testing.expect(parseTest(&.{ "--check", "--version" }) == .version);
     // The very bug this was written for: `wmaker-wl --version` started the whole session.
     try std.testing.expect(parseTest(&.{"--version"}) != .run);
+}
+
+test "command line: --binds" {
+    switch (parseTest(&.{"--binds"})) {
+        .run => |cli| try std.testing.expect(cli.show_binds and !cli.check_only),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "command line: --check, --paths and --print-config combine" {

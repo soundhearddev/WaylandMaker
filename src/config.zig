@@ -302,6 +302,10 @@ pub const Config = struct {
     /// Set in wmaker-wl's own environment, so every
     /// program it starts inherits it.
     environment: []const EnvVar = &.{},
+    /// At session start tell D-Bus and `systemd --user` about WAYLAND_DISPLAY
+    /// and friends (boot.importEnvironment), so portals and notification
+    /// daemons find the compositor.
+    import_environment: bool = true,
 
     // ---- key bindings ---------------------------------------------------
     binds: []const Bind = &.{},
@@ -327,8 +331,13 @@ pub const Config = struct {
     /// null: bindings follow the active xkb layout. N: always translate key
     /// events with layout N (0-based) of the keyboard that produced them.
     bind_layout: ?u32 = null,
+    /// Auto-repeat of held keys, as clients get it (keys per second, 0 = off)
+    /// and as wmaker-wl repeats the binds that make sense to repeat.
     repeat_rate: u32 = 25,
+    /// Milliseconds a key is held until the repeat starts.
     repeat_delay: u32 = 600,
+    /// false: a bind fires once per press, however long the key is held.
+    repeat_binds: bool = true,
 
     // ---- Dock and Clip (dock_model.zig, dock_scene.zig) --------------------------
     /// Draw the Dock: a column of tiles on one screen edge. Its first tile is
@@ -1858,6 +1867,50 @@ test "enable_autostart parses and defaults on" {
 
     try parseText(arena.allocator(), &cfg, "enable_autostart = false\n");
     try std.testing.expect(!cfg.enable_autostart);
+}
+
+test "keyboard options: defaults, values, and nonsense is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(u32, 25), cfg.repeat_rate);
+    try std.testing.expectEqual(@as(u32, 600), cfg.repeat_delay);
+    try std.testing.expect(cfg.repeat_binds);
+    try std.testing.expect(cfg.import_environment);
+
+    try parseText(arena.allocator(), &cfg,
+        \\repeat_rate = 0
+        \\repeat_delay = 250
+        \\repeat_binds = false
+        \\import_environment = false
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.repeat_rate);
+    try std.testing.expectEqual(@as(u32, 250), cfg.repeat_delay);
+    try std.testing.expect(!cfg.repeat_binds);
+    try std.testing.expect(!cfg.import_environment);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+
+    // A refused value changes nothing and is a warning.
+    try parseText(arena.allocator(), &cfg,
+        \\repeat_rate = -5
+        \\repeat_binds = "yes"
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.repeat_rate);
+    try std.testing.expect(!cfg.repeat_binds);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "the built-in config names each keyboard and session option once" {
+    // A copy-pasted block in default_config.lua once set them twice.
+    inline for (.{ "repeat_rate", "repeat_delay", "repeat_binds", "import_environment" }) |name| {
+        var count: usize = 0;
+        var it = std.mem.splitScalar(u8, default_config_text, '\n');
+        while (it.next()) |line| {
+            if (std.mem.startsWith(u8, line, name ++ " ") or std.mem.startsWith(u8, line, name ++ "=")) count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
 }
 
 test "command splitting" {

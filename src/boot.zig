@@ -39,6 +39,7 @@ pub fn loadModel(wm: *WindowManager) !wm_files.Loaded {
     // drawn from it. Fonts used to be copied nowhere, so `font_*` did nothing.
     style.apply(&wm.cfg);
     wm.dock_gen +%= 1;
+    wm.config_gen +%= 1;
     wm.monitors.configure(wm.cfg.monitor_rules.items, wm.cfg.monitor_profiles.items, wm.cfg.output_order, wm.cfg.monitor_settle_ms);
     return files;
 }
@@ -111,7 +112,19 @@ pub fn importEnvironment(wm: *WindowManager) void {
     const text = w.buffered();
     if (text.len >= buf.len) return;
     buf[text.len] = 0;
+
+    // `ignoreSigchld` makes the kernel reap children on its own, and then
+    // `system` cannot wait for its shell (it reports -1 although the command
+    // ran). The default action is put back for the time of the call.
+    const dfl: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.CHLD, &dfl, &previous);
     const rc = system(@ptrCast(&buf));
+    std.posix.sigaction(.CHLD, &previous, null);
     log.info("environment imported into D-Bus / systemd (status {d})", .{rc});
 }
 

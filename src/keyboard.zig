@@ -43,25 +43,53 @@ pub const Keyboard = struct {
         errdefer server.gpa.destroy(kb);
         kb.* = .{ .server = server, .device = device };
 
-        // The layout comes from XKB_DEFAULT_LAYOUT & co, like in any wlroots
-        // compositor.
+        // The layout comes from XKB_DEFAULT_LAYOUT & co (the `environment`
+        // option of config.lua is applied before the first keyboard shows
+        // up), like in any wlroots compositor. A layout that does not exist
+        // must not leave the session without a keyboard: fall back to `us`.
         const context = xkb.Context.new(.no_flags) orelse return error.XkbContext;
         defer context.unref();
-        const keymap = xkb.Keymap.newFromNames(context, null, .no_flags) orelse return error.XkbKeymap;
+        const keymap = xkb.Keymap.newFromNames(context, null, .no_flags) orelse blk: {
+            log.warn("the keymap from XKB_DEFAULT_* does not compile (typo in the layout, variant or options?), using `us`", .{});
+            const fallback: xkb.RuleNames = .{ .rules = null, .model = null, .layout = "us", .variant = null, .options = null };
+            break :blk xkb.Keymap.newFromNames(context, &fallback, .no_flags) orelse return error.XkbKeymap;
+        };
         defer keymap.unref();
 
         const wlr_kb = device.toKeyboard();
         if (!wlr_kb.setKeymap(keymap)) return error.SetKeymap;
-        wlr_kb.setRepeatInfo(25, 600);
+        kb.applyRepeatInfo();
         wlr_kb.events.modifiers.add(&kb.modifiers);
         wlr_kb.events.key.add(&kb.key);
         device.events.destroy.add(&kb.destroy);
 
         server.seat.setKeyboard(wlr_kb);
         server.keyboards.append(kb);
+        log.info("keyboard {?s}: {d} layout(s), repeat {d}/s after {d} ms, {d} binds", .{
+            device.name,
+            keymap.numLayouts(),
+            server.wm.cfg.repeat_rate,
+            server.wm.cfg.repeat_delay,
+            server.wm.cfg.binds.len,
+        });
+        if (server.wm.cfg.binds.len != server.wm.commands.len) {
+            // The binds of the config were not turned into commands: nothing
+            // would happen on a key press. That is a start-up bug, say so.
+            log.err("{d} binds in the config but {d} commands: key binds do nothing", .{ server.wm.cfg.binds.len, server.wm.commands.len });
+        }
 
         // The focus was decided before there was a keyboard.
         if (server.focused) |v| if (v.toplevel) |t| server.enterKeyboard(t.base.surface);
+    }
+
+    /// What clients get as `wl_keyboard.repeat_info`: `repeat_rate` and
+    /// `repeat_delay` of config.lua (a rate of 0 switches the repeat off).
+    /// Called when the keyboard appears and after every config reload.
+    pub fn applyRepeatInfo(kb: *Keyboard) void {
+        const cfg = &kb.server.wm.cfg;
+        const rate: i32 = @intCast(@min(cfg.repeat_rate, 1000));
+        const delay: i32 = @intCast(@min(cfg.repeat_delay, 10_000));
+        kb.device.toKeyboard().setRepeatInfo(rate, delay);
     }
 
     fn onModifiers(listener: *wl.Listener(*wlr.Keyboard), wlr_kb: *wlr.Keyboard) void {
@@ -112,9 +140,16 @@ pub const Keyboard = struct {
         }
 
         const mods: u32 = @bitCast(wlr_kb.getModifiers());
-        const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse return false;
+        const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse {
+            log.debug("key {d} mods 0x{x}: no bind, goes to the client", .{ evdev, mods });
+            return false;
+        };
+        log.debug("key {d} mods 0x{x}: bind {d} `{s}`", .{ evdev, mods, index, server.wm.cfg.binds[index].command });
         manage.queueBind(server.wm, index);
-        if (true and index < server.wm.commands.len and keys.repeats(server.wm.commands[index], syms.slice())) {
+        const cfg = &server.wm.cfg;
+        if (cfg.repeat_binds and cfg.repeat_rate > 0 and index < server.wm.commands.len and
+            keys.repeats(server.wm.commands[index], syms.slice()))
+        {
             kb.startRepeat(index, evdev);
         }
         return kb.consume(evdev);
@@ -134,7 +169,7 @@ pub const Keyboard = struct {
         };
         kb.repeat_index = index;
         kb.repeat_key = evdev;
-        timer.timerUpdate(@intCast(@max(600, 1))) catch |err| {
+        timer.timerUpdate(@intCast(@max(server.wm.cfg.repeat_delay, 1))) catch |err| {
             log.warn("repeat timer: {t}", .{err});
             kb.repeat_key = 0;
         };
@@ -147,7 +182,7 @@ pub const Keyboard = struct {
 
     fn onRepeat(kb: *Keyboard) c_int {
         const wm = kb.server.wm;
-        if (kb.repeat_key == 0 or 25 <= 0 or kb.repeat_index >= wm.commands.len) {
+        if (kb.repeat_key == 0 or wm.cfg.repeat_rate == 0 or kb.repeat_index >= wm.commands.len) {
             kb.stopRepeat();
             return 0;
         }
@@ -158,7 +193,7 @@ pub const Keyboard = struct {
             .spawn, .shell, .lua => 100,
             else => 1,
         };
-        const period: i32 = @max(@divTrunc(1000, 25), floor);
+        const period: i32 = @max(@as(i32, @intCast(1000 / wm.cfg.repeat_rate)), floor);
         if (kb.repeat_timer) |t| t.timerUpdate(@intCast(period)) catch {};
         return 0;
     }
@@ -189,6 +224,8 @@ pub const Keyboard = struct {
         kb.modifiers.link.remove();
         kb.key.link.remove();
         kb.destroy.link.remove();
-        kb.server.gpa.destroy(kb);
+        const server = kb.server;
+        server.gpa.destroy(kb);
+        server.seat.setCapabilities(.{ .pointer = true, .keyboard = server.keyboards.length() > 0 });
     }
 };

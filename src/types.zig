@@ -528,6 +528,10 @@ pub const WindowManager = struct {
     /// reload destroys and re-creates the key bindings, which is only legal
     /// there, and must not run while the action queue is being worked off.
     reload_pending: bool = false,
+    /// Bumped by every (re)load of the configuration (boot.loadModel). The
+    /// compositor compares it with the one it last applied to its devices
+    /// (keyboard repeat) and applies the config again when it differs.
+    config_gen: u32 = 0,
     /// The focus request of this pass came from the pointer (click, hover),
     /// not from the keyboard: `warp_mouse_to_focus` must not move the pointer
     /// then. Cleared at the end of every manage pass.

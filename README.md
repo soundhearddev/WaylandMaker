@@ -68,6 +68,7 @@ wmaker-wl [OPTION]       without an option: start the session
       --check            check config.lua, key bindings, root menu, window attributes and WMState
                          (exit 0: fine, 1: problems)
       --paths            list the files wmaker-wl reads and which of them exist
+      --binds            list the key bindings in effect (also on Super+/ in a session)
       --print-config     print the built-in default config.lua
       --log SPEC         log filter, e.g. info,anim=debug (same as WMAKER_LOG)
 ```

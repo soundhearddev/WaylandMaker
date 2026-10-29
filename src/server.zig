@@ -64,6 +64,8 @@ pub const Server = struct {
     /// the compositor last set it).
     focused: ?*View = null,
     manage_idle: ?*wl.EventSource = null,
+    /// `wm.config_gen` as last applied to the devices (see `applyConfig`).
+    applied_config_gen: u32 = 0,
     /// Wakes the loop when monitor changes have been quiet long enough to
     /// apply the rules (`outputs.settle`); armed only while one is pending.
     settle_timer: ?*wl.EventSource = null,
@@ -255,6 +257,7 @@ pub const Server = struct {
     fn runManage(server: *Server) void {
         server.manage_idle = null;
         manage.run(server.wm, server.sink(), server.nowMs());
+        server.applyConfig();
         // The Dock shows what the pass decided (tiles, workspace, config).
         server.dock_ui.update();
         // Something still moves: ask for the next frame. The pass after it is
@@ -262,6 +265,16 @@ pub const Server = struct {
         // one pass per displayed frame and nothing when it ends.
         if (server.wm.anim_active) server.requestFrames();
         server.armSettleTimer();
+    }
+
+    /// What of config.lua lives in the devices and not in the model: the key
+    /// repeat the clients are told about. Runs after every pass, but does
+    /// something only when a (re)load happened since the last time.
+    fn applyConfig(server: *Server) void {
+        if (server.applied_config_gen == server.wm.config_gen) return;
+        server.applied_config_gen = server.wm.config_gen;
+        var it = server.keyboards.iterator(.forward);
+        while (it.next()) |kb| kb.applyRepeatInfo();
     }
 
     /// Monitor changes wait for a quiet time before the rules apply: sleep

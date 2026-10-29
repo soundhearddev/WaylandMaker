@@ -140,9 +140,42 @@ pub fn vtOf(sym: u32) ?u32 {
     return sym - first + 1;
 }
 
+/// A bind's key combination the way config.lua writes it: `Super+Shift+Return`.
+/// For `wmaker-wl --binds` and for messages.
+pub fn writeCombo(w: *std.Io.Writer, mods: config.Modifiers, keysym: u32) std.Io.Writer.Error!void {
+    if (mods.mod4) try w.writeAll("Super+");
+    if (mods.ctrl) try w.writeAll("Ctrl+");
+    if (mods.mod1) try w.writeAll("Alt+");
+    if (mods.shift) try w.writeAll("Shift+");
+    if (mods.mod3) try w.writeAll("Mod3+");
+    if (mods.mod5) try w.writeAll("Mod5+");
+    var name: [64]u8 = undefined;
+    const n = xkb.Keysym.getName(@enumFromInt(keysym), &name, name.len);
+    if (n > 0 and n < 64) {
+        try w.writeAll(name[0..@intCast(n)]);
+    } else {
+        try w.print("0x{x}", .{keysym});
+    }
+}
+
 // ---- tests --------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "writeCombo: modifiers in a fixed order, then the keysym name" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeCombo(&w, .{ .mod4 = true, .shift = true }, @intFromEnum(xkb.Keysym.Return));
+    try testing.expectEqualStrings("Super+Shift+Return", w.buffered());
+
+    var w2: std.Io.Writer = .fixed(&buf);
+    try writeCombo(&w2, .{}, @intFromEnum(xkb.Keysym.XF86AudioMute));
+    try testing.expectEqualStrings("XF86AudioMute", w2.buffered());
+
+    var w3: std.Io.Writer = .fixed(&buf);
+    try writeCombo(&w3, .{ .ctrl = true, .mod1 = true }, @intFromEnum(xkb.Keysym.Delete));
+    try testing.expectEqualStrings("Ctrl+Alt+Delete", w3.buffered());
+}
 
 fn bind(mods: config.Modifiers, name: [:0]const u8) config.Bind {
     return .{ .mods = mods, .keysym = @intFromEnum(xkb.Keysym.fromName(name, .no_flags)), .command = "none" };

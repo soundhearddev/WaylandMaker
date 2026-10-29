@@ -15,14 +15,31 @@
 scopes, `SCOPE=LEVEL` overrides it for one scope (the last rule for a scope wins). Levels are `off`,
 `err`, `warn`, `info`, `debug`. The default is `info`. Every source file logs under its own scope, so a
 line reads `info(window): ...`. The scopes are `action`, `anim`, `check`, `compat`, `config`, `dock`,
-`dockapp`, `dockhost`, `dump`, `files`, `main`, `output`, `perf`, `process`, `seat`, `sequence`, `svg`,
-`ui` and `window`.
+`dockapp`, `dockhost`, `dump`, `files`, `keyboard`, `boot`, `main`, `output`, `perf`, `process`, `seat`, `sequence`,
+`server`, `svg`, `ui` and `window`.
 
 The invariant check costs O(windows) per sequence. It is for hunting a bug, not for leaving on. "invariants:
 all hold" in the dump is the quickest answer to "is the model broken or only the picture?".
 
 `wmaker-wl --check` reads the config, key bindings, root menu, window attributes and `WMState` the way a
 session would, reports what is wrong, and exits with 0 or 1 without starting anything.
+
+## The keyboard does nothing
+
+Start with `wmaker-wl --log info,keyboard=debug` from a TTY (stderr to a file: `... 2> ~/wl.log`), press a
+key, and read the log:
+
+| Log line | Meaning |
+|---|---|
+| `config ...: N binds` at start | config.lua was read and its binds turned into commands. `0 binds` means the config is empty or broken: run `wmaker-wl --check` |
+| `keyboard ...: N layout(s), repeat R/s after D ms, B binds` | a keyboard was found and set up. Without this line libinput gave no keyboard (check the seat: `loginctl seat-status`, group `input`, `seatd`) |
+| `err(keyboard): B binds in the config but C commands` | the model was not loaded at start: a bug, not a config problem |
+| `warn(keyboard): the keymap from XKB_DEFAULT_* does not compile` | typo in `XKB_DEFAULT_LAYOUT` & co (`environment` in config.lua, or `~/.config/wmaker-wl/env`); the keyboard runs with `us` meanwhile |
+| `debug(keyboard): key K mods M: bind I ...` / `no bind, goes to the client` | what a key press did. `M` is the modifier mask (Super is `0x40`, Shift `0x1`, Ctrl `0x4`, Alt `0x8`) |
+| `info(keyboard): switching to vt N` | `Ctrl+Alt+F<N>` was pressed; this works whatever the config says |
+
+`wmaker-wl --binds` lists what is bound. `Super+Shift+e` leaves the session, `Ctrl+Alt+F<N>` switches to another
+terminal if everything else fails.
 
 ## Tests
 

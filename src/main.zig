@@ -23,6 +23,7 @@ const log_mod = model.log;
 const boot = @import("boot.zig");
 const cli_mod = @import("cli.zig");
 const diag = @import("diag.zig");
+const keys = @import("keys.zig");
 const Server = @import("server.zig").Server;
 
 /// Every message reaches `log_mod.logFn`, which counts warnings and errors for
@@ -51,6 +52,24 @@ fn showPaths(io: std.Io, gpa: std.mem.Allocator) !void {
     var fw = std.Io.File.stdout().writer(io, &buf);
     try wm_files.printPaths(&fw.interface, io, cfg.arena.allocator(), &cfg);
     try fw.interface.flush();
+}
+
+/// `wmaker-wl --binds`: every key binding in effect (config.lua on top of the
+/// built-in defaults), one `KEYS  command` per line. The same list a session
+/// shows on `Super+/`.
+fn showBinds(io: std.Io, gpa: std.mem.Allocator) !void {
+    var cfg = try config.load(io, gpa);
+    defer cfg.deinit();
+    var buf: [4096]u8 = undefined;
+    var fw = std.Io.File.stdout().writer(io, &buf);
+    const w = &fw.interface;
+    for (cfg.binds) |b| {
+        var combo: [96]u8 = undefined;
+        var cw: std.Io.Writer = .fixed(&combo);
+        keys.writeCombo(&cw, b.mods, b.keysym) catch {};
+        try w.print("{s:<30} {s}\n", .{ cw.buffered(), b.command });
+    }
+    try w.flush();
 }
 
 /// `wmaker-wl --check`: read everything the session would read (config.lua,
@@ -97,6 +116,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (cli.print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
     if (cli.show_paths) return showPaths(io, gpa);
+    if (cli.show_binds) return showBinds(io, gpa);
 
     // A file named with --config must exist: silently falling back to the
     // defaults would look like "my config is not loaded".
@@ -134,7 +154,19 @@ pub fn main(init: std.process.Init) !void {
     wm.seats.init();
     action.global = wm;
 
-    // const startup = boot.loadModel(wm) catch return error.ConfigLoadFailed;
+    // Bind commands, root menu, window attributes, Dock entries, the look:
+    // everything derived from the config. Without this no key bind does
+    // anything (`wm.commands` stays empty).
+    _ = boot.loadModel(wm) catch |err| {
+        log.err("cannot set up the model from {s}: {t}", .{ wm.cfg.config_file, err });
+        return error.ConfigLoadFailed;
+    };
+    log.info("config {s}: {d} binds, {d} programs at start", .{ wm.cfg.config_file, wm.cfg.binds.len, wm.cfg.spawn_at_startup.len });
+
+    // `environment` before anything else: the compositor library reads
+    // WLR_* and LIBSEAT_BACKEND while it starts, the keyboard reads
+    // XKB_DEFAULT_*, and every program we start inherits it.
+    boot.applyEnvironment(wm.cfg.environment);
 
     // ---- the compositor ----------------------------------------------------------
     const server = try Server.create(gpa, wm);
@@ -142,11 +174,12 @@ pub fn main(init: std.process.Init) !void {
 
     const socket = try server.listen();
     defer gpa.free(socket);
-
-    // `environment` first (the programs below inherit it), then the programs.
-    boot.applyEnvironment(wm.cfg.environment);
     log.info("running on WAYLAND_DISPLAY={s} (config: {s})", .{ socket, wm.cfg.config_file });
-    // boot.runAutostart(wm, startup.autostart);
+
+    // The socket exists and the session variables are exported: now D-Bus
+    // learns about them and `spawn_at_startup` runs. Clients that connect
+    // before the loop runs wait in the socket's queue.
+    boot.runStartup(wm);
 
     try server.run();
 }
