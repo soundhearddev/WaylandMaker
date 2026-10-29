@@ -113,31 +113,41 @@ browser = "firefox"
 -- ---- WindowMaker compatibility (WMRootMenu, WMWindowAttributes, WMState) ------
 enable_wmaker_compat = false
 
--- ---- startup -----------------------------------------------------------------
--- Programs started once at session start (not on a reload): a string is split
--- like a command line, a table is the argv.
---     spawn_at_startup = { "waybar", { "mako" }, "foot -e htop" }
--- Environment variables for every program wmaker-wl starts:
---     environment = { MOZ_ENABLE_WAYLAND = "1", QT_QPA_PLATFORM = "wayland" }
+-- ---- startup (autostart) ---------------------------------------------------
+-- `spawn_at_startup` is THE autostart: a list of programs started once when the
+-- session comes up (never again on a reload). A string is split like a command
+-- line (no shell), a table is the argv. For pipes, `&&` or `~` use `sh -c`:
+--
+--     spawn_at_startup = {
+--         "mako",                                   -- notifications
+--         "nm-applet --indicator",                  -- network
+--         "foot -e htop",
+--         { "swaybg", "-i", "/home/me/wall.png" },  -- argv, spaces are fine
+--         { "sh", "-c", "wl-paste --watch cliphist store" },
+--     }
+--     table.insert(spawn_at_startup, "blueman-applet")   -- or add to it later
+--
+-- Order at start: `environment` is set, then (import_environment) D-Bus and
+-- systemd --user learn about WAYLAND_DISPLAY & co, then the programs start.
+-- A program that cannot be started is a warning in the log (`wmaker-wl --log info`).
 spawn_at_startup = {}
+
+-- Environment variables for every program wmaker-wl starts (and, with
+-- import_environment, for D-Bus activated programs and systemd --user):
+--     environment = { MOZ_ENABLE_WAYLAND = "1", QT_QPA_PLATFORM = "wayland" }
+-- The keyboard layout is read from the XKB_DEFAULT_* variables when a keyboard
+-- appears, so this is also where a German keyboard is set up:
+--     environment = { XKB_DEFAULT_LAYOUT = "de", XKB_DEFAULT_OPTIONS = "caps:escape" }
+--     environment = { XKB_DEFAULT_LAYOUT = "us,de", XKB_DEFAULT_OPTIONS = "grp:alt_shift_toggle" }
 environment = {}
 
--- ---- session ------------------------------------------------------------------
--- Autostart works exactly like Window Maker's: on start, one shell script is
--- run once, detached. It is looked up first as ~/.config/wmaker-wl/autostart,
--- then (if enable_wmaker_compat = true) as ~/GNUstep/Library/WindowMaker/autostart.
--- The file does not need to exist, and does not need +x -- it always runs
--- through `/bin/sh`. Example ~/.config/wmaker-wl/autostart:
---
---     #!/bin/sh
---     nm-applet &
---     xrdb -merge ~/.Xresources &
---
-enable_autostart = true
+-- Tell D-Bus / systemd --user about WAYLAND_DISPLAY, XDG_CURRENT_DESKTOP & co at
+-- start. Portals, notification daemons and user services need it.
+import_environment = true
 
 -- ---- dock apps ----------------------------------------------------------------
 -- DockApps are programs that put themselves into the Dock (app_id
--- `dockapp:<name>`): start them from the autostart script above, from a menu
+-- `dockapp:<name>`): start them with `spawn_at_startup` above, from a menu
 -- or by hand -- no list to maintain. Dock and Clip contents are Window
 -- Maker's own WMState property list: wmaker-wl saves it itself in
 -- $XDG_STATE_HOME/wmaker-wl/WMState and, if enable_wmaker_compat = true,
@@ -165,6 +175,12 @@ enable_dockapps = true
 -- keyboard, 1 = the second, ... ("current" = follow the active layout.)
 -- Keys can be written as characters: `bind("Super+ü", ...)`.
 bind_layout = "current"
+-- Auto-repeat of held keys. It is what clients get, and wmaker-wl repeats the
+-- binds that make sense to repeat (focus, move, scroll, widen/narrow, float_move,
+-- float_resize and the volume / brightness keys) the same way. repeat_rate = 0 turns it off.
+repeat_rate = 25                 -- keys per second
+repeat_delay = 600               -- ms until it starts
+repeat_binds = true              -- false: a bind fires once per press, however long it is held
 
 -- ---- Dock and Clip ----------------------------------------------------------
 -- The Dock is Window Maker's column of tiles (dock_size, 64 px by default) on a screen edge (a logo
@@ -212,7 +228,7 @@ mini_dock = true                 -- every minimized window gets a tile in the Do
 --
 -- `shell <anything>` (aliases: `exec`, `shexec`) hands the rest of the
 -- line to `/bin/sh -c` verbatim, exactly like the root menu's SHEXEC
--- entries and the autostart script. This is the general "run any command
+-- entries and `spawn_at_startup`. This is the general "run any command
 -- on any key" escape hatch: pipes, &&/||, ~ and $VAR expansion, globs,
 -- backgrounding with a trailing &, and chaining several programs on one
 -- key all work, because the shell -- not wmaker-wl -- parses the line.
@@ -228,7 +244,31 @@ mini_dock = true                 -- every minimized window gets a tile in the Do
 bind("Super+Return", "spawn_terminal")
 bind("Super+a", "spawn_launcher")
 bind("Super+b", "spawn_browser")
-bind("Super+p", [[shell grim -g "$(slurp)" ~/Pictures/shot-$(date +%s).png]])
+bind("Super+p", [[shell mkdir -p ~/Pictures && grim -g "$(slurp)" ~/Pictures/shot-$(date +%s).png]])   -- needs screencopy support
+
+-- A list of all key bindings in a terminal (the same as `wmaker-wl --binds | less`).
+-- It uses $TERMINAL if that is set (any terminal that takes `-e`), else alacritty.
+bind("Super+slash", "shell ${TERMINAL:-alacritty} -e sh -c 'wmaker-wl --binds | less'")
+bind("Super+F1", "shell ${TERMINAL:-alacritty} -e sh -c 'wmaker-wl --binds | less'")
+
+-- sound, brightness, media player. A key without a modifier is fine. Volume and
+-- brightness repeat while held (repeat_binds). wpctl (PipeWire) first, pactl
+-- (PulseAudio) as the fallback; brightnessctl first, then light.
+bind("XF86AudioRaiseVolume", [[shell wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ || pactl set-sink-volume @DEFAULT_SINK@ +5%]])
+bind("XF86AudioLowerVolume", [[shell wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- || pactl set-sink-volume @DEFAULT_SINK@ -5%]])
+bind("XF86AudioMute", [[shell wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle || pactl set-sink-mute @DEFAULT_SINK@ toggle]])
+bind("XF86AudioMicMute", [[shell wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle || pactl set-source-mute @DEFAULT_SOURCE@ toggle]])
+bind("XF86MonBrightnessUp", "shell brightnessctl set 5%+ || light -A 5")
+bind("XF86MonBrightnessDown", "shell brightnessctl set 5%- || light -U 5")
+bind("XF86AudioPlay", "shell playerctl play-pause")
+bind("XF86AudioPause", "shell playerctl pause")
+bind("XF86AudioStop", "shell playerctl stop")
+bind("XF86AudioNext", "shell playerctl next")
+bind("XF86AudioPrev", "shell playerctl previous")
+-- The same on a keyboard without those keys:
+bind("Super+F11", [[shell wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- || pactl set-sink-volume @DEFAULT_SINK@ -5%]])
+bind("Super+F12", [[shell wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+ || pactl set-sink-volume @DEFAULT_SINK@ +5%]])
+bind("Super+F10", [[shell wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle || pactl set-sink-mute @DEFAULT_SINK@ toggle]])
 
 -- session / window
 bind("Super+q", "close")

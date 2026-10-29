@@ -18,6 +18,7 @@ const style = @import("style.zig");
 const WindowManager = types.WindowManager;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn system(command: [*:0]const u8) c_int;
 
 /// Everything derived from `wm.cfg` that must be (re)built together, because
 /// it all lives in `wm.cfg.arena`: the bind commands, the root menu, the
@@ -25,7 +26,7 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 /// so leaving them behind on reload would turn them into dangling pointers
 /// the moment the old arena is freed).
 ///
-/// Returns what only start-up needs (autostart script, DockApps).
+/// Returns what only start-up needs (DockApps).
 pub fn loadModel(wm: *WindowManager) !wm_files.Loaded {
     const arena = wm.cfg.arena.allocator();
     wm.commands = try action.parseAll(arena, &wm.cfg);
@@ -85,12 +86,38 @@ pub fn ignoreSigchld() void {
     std.posix.sigaction(.CHLD, &act, null);
 }
 
-/// Window Maker's autostart script, run once through the shell (so it works
-/// whether or not the file is marked executable).
-pub fn runAutostart(wm: *WindowManager, path: ?[]const u8) void {
+/// Variables D-Bus and systemd --user learn about at session start, besides
+/// the ones of the `environment` option.
+const session_vars = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP";
+
+/// Tell D-Bus (and with `--systemd`, systemd --user) where this session is.
+/// Programs started by D-Bus activation -- notification daemons, portals, a
+/// file manager opened from a browser -- get their environment from there,
+/// not from us, so without this they cannot find the compositor.
+///
+/// Runs synchronously (it takes a few milliseconds) so that everything
+/// started afterwards already finds the variables. A missing
+/// `dbus-update-activation-environment` is no error; `timeout` keeps a
+/// broken bus from holding up the session.
+pub fn importEnvironment(wm: *WindowManager) void {
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.writeAll("T=; command -v timeout >/dev/null 2>&1 && T='timeout 5'; V='" ++ session_vars) catch return;
+    for (wm.cfg.environment) |e| w.print(" {s}", .{e.name}) catch break;
+    w.writeAll("'; if command -v dbus-update-activation-environment >/dev/null 2>&1; then " ++
+        "$T dbus-update-activation-environment --systemd $V; " ++
+        "elif command -v systemctl >/dev/null 2>&1; then $T systemctl --user import-environment $V; fi " ++
+        ">/dev/null 2>&1") catch return;
+    const text = w.buffered();
+    if (text.len >= buf.len) return;
+    buf[text.len] = 0;
+    const rc = system(@ptrCast(&buf));
+    log.info("environment imported into D-Bus / systemd (status {d})", .{rc});
+}
+
+/// Run once at session start, never on a reload: the environment import,
+/// then every program of `spawn_at_startup`.
+pub fn runStartup(wm: *WindowManager) void {
+    if (wm.cfg.import_environment) importEnvironment(wm);
     for (wm.cfg.spawn_at_startup) |argv| model.proc.spawn(wm, argv);
-    if (path) |p| {
-        log.info("autostart: running {s}", .{p});
-        model.proc.spawn(wm, &.{ "/bin/sh", p });
-    }
 }

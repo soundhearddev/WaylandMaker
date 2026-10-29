@@ -17,9 +17,8 @@ const keys = @import("keys.zig");
 
 const Server = @import("server.zig").Server;
 
-/// Auto-repeat, as clients see it: after 600 ms, 25 keys per second.
-const repeat_rate = 25;
-const repeat_delay = 600;
+// Auto-repeat, as clients see it, comes from `repeat_rate` and `repeat_delay`
+// of config.lua (default: after 600 ms, 25 keys per second).
 
 pub const Keyboard = struct {
     server: *Server,
@@ -29,6 +28,11 @@ pub const Keyboard = struct {
     /// well, so a client never sees half a key.
     consumed: [32]u32 = undefined,
     n_consumed: usize = 0,
+    /// Held key of a bind that repeats (keys.repeats): the bind, the key, and
+    /// the timer that fires it again.
+    repeat_timer: ?*wl.EventSource = null,
+    repeat_index: usize = 0,
+    repeat_key: u32 = 0,
 
     modifiers: wl.Listener(*wlr.Keyboard) = .init(onModifiers),
     key: wl.Listener(*wlr.Keyboard.event.Key) = .init(onKey),
@@ -48,7 +52,7 @@ pub const Keyboard = struct {
 
         const wlr_kb = device.toKeyboard();
         if (!wlr_kb.setKeymap(keymap)) return error.SetKeymap;
-        wlr_kb.setRepeatInfo(repeat_rate, repeat_delay);
+        wlr_kb.setRepeatInfo(server.wm.cfg.repeat_rate, server.wm.cfg.repeat_delay);
 
         wlr_kb.events.modifiers.add(&kb.modifiers);
         wlr_kb.events.key.add(&kb.key);
@@ -74,7 +78,10 @@ pub const Keyboard = struct {
 
         const handled = switch (event.state) {
             .pressed => kb.press(wlr_kb, event.keycode),
-            .released => kb.releaseConsumed(event.keycode),
+            .released => blk: {
+                if (kb.repeat_key == event.keycode) kb.stopRepeat();
+                break :blk kb.releaseConsumed(event.keycode);
+            },
             else => false,
         };
         if (handled) return;
@@ -88,6 +95,9 @@ pub const Keyboard = struct {
         const server = kb.server;
         const keymap = wlr_kb.keymap orelse return false;
         const state = wlr_kb.xkb_state orelse return false;
+
+        // Any new press ends the repeat of the key held before.
+        kb.stopRepeat();
 
         const syms = keys.candidates(keymap, state, server.wm.cfg.bind_layout, evdev + 8);
 
@@ -105,7 +115,56 @@ pub const Keyboard = struct {
         const mods: u32 = @bitCast(wlr_kb.getModifiers());
         const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse return false;
         manage.queueBind(server.wm, index);
+        const cfg = &server.wm.cfg;
+        if (cfg.repeat_binds and cfg.repeat_rate > 0 and index < server.wm.commands.len and
+            keys.repeats(server.wm.commands[index], syms.slice()))
+        {
+            kb.startRepeat(index, evdev);
+        }
         return kb.consume(evdev);
+    }
+
+    /// Fire the bind of the held key again after `repeat_delay`, then every
+    /// 1000 / `repeat_rate` ms until the key is released.
+    fn startRepeat(kb: *Keyboard, index: usize, evdev: u32) void {
+        const server = kb.server;
+        const timer = kb.repeat_timer orelse blk: {
+            const t = server.loop.addTimer(*Keyboard, onRepeat, kb) catch {
+                log.warn("out of memory: no repeat for this bind", .{});
+                return;
+            };
+            kb.repeat_timer = t;
+            break :blk t;
+        };
+        kb.repeat_index = index;
+        kb.repeat_key = evdev;
+        timer.timerUpdate(@intCast(@max(server.wm.cfg.repeat_delay, 1))) catch |err| {
+            log.warn("repeat timer: {t}", .{err});
+            kb.repeat_key = 0;
+        };
+    }
+
+    fn stopRepeat(kb: *Keyboard) void {
+        kb.repeat_key = 0;
+        if (kb.repeat_timer) |t| t.timerUpdate(0) catch {};
+    }
+
+    fn onRepeat(kb: *Keyboard) c_int {
+        const wm = kb.server.wm;
+        if (kb.repeat_key == 0 or wm.cfg.repeat_rate <= 0 or kb.repeat_index >= wm.commands.len) {
+            kb.stopRepeat();
+            return 0;
+        }
+        manage.queueBind(wm, kb.repeat_index);
+        // A program per repeat (volume, brightness) is started at most ten
+        // times a second; moving around runs as fast as the keyboard repeats.
+        const floor: i32 = switch (wm.commands[kb.repeat_index]) {
+            .spawn, .shell, .lua => 100,
+            else => 1,
+        };
+        const period: i32 = @max(@divTrunc(1000, wm.cfg.repeat_rate), floor);
+        if (kb.repeat_timer) |t| t.timerUpdate(@intCast(period)) catch {};
+        return 0;
     }
 
     fn consume(kb: *Keyboard, evdev: u32) bool {
@@ -128,6 +187,8 @@ pub const Keyboard = struct {
 
     fn onDestroy(listener: *wl.Listener(*wlr.InputDevice), _: *wlr.InputDevice) void {
         const kb: *Keyboard = @fieldParentPtr("destroy", listener);
+        if (kb.repeat_timer) |t| t.remove();
+        kb.repeat_timer = null;
         kb.link.remove();
         kb.modifiers.link.remove();
         kb.key.link.remove();

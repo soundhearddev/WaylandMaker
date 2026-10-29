@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=WaylandMaker Preferences
 GenericName=Settings
-Comment=Edit the wmaker-wl configuration (config.lua)
+Comment=Edit the wmaker-wl configuration
 Exec=wlprefs
 TryExec=wlprefs
 Icon=preferences-desktop

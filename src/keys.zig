@@ -22,6 +22,7 @@ const std = @import("std");
 const xkb = @import("xkbcommon");
 const model = @import("model.zig");
 const config = model.config;
+const types = model.types;
 
 /// Modifier bits a bind can name: Shift, Ctrl, Alt (mod1), mod3, Super
 /// (mod4), mod5. Caps Lock (bit 1) and Num Lock (mod2, bit 4) are left out.
@@ -87,6 +88,50 @@ pub fn find(binds: []const config.Bind, mods: u32, syms: []const u32) ?usize {
     return null;
 }
 
+/// Does holding the key of this bind fire the command again? Moving around,
+/// scrolling, resizing and the volume / brightness keys do; opening programs,
+/// closing windows and toggles do not (a held `Super+q` must not close every
+/// window in turn).
+pub fn repeats(cmd: types.Command, syms: []const u32) bool {
+    switch (cmd) {
+        .focus_left,
+        .focus_right,
+        .focus_up,
+        .focus_down,
+        .move_column_left,
+        .move_column_right,
+        .move_window_up,
+        .move_window_down,
+        .scroll_left,
+        .scroll_right,
+        .widen_column,
+        .narrow_column,
+        .float_move,
+        .float_resize,
+        .focus_window_or_workspace_up,
+        .focus_window_or_workspace_down,
+        .focus_column_or_output_left,
+        .focus_column_or_output_right,
+        => return true,
+        // A volume or brightness key runs a program (`wpctl`, `brightnessctl`):
+        // holding it should keep turning it up.
+        .spawn, .shell, .lua => {
+            for (syms) |s| if (isLevelKey(s)) return true;
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// XF86AudioLowerVolume / RaiseVolume, XF86MonBrightnessDown / Up,
+/// XF86KbdBrightnessDown / Up.
+fn isLevelKey(sym: u32) bool {
+    return switch (sym) {
+        0x1008ff11, 0x1008ff13, 0x1008ff03, 0x1008ff02, 0x1008ff06, 0x1008ff05 => true,
+        else => false,
+    };
+}
+
 /// `XF86Switch_VT_1` .. `XF86Switch_VT_12` -> 1 .. 12. The kernel's virtual
 /// terminal switch, which a session must do itself: the keymap only names it.
 pub fn vtOf(sym: u32) ?u32 {
@@ -137,6 +182,19 @@ test "vtOf" {
     try testing.expectEqual(@as(?u32, 12), vtOf(@intFromEnum(xkb.Keysym.XF86Switch_VT_1) + 11));
     try testing.expectEqual(@as(?u32, null), vtOf(@intFromEnum(xkb.Keysym.XF86Switch_VT_1) + 12));
     try testing.expectEqual(@as(?u32, null), vtOf(@intFromEnum(xkb.Keysym.Return)));
+}
+
+test "repeats: moving and volume keys do, closing and launching do not" {
+    const none: []const u32 = &.{};
+    const vol_up: u32 = @intFromEnum(xkb.Keysym.XF86AudioRaiseVolume);
+    const ret: u32 = @intFromEnum(xkb.Keysym.Return);
+    try testing.expect(repeats(.focus_left, none));
+    try testing.expect(repeats(.{ .float_move = .{ .dx = 40, .dy = 0 } }, none));
+    try testing.expect(repeats(.{ .shell = "wpctl" }, &.{vol_up}));
+    try testing.expect(!repeats(.{ .shell = "foot" }, &.{ret}));
+    try testing.expect(!repeats(.close, none));
+    try testing.expect(!repeats(.exit, none));
+    try testing.expect(!repeats(.toggle_fullscreen, none));
 }
 
 test "Syms drops duplicates and NoSymbol" {

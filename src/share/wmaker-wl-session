@@ -1,9 +1,24 @@
 #!/bin/sh
-
+# Session start script
+#
+# ~/.config/wmaker-wl/env (optional, plain sh) is read first: export what
+# should reach the compositor itself, for example
+#     export XKB_DEFAULT_LAYOUT=de
+# The same can be written as `environment = { ... }` in config.lua.
 
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=wmaker-wl
 export XDG_CURRENT_DESKTOP=wmaker-wl
+
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/wmaker-wl"
+if [ -r "$cfg/env" ]; then
+    # shellcheck disable=SC1091
+    . "$cfg/env"
+fi
+
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    echo "wmaker-wl-session: XDG_RUNTIME_DIR is not set (log in through logind or seatd)" >&2
+fi
 
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
     exec dbus-run-session -- wmaker-wl "$@"

@@ -9,7 +9,6 @@
 //     ~/GNUstep/Defaults/WMWindowAttributes    per-application rules
 //     ~/GNUstep/Defaults/WMState               dock and workspaces
 //     ~/GNUstep/Library/WindowMaker/{plmenu,menu}   older root menu files
-//     ~/GNUstep/Library/WindowMaker/autostart  session autostart script
 //
 // A file in wmaker-wl's own directory ($XDG_CONFIG_HOME/wmaker-wl/) wins over
 // the Window Maker one, so wmaker-wl can be tuned without touching an existing
@@ -18,11 +17,6 @@
 // Loading never fails the session: a missing file means "use the defaults", a
 // broken file is reported and skipped.
 //
-// Autostart works exactly like Window Maker's: a single shell script, run
-// once, detached, when the session comes up. It is looked up (not parsed)
-// the same way as the other files, so it is found automatically below either
-// `~/.config/wmaker-wl/autostart` or `~/GNUstep/Library/WindowMaker/autostart`
-// -- see `candidates(.autostart, ...)` and `main.zig`, which spawns it.
 
 const std = @import("std");
 const log = std.log.scoped(.files);
@@ -105,7 +99,7 @@ pub fn saveDockState(
 }
 
 /// Candidate files, best first, for one kind of configuration.
-pub const Kind = enum { root_menu, window_attributes, autostart, dockapps };
+pub const Kind = enum { root_menu, window_attributes, dockapps };
 
 pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]const u8) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
@@ -121,10 +115,6 @@ pub fn candidates(a: std.mem.Allocator, kind: Kind, own: ?[]const u8, root: ?[]c
         .window_attributes => {
             if (own) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/WMWindowAttributes", .{d}));
             if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Defaults/WMWindowAttributes", .{d}));
-        },
-        .autostart => {
-            if (own) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/autostart", .{d}));
-            if (root) |d| try list.append(a, try std.fmt.allocPrint(a, "{s}/Library/WindowMaker/autostart", .{d}));
         },
         .dockapps => {
             // wmaker-wl's own copy is the state file (statePath); the only
@@ -152,9 +142,6 @@ pub fn printPaths(w: *std.Io.Writer, io: std.Io, a: std.mem.Allocator, cfg: *con
 
     try w.writeAll("\nwindow attributes:\n");
     for (try candidates(a, .window_attributes, own, root)) |p| try showPath(w, io, a, p);
-
-    try w.writeAll("\nautostart:\n");
-    for (try candidates(a, .autostart, own, root)) |p| try showPath(w, io, a, p);
 
     try w.writeAll("\nDock / Clip state (WMState):\n");
     if (cfg.dock_save_state) {
@@ -191,10 +178,6 @@ fn readFirst(io: std.Io, a: std.mem.Allocator, paths: []const []const u8) ?struc
 pub const Loaded = struct {
     root_menu: *const wm_menu.Menu,
     attributes: wm_attr.Table,
-    /// Path of the autostart script to run once at session start, if any
-    /// and if `enable_autostart` allows it. Not parsed here; `main.zig`
-    /// spawns it through the shell, exactly like Window Maker does.
-    autostart: ?[]const u8,
     /// DockApps to auto-launch once at session start (see dockapp.zig),
     /// empty if `enable_dockapps` disallows it or nothing was found.
     dockapps: dockapp.List,
@@ -203,7 +186,7 @@ pub const Loaded = struct {
     dock_state_path: ?[]const u8,
 };
 
-/// Load the root menu, the window attributes and the autostart path.
+/// Load the root menu, the window attributes and the Dock state.
 /// Everything is allocated in `a` (the config arena, alive for the whole
 /// session).
 pub fn load(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config) !Loaded {
@@ -214,7 +197,6 @@ pub fn load(io: std.Io, a: std.mem.Allocator, cfg: *const config.Config) !Loaded
     return .{
         .root_menu = try loadMenu(io, a, cfg, own, root),
         .attributes = try loadAttributes(io, a, own, root),
-        .autostart = if (cfg.enable_autostart) try findAutostart(io, a, own, root) else null,
         .dockapps = if (cfg.enable_dockapps) try loadDockApps(io, a, own, root, state_path) else .{},
         .dock_state_path = state_path,
     };
@@ -261,19 +243,6 @@ fn loadAttributes(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]c
     for (loaded.warnings) |w| log.warn("window attributes {s}: {s}", .{ found.path, w });
     log.info("window attributes: {d} rules from {s}", .{ loaded.table.rules.len, found.path });
     return loaded.table;
-}
-
-/// First existing autostart script, own directory before Window Maker's
-/// (see `candidates(.autostart, ...)`). The script is neither parsed nor
-/// required to be executable -- `main.zig` runs it through `/bin/sh`, so a
-/// missing `+x` bit does not silently do nothing the way a direct exec
-/// would. Reading it here (like `readFirst` does for the other files) is
-/// the cheapest existence check available through `std.Io.Dir`.
-fn findAutostart(io: std.Io, a: std.mem.Allocator, own: ?[]const u8, root: ?[]const u8) !?[]const u8 {
-    const paths = try candidates(a, .autostart, own, root);
-    const found = readFirst(io, a, paths) orelse return null;
-    log.info("autostart: found {s}", .{found.path});
-    return found.path;
 }
 
 /// The Dock and Clip contents: ONE format, Window Maker's WMState property
@@ -350,26 +319,9 @@ test "candidate order: wmaker-wl first, then Window Maker's files" {
     try std.testing.expectEqual(@as(usize, 2), attr.len);
     try std.testing.expectEqualStrings("/h/GNUstep/Defaults/WMWindowAttributes", attr[1]);
 
-    const auto = try candidates(a, .autostart, "/h/.config/wmaker-wl", "/h/GNUstep");
-    try std.testing.expectEqual(@as(usize, 2), auto.len);
-    try std.testing.expectEqualStrings("/h/.config/wmaker-wl/autostart", auto[0]);
-    try std.testing.expectEqualStrings("/h/GNUstep/Library/WindowMaker/autostart", auto[1]);
-
     const dock = try candidates(a, .dockapps, "/h/.config/wmaker-wl", "/h/GNUstep");
     try std.testing.expectEqual(@as(usize, 1), dock.len);
     try std.testing.expectEqualStrings("/h/GNUstep/Defaults/WMState", dock[0]);
-}
-
-test "autostart candidates respect wmaker compat toggle (root omitted)" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    // Mirrors what `load()` does when enable_wmaker_compat = false: only
-    // the own-directory candidate remains.
-    const auto = try candidates(a, .autostart, "/h/.config/wmaker-wl", null);
-    try std.testing.expectEqual(@as(usize, 1), auto.len);
-    try std.testing.expectEqualStrings("/h/.config/wmaker-wl/autostart", auto[0]);
 }
 
 test "candidates without a home directory" {
