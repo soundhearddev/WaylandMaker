@@ -39,6 +39,11 @@
 // `shell("a | b")` work; they are refused anywhere else. The config's Lua
 // state then stays alive (`Config.script`) until the config is replaced.
 //
+// An option is a field of `Config`: how a value is read from Lua, handed
+// back to Lua and checked follows from the field's type (see "the option
+// table" below). Adding an option is one field here plus its line in
+// share/default_config.lua.
+//
 // Key names are resolved through xkbcommon, so they are layout-correct.
 // Bindings are matched against the *active* layout (keys.zig); no manual QWERTZ /
 // AZERTY remapping is needed (the old layoutMapKeysym() was wrong).
@@ -205,6 +210,22 @@ pub const Config = struct {
     border_unfocused: u32 = 0x3c3836,
     border_floating: u32 = 0x7daea3,
 
+    // ---- look of the Dock, the Clip and the Drawers (style.zig) -------------
+    // Window Maker's NeXT look. A tile is a diagonal gradient `from` -> `to`
+    // with a two-line bevel; `hot` is the tile under the pointer.
+    tile_from: u32 = 0xc6c2c6,
+    tile_to: u32 = 0x9a969a,
+    tile_hot_from: u32 = 0xdedade,
+    tile_hot_to: u32 = 0xaeaaae,
+    logo_from: u32 = 0x5a5a62,
+    logo_to: u32 = 0x1e1e24,
+    logo_text: u32 = 0xffffff,
+    tile_text: u32 = 0x000000,
+    bevel_light: u32 = 0xffffff,
+    bevel_dark: u32 = 0x555555,
+    arrow: u32 = 0x303030,
+    arrow_hot: u32 = 0xffffff,
+
     // ---- fonts (Pango font descriptions, e.g. "Sans Bold 10") --------------
     /// Title bar of a menu.
     font_menu_title: [:0]const u8 = "Sans Bold 10",
@@ -212,6 +233,9 @@ pub const Config = struct {
     font_menu: [:0]const u8 = "Sans 10",
     /// The small workspace name under the number in the Clip.
     font_dock: [:0]const u8 = "Sans 8",
+    /// The "WM" of the Dock's first tile, and the big workspace number of the Clip.
+    font_dock_logo: [:0]const u8 = "Sans Bold 22",
+    font_dock_number: [:0]const u8 = "Sans Bold 20",
 
     // ---- menus ----------------------------------------------------------
     /// Which side of its parent a submenu opens on first. It flips to the
@@ -304,10 +328,9 @@ pub const Config = struct {
     /// events with layout N (0-based) of the keyboard that produced them.
     bind_layout: ?u32 = null,
 
-    // ---- Dock and Clip (see dock.zig) -------------------------------------------
-    /// Draw the Dock: a column of 64 px tiles on one screen edge. Its first
-    /// tile is the Window Maker logo tile, the others are the DockApps of
-    /// WMState.
+    // ---- Dock and Clip (dock_model.zig, dock_scene.zig) --------------------------
+    /// Draw the Dock: a column of tiles on one screen edge. Its first tile is
+    /// the Window Maker logo tile, the others are the DockApps of WMState.
     dock_enabled: bool = true,
     /// Edge length of one Dock/Clip tile in px (Window Maker's icon size,
     /// default 64). The icon inside is 3/4 of it.
@@ -341,7 +364,7 @@ pub const Config = struct {
     /// Start with only the Clip tile shown, without its workspace icons.
     clip_collapsed: bool = false,
     /// Every minimized window gets a temporary tile (its program's icon) in
-    /// the Dock, until it is restored (see dockhost.syncModel). The
+    /// the Dock, until it is restored (see dockhost.zig). The
     /// `toggle_mini_dock` command flips it at run time (a config reload sets
     /// it back to this value).
     mini_dock: bool = true,
@@ -349,8 +372,7 @@ pub const Config = struct {
     /// (Window Maker's IconificationStyle: zoom, twist, flip, none, random).
     iconify_style: IconifyStyle = .twist,
     /// Window Maker's "Autocollapse": the Clip folds up when the pointer
-    /// leaves it and unfolds when it comes back. (No delay: wmaker-wl has no
-    /// timers.)
+    /// leaves it and unfolds when it comes back.
     clip_auto_collapse: bool = false,
     /// Window Maker's "Autoraise": a Clip that is not `clip_on_top` comes up
     /// while the pointer is on it.
@@ -483,8 +505,8 @@ const theme_dirs = [_][]const u8{ "/usr/local/share/wmaker-wl/Themes", "/usr/sha
 
 /// The options a theme may set: how things look, nothing that does anything.
 fn themeKey(key: []const u8) bool {
-    inline for (.{ "gap", "outer_gap", "border_width", "border_focused", "border_unfocused", "border_floating" }) |k| {
-        if (std.mem.eql(u8, key, k)) return true;
+    inline for (all_options) |name| {
+        if (std.mem.eql(u8, key, name)) return comptime isLook(name);
     }
     return false;
 }
@@ -709,7 +731,7 @@ fn copyThemeEntry(ctx: *Ctx, origin: []const u8) void {
         return;
     };
     if (!themeKey(key)) {
-        ctx.warn("{s}: `{s}` is not a theme option (themes set colours, borders and gaps only)", .{ origin, key });
+        ctx.warn("{s}: `{s}` is not a theme option (themes set colours, fonts, borders and gaps only)", .{ origin, key });
         return;
     }
     lua.pushGlobals(L); //       [key, value, G]
@@ -1150,134 +1172,154 @@ fn markExplicit(cfg: *Config, key: []const u8) void {
 
 const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
 
-// The options, grouped by the kind of value they take. applyOption (Lua
-// value -> Config), pushOption (Config -> Lua value) and the typo check all
-// walk these same lists.
-const pixel_options = .{ "gap", "outer_gap", "border_width", "min_window_size", "drag_threshold", "dock_offset", "strut_left", "strut_right", "strut_top", "strut_bottom" };
-const fraction_options = .{ "default_column_width", "width_step", "floating_size" };
-const colour_options = .{ "border_focused", "border_unfocused", "border_floating" };
-const bool_options = .{
-    "dock_enabled",
-    "dock_on_top",
-    "dock_auto_raise",
-    "dock_single_click",
-    "dock_save_state",
-    "dock_reserve_space",
-    "clip_enabled",
-    "mini_dock",
-    "clip_on_top",
-    "clip_collapsed",
-    "clip_auto_collapse",
-    "clip_auto_raise",
-    "focus_new_windows",
-    "workspace_wrap",
-    "clip_scroll_workspaces",
-    "focus_follows_mouse",
-    "focus_follows_mouse_scroll",
-    "warp_mouse_to_focus",
-    "prefer_no_csd",
-    "animations",
-    "center_single_column",
-    "maximize_follow",
-    "maximize_keep_focus",
-    "workspace_back_and_forth",
-    "dynamic_workspaces",
-    "enable_wmaker_compat",
-    "enable_autostart",
-    "enable_dockapps",
-};
-const enum_options = .{ "center_focused_column", "new_window", "dock_edge", "clip_corner", "menu_submenu_align", "output_order" };
-const font_options = .{ "font_menu_title", "font_menu", "font_dock" };
-const command_options = .{ "terminal", "launcher", "browser" };
-/// Options with their own kind of value.
-const special_options = .{ "dock_size", "workspace_count", "monitor_settle_ms", "width_presets", "workspace_names", "bind_layout", "mouse_mod", "spawn_at_startup", "environment", "anim_slowdown", "anim_window_movement", "anim_window_open" };
+// ---- the option table ---------------------------------------------------------
+//
+// An option IS a field of `Config`. There is no second list to keep in step:
+// the kind of an option follows from the type of its field, and everything
+// that walks the options (reading a value from Lua, handing a value back to
+// Lua, the typo check, themes) walks `all_options`, which is built from the
+// struct at compile time. A new option is one field in `Config` (plus its
+// line in default_config.lua); only a bound other than the usual one, a
+// colour (also a u32) or an option with a value of its own kind needs a line
+// below.
 
-/// Every option name, for the typo check.
-const all_options = pixel_options ++ fraction_options ++ colour_options ++ bool_options ++ enum_options ++ font_options ++ command_options ++ special_options;
+/// Fields of `Config` that are not options.
+const not_options = [_][]const u8{
+    "arena", "config_file",    "explicit", "monitor_rules", "monitor_profiles",
+    "binds", "parse_warnings", "script",
+    // Set by the miniaturize animation once it is ported (docs/TODO wlroots.md).
+      "iconify_style",
+};
+
+/// u32 fields that hold a colour.
+const colour_options = [_][]const u8{
+    "border_focused", "border_unfocused", "border_floating",
+    "tile_from",      "tile_to",          "tile_hot_from",
+    "tile_hot_to",    "logo_from",        "logo_to",
+    "logo_text",      "tile_text",        "bevel_light",
+    "bevel_dark",     "arrow",            "arrow_hot",
+};
+
+/// Options whose value is not a plain bool, number, colour, enum, font or
+/// command: they have their own reader and writer below.
+const special_options = [_][]const u8{
+    "width_presets",    "workspace_names", "bind_layout",          "mouse_mod",
+    "spawn_at_startup", "environment",     "anim_window_movement", "anim_window_open",
+};
+
+const Kind = enum { integer, fraction, colour, boolean, enumeration, font, command, special };
+
+fn inList(comptime list: []const []const u8, comptime name: []const u8) bool {
+    inline for (list) |n| {
+        if (comptime std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+/// Every option name, in the order of the struct.
+const all_options = blk: {
+    @setEvalBranchQuota(100_000);
+    const fields = @typeInfo(Config).@"struct".fields;
+    var count: usize = 0;
+    for (fields) |f| {
+        if (!inList(&not_options, f.name)) count += 1;
+    }
+    var names: [count][]const u8 = undefined;
+    var i: usize = 0;
+    for (fields) |f| {
+        if (!inList(&not_options, f.name)) {
+            names[i] = f.name;
+            i += 1;
+        }
+    }
+    break :blk names;
+};
+
+fn kindOf(comptime name: []const u8) Kind {
+    @setEvalBranchQuota(10_000);
+    if (inList(&colour_options, name)) return .colour;
+    if (inList(&special_options, name)) return .special;
+    const T = @FieldType(Config, name);
+    return switch (@typeInfo(T)) {
+        .bool => .boolean,
+        .int => .integer,
+        .float => .fraction,
+        .@"enum" => .enumeration,
+        .pointer => if (T == [:0]const u8) .font else if (T == []const []const u8) .command else @compileError("option " ++ name ++ ": no kind for its type"),
+        else => @compileError("option " ++ name ++ ": no kind for its type"),
+    };
+}
+
+/// The values an integer option accepts. Pixel values are 0 ..`max_pixels`:
+/// the layout multiplies and sums them, and an absurd one would overflow.
+fn intRange(comptime name: []const u8) struct { min: i64, max: i64 } {
+    if (comptime std.mem.eql(u8, name, "dock_size")) return .{ .min = min_dock_size, .max = max_dock_size };
+    if (comptime std.mem.eql(u8, name, "workspace_count")) return .{ .min = 1, .max = max_workspaces };
+    if (comptime std.mem.eql(u8, name, "monitor_settle_ms")) return .{ .min = 0, .max = 10_000 };
+    return .{ .min = 0, .max = max_pixels };
+}
+
+/// A fraction is above 0 and up to this (a share of the screen, a step).
+fn fractionMax(comptime name: []const u8) f64 {
+    if (comptime std.mem.eql(u8, name, "anim_slowdown")) return 1000;
+    return 1;
+}
+
+/// A theme sets how things look and nothing else: every colour, every font,
+/// the borders and the gaps.
+fn isLook(comptime name: []const u8) bool {
+    if (comptime std.mem.eql(u8, name, "gap") or std.mem.eql(u8, name, "outer_gap") or std.mem.eql(u8, name, "border_width")) return true;
+    return switch (comptime kindOf(name)) {
+        .colour, .font => true,
+        else => false,
+    };
+}
 
 /// Set the option `key` to the Lua value on top of the stack. Nothing is
 /// changed unless the value is valid.
 fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
+    inline for (all_options) |name| {
+        if (std.mem.eql(u8, key, name)) return applyTyped(ctx, name);
+    }
+    return error.UnknownKey;
+}
+
+fn applyTyped(ctx: *Ctx, comptime name: []const u8) ParseError!void {
+    const L = ctx.L;
+    const cfg = ctx.cfg;
+    switch (comptime kindOf(name)) {
+        .integer => {
+            const r = comptime intRange(name);
+            const v = lua.toInteger(L, -1) orelse return error.Invalid;
+            if (v < r.min or v > r.max) return error.Invalid;
+            @field(cfg, name) = @intCast(v);
+        },
+        .fraction => {
+            const v = lua.toNumber(L, -1) orelse return error.Invalid;
+            if (!(v > 0 and v <= comptime fractionMax(name))) return error.Invalid;
+            @field(cfg, name) = v;
+        },
+        .colour => @field(cfg, name) = colourValue(L) orelse return error.Invalid,
+        .boolean => @field(cfg, name) = lua.toBool(L, -1) orelse return error.Invalid,
+        .enumeration => {
+            const s = lua.toSlice(L, -1) orelse return error.Invalid;
+            @field(cfg, name) = std.meta.stringToEnum(@FieldType(Config, name), s) orelse return error.Invalid;
+        },
+        .font => {
+            const s = lua.toSlice(L, -1) orelse return error.Invalid;
+            @field(cfg, name) = try parseFont(ctx.a, s);
+        },
+        .command => @field(cfg, name) = try commandValue(ctx),
+        .special => return applySpecial(ctx, name),
+    }
+}
+
+/// The options with a value of their own kind.
+fn applySpecial(ctx: *Ctx, key: []const u8) ParseError!void {
     const L = ctx.L;
     const a = ctx.a;
     const cfg = ctx.cfg;
     const eql = std.mem.eql;
-
-    inline for (pixel_options) |name| {
-        if (eql(u8, key, name)) {
-            const v = lua.toInteger(L, -1) orelse return error.Invalid;
-            if (v < 0 or v > max_pixels) return error.Invalid;
-            @field(cfg, name) = @intCast(v);
-            return;
-        }
-    }
-
-    if (eql(u8, key, "dock_size")) {
-        const v = lua.toInteger(L, -1) orelse return error.Invalid;
-        if (v < min_dock_size or v > max_dock_size) return error.Invalid;
-        cfg.dock_size = @intCast(v);
-        return;
-    }
-
-    inline for (fraction_options) |name| {
-        if (eql(u8, key, name)) {
-            const v = lua.toNumber(L, -1) orelse return error.Invalid;
-            if (!(v > 0 and v <= 1)) return error.Invalid;
-            @field(cfg, name) = v;
-            return;
-        }
-    }
-
-    inline for (colour_options) |name| {
-        if (eql(u8, key, name)) {
-            @field(cfg, name) = colourValue(L) orelse return error.Invalid;
-            return;
-        }
-    }
-
-    inline for (bool_options) |name| {
-        if (eql(u8, key, name)) {
-            @field(cfg, name) = lua.toBool(L, -1) orelse return error.Invalid;
-            return;
-        }
-    }
-
-    inline for (enum_options) |name| {
-        if (eql(u8, key, name)) {
-            const s = lua.toSlice(L, -1) orelse return error.Invalid;
-            @field(cfg, name) = std.meta.stringToEnum(@TypeOf(@field(cfg, name)), s) orelse return error.Invalid;
-            return;
-        }
-    }
-
-    inline for (font_options) |name| {
-        if (eql(u8, key, name)) {
-            const s = lua.toSlice(L, -1) orelse return error.Invalid;
-            @field(cfg, name) = try parseFont(a, s);
-            return;
-        }
-    }
-
-    inline for (command_options) |name| {
-        if (eql(u8, key, name)) {
-            @field(cfg, name) = try commandValue(ctx);
-            return;
-        }
-    }
-
-    if (eql(u8, key, "workspace_count")) {
-        const v = lua.toInteger(L, -1) orelse return error.Invalid;
-        if (v < 1 or v > max_workspaces) return error.Invalid;
-        cfg.workspace_count = @intCast(v);
-        return;
-    }
-
-    if (eql(u8, key, "monitor_settle_ms")) {
-        const v = lua.toInteger(L, -1) orelse return error.Invalid;
-        if (v < 0 or v > 10_000) return error.Invalid;
-        cfg.monitor_settle_ms = @intCast(v);
-        return;
-    }
 
     if (eql(u8, key, "width_presets")) {
         if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
@@ -1369,13 +1411,6 @@ fn applyOption(ctx: *Ctx, key: []const u8) ParseError!void {
         return;
     }
 
-    if (eql(u8, key, "anim_slowdown")) {
-        const v = lua.toNumber(L, -1) orelse return error.Invalid;
-        if (!(v > 0 and v <= 1000)) return error.Invalid;
-        cfg.anim_slowdown = v;
-        return;
-    }
-
     if (eql(u8, key, "anim_window_movement") or eql(u8, key, "anim_window_open")) {
         const s = lua.toSlice(L, -1) orelse return error.Invalid;
         const spec = animation.Spec.parse(s) orelse return error.Invalid;
@@ -1456,30 +1491,27 @@ fn applyChangedTables(ctx: *Ctx) std.mem.Allocator.Error!void {
 fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool {
     const L = ctx.L;
     const cfg = ctx.cfg;
+    switch (comptime kindOf(name)) {
+        .integer => lua.pushInteger(L, @field(cfg, name)),
+        .fraction => lua.pushNumber(L, @field(cfg, name)),
+        .colour => {
+            var buf: [16]u8 = undefined;
+            lua.pushString(L, std.fmt.bufPrint(&buf, "#{x:0>6}", .{@field(cfg, name)}) catch return false);
+        },
+        .boolean => lua.pushBool(L, @field(cfg, name)),
+        .enumeration => lua.pushString(L, @tagName(@field(cfg, name))),
+        .font => lua.pushString(L, @field(cfg, name)),
+        .command => pushStrings(L, @field(cfg, name)),
+        .special => return pushSpecial(ctx, name),
+    }
+    return true;
+}
 
-    if (comptime inList(pixel_options, name)) {
-        lua.pushInteger(L, @field(cfg, name));
-    } else if (comptime std.mem.eql(u8, name, "dock_size")) {
-        lua.pushInteger(L, cfg.dock_size);
-    } else if (comptime std.mem.eql(u8, name, "workspace_count")) {
-        lua.pushInteger(L, cfg.workspace_count);
-    } else if (comptime std.mem.eql(u8, name, "monitor_settle_ms")) {
-        lua.pushInteger(L, cfg.monitor_settle_ms);
-    } else if (comptime inList(fraction_options, name)) {
-        lua.pushNumber(L, @field(cfg, name));
-    } else if (comptime inList(colour_options, name)) {
-        var buf: [16]u8 = undefined;
-        lua.pushString(L, std.fmt.bufPrint(&buf, "#{x:0>6}", .{@field(cfg, name)}) catch return false);
-    } else if (comptime inList(bool_options, name)) {
-        lua.pushBool(L, @field(cfg, name));
-    } else if (comptime inList(enum_options, name)) {
-        lua.pushString(L, @tagName(@field(cfg, name)));
-    } else if (comptime inList(font_options, name)) {
-        lua.pushString(L, @field(cfg, name));
-    } else if (comptime inList(command_options, name)) {
-        pushStrings(L, @field(cfg, name), 0);
-    } else if (comptime std.mem.eql(u8, name, "workspace_names")) {
-        pushStrings(L, cfg.workspace_names, 0);
+fn pushSpecial(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool {
+    const L = ctx.L;
+    const cfg = ctx.cfg;
+    if (comptime std.mem.eql(u8, name, "workspace_names")) {
+        pushStrings(L, cfg.workspace_names);
     } else if (comptime std.mem.eql(u8, name, "width_presets")) {
         lua.newTable(L);
         for (cfg.width_presets, 1..) |w, i| {
@@ -1489,7 +1521,7 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
     } else if (comptime std.mem.eql(u8, name, "spawn_at_startup")) {
         lua.newTable(L);
         for (cfg.spawn_at_startup, 1..) |argv, i| {
-            pushStrings(L, argv, 0);
+            pushStrings(L, argv);
             lua.rawSetI(L, -2, @intCast(i));
         }
     } else if (comptime std.mem.eql(u8, name, "environment")) {
@@ -1499,8 +1531,6 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
             lua.pushString(L, e.value);
             lua.rawSet(L, -3);
         }
-    } else if (comptime std.mem.eql(u8, name, "anim_slowdown")) {
-        lua.pushNumber(L, cfg.anim_slowdown);
     } else if (comptime std.mem.eql(u8, name, "anim_window_movement") or std.mem.eql(u8, name, "anim_window_open")) {
         var buf: [96]u8 = undefined;
         const spec = if (comptime std.mem.eql(u8, name, "anim_window_movement")) cfg.anim_window_movement else cfg.anim_window_open;
@@ -1514,19 +1544,12 @@ fn pushOption(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!bool
     return true;
 }
 
-fn pushStrings(L: *lua.State, items: []const []const u8, _: u8) void {
+fn pushStrings(L: *lua.State, items: []const []const u8) void {
     lua.newTable(L);
     for (items, 1..) |item, i| {
         lua.pushString(L, item);
         lua.rawSetI(L, -2, @intCast(i));
     }
-}
-
-fn inList(comptime list: anytype, comptime name: []const u8) bool {
-    inline for (list) |n| {
-        if (comptime std.mem.eql(u8, n, name)) return true;
-    }
-    return false;
 }
 
 /// "Super+Shift" for the modifiers, the form `parseMods` reads back.
@@ -2497,6 +2520,7 @@ test "the shipped themes are valid themes and the shipped config has no warnings
         .{ .name = "gruvbox", .text = @embedFile("share/Themes/gruvbox.lua") },
         .{ .name = "nord", .text = @embedFile("share/Themes/nord.lua") },
         .{ .name = "next", .text = @embedFile("share/Themes/next.lua") },
+        .{ .name = "graphite", .text = @embedFile("share/Themes/graphite.lua") },
     };
     for (themes) |t| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -2509,8 +2533,8 @@ test "the shipped themes are valid themes and the shipped config has no warnings
         try std.testing.expect(cfg.border_width >= 1);
     }
 
-    // gruvbox is the built-in look: it must equal the defaults, or the
-    // "built-in" claim in its header is a lie.
+    // gruvbox carries the built-in window borders: they must equal the
+    // defaults, or the claim in its header is a lie.
     var def: Config = .{ .arena = .init(std.testing.allocator) };
     defer def.deinit();
     var gb: Config = .{ .arena = .init(std.testing.allocator) };
@@ -2530,6 +2554,17 @@ test "the shipped themes are valid themes and the shipped config has no warnings
 
     // The built-in default config parses without a single warning.
     try std.testing.expectEqual(@as(u32, 0), def.parse_warnings);
+
+    // "next" is the Dock the defaults draw: same colours and fonts.
+    var nx: Config = .{ .arena = .init(std.testing.allocator) };
+    defer nx.deinit();
+    var b3: std.ArrayList(Bind) = .empty;
+    try parseWith(arena.allocator(), themes[2].text, &nx, &b3, "next", null, true);
+    inline for (.{ "tile_from", "tile_to", "tile_hot_from", "tile_hot_to", "logo_from", "logo_to", "logo_text", "tile_text", "bevel_light", "bevel_dark", "arrow", "arrow_hot" }) |name| {
+        try std.testing.expectEqual(@field(def, name), @field(nx, name));
+    }
+    try std.testing.expectEqualStrings(def.font_dock_logo, nx.font_dock_logo);
+    try std.testing.expectEqualStrings(def.font_dock_number, nx.font_dock_number);
 }
 
 test "fonts and the focus/wrap/scroll switches are parsed" {
@@ -2864,4 +2899,100 @@ test "output_order and monitor_settle_ms are options, bad values are refused" {
     try parseText(arena.allocator(), &cfg, "output_order = \"sideways\"\nmonitor_settle_ms = -5\n");
     try std.testing.expectEqual(monitors.Order.connection, cfg.output_order);
     try std.testing.expectEqual(@as(u32, 150), cfg.monitor_settle_ms);
+}
+
+test "a theme can set the Dock colours and fonts, but not anything that acts" {
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    var files: FakeFiles = .{
+        .paths = &.{"/cfg/Themes/t.lua"},
+        .texts = &.{
+            \\tile_from = "#102030"
+            \\arrow_hot = 0xff8800
+            \\font_dock_logo = "Serif Bold 30"
+            \\dock_edge = "left"
+        },
+    };
+    try parseFake(&files, "theme(\"t\")\n", &cfg);
+    try std.testing.expectEqual(@as(u32, 0x102030), cfg.tile_from);
+    try std.testing.expectEqual(@as(u32, 0xff8800), cfg.arrow_hot);
+    try std.testing.expectEqualStrings("Serif Bold 30", cfg.font_dock_logo);
+    // dock_edge is behaviour, not look: refused with one warning.
+    try std.testing.expectEqual(DockEdge.right, cfg.dock_edge);
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+}
+
+test "Dock colours and fonts parse; bad values are refused and change nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\tile_text = "#ffeedd"
+        \\font_dock_number = "Mono 12"
+    );
+    try std.testing.expectEqual(@as(u32, 0xffeedd), cfg.tile_text);
+    try std.testing.expectEqualStrings("Mono 12", cfg.font_dock_number);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+
+    try parseText(arena.allocator(), &cfg,
+        \\tile_text = "nope"
+        \\font_dock_number = ""
+    );
+    try std.testing.expectEqual(@as(u32, 0xffeedd), cfg.tile_text);
+    try std.testing.expectEqualStrings("Mono 12", cfg.font_dock_number);
+    try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "the option table is the Config struct: every option has a kind, the rest is not an option" {
+    // Names that must be options, one of each kind.
+    inline for (.{ "gap", "dock_size", "workspace_count", "width_step", "anim_slowdown", "border_focused", "tile_from", "dock_enabled", "dock_edge", "output_order", "font_dock", "terminal", "width_presets", "bind_layout", "mouse_mod", "environment", "anim_window_open" }) |name| {
+        try std.testing.expect(inList(&all_options, name));
+    }
+    // Fields that are not.
+    inline for (not_options) |name| try std.testing.expect(!inList(&all_options, name));
+    try std.testing.expect(!inList(&all_options, "binds"));
+    try std.testing.expectEqual(Kind.integer, kindOf("workspace_count"));
+    try std.testing.expectEqual(Kind.fraction, kindOf("anim_slowdown"));
+    try std.testing.expectEqual(Kind.colour, kindOf("arrow"));
+    try std.testing.expectEqual(Kind.enumeration, kindOf("output_order"));
+    try std.testing.expectEqual(Kind.font, kindOf("font_menu"));
+    try std.testing.expectEqual(Kind.command, kindOf("browser"));
+    try std.testing.expectEqual(Kind.special, kindOf("workspace_names"));
+}
+
+test "themes accept look options only" {
+    try std.testing.expect(themeKey("gap"));
+    try std.testing.expect(themeKey("border_width"));
+    try std.testing.expect(themeKey("tile_from"));
+    try std.testing.expect(themeKey("font_dock"));
+    try std.testing.expect(!themeKey("workspace_count"));
+    try std.testing.expect(!themeKey("dock_edge"));
+    try std.testing.expect(!themeKey("terminal"));
+    try std.testing.expect(!themeKey("min_window_size"));
+    try std.testing.expect(!themeKey("not_an_option"));
+}
+
+test "integer and fraction bounds follow the option" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\anim_slowdown = 500
+        \\workspace_count = 16
+        \\dock_size = 256
+        \\monitor_settle_ms = 10000
+    );
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+    try parseText(arena.allocator(), &cfg,
+        \\anim_slowdown = 1001
+        \\default_column_width = 1.5
+        \\workspace_count = 17
+        \\dock_size = 15
+        \\gap = -1
+    );
+    try std.testing.expectEqual(@as(u32, 5), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(f64, 500), cfg.anim_slowdown);
+    try std.testing.expectEqual(@as(i32, 8), cfg.gap);
 }

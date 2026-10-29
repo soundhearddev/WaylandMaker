@@ -82,6 +82,7 @@ An unknown option is an error and does not start a session.
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | what is taken from Window Maker, and what is not |
 | [docs/DOCKAPPS.md](docs/DOCKAPPS.md) | Dock, Clip, Drawers, writing a DockApp |
 | [docs/MONITORS.md](docs/MONITORS.md) | multiple monitors and hotplug |
+| [docs/THEMES.md](docs/THEMES.md) | the look: colours, fonts, `theme("nord")` |
 | [docs/WMPREFS.md](docs/WMPREFS.md) | `wlprefs`, the settings window |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | logging, state dump, tests, benchmark |
 | [docs/TODO.md](docs/TODO.md) | open work |

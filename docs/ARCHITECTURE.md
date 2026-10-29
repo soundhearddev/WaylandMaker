@@ -23,6 +23,7 @@ display. **Compositor** files talk to wlroots.
 | `dockhost.zig` | DockApps (`dockapp:<name>`): adoption, tiles that follow the programs, the room the Dock reserves, where each DockApp goes | model |
 | `outputs.zig` | what follows from a monitor coming or going: windows move away and come back (`home`), `monitor()` rules, profile after the settle time | model |
 | `config.zig`, `lua.zig`, `share/default_config.lua` | Lua config and its defaults | model |
+| `style.zig` | the look (palette and fonts) taken from the config once per load; read by the drawing code, see [THEMES.md](THEMES.md) | model |
 | `plist.zig`, `wm_menu.zig`, `wm_attr.zig`, `wm_files.zig` | Window Maker files: property lists, root menu, `WMWindowAttributes`, where files live | model |
 | `wm_dock.zig`, `dockapp.zig` | Dock and Clip logic and data, `WMState` read/write | model |
 | `process.zig` | starts commands detached from the compositor | model |

@@ -85,6 +85,9 @@ pub const Sink = struct {
         release: *const fn (ctx: *anyopaque, win: *Window) void,
         /// `wm.quit` was set: end the event loop.
         quit: *const fn (ctx: *anyopaque) void,
+        /// `warp_mouse_to_focus`: put the pointer at this point of the
+        /// layout (the middle of the window that just got the focus).
+        warp: *const fn (ctx: *anyopaque, x: i32, y: i32) void,
     };
 
     pub fn configure(s: Sink, win: *Window, c: Configure) void {
@@ -101,6 +104,9 @@ pub const Sink = struct {
     }
     fn quit(s: Sink) void {
         s.vtable.quit(s.ctx);
+    }
+    fn warp(s: Sink, x: i32, y: i32) void {
+        s.vtable.warp(s.ctx, x, y);
     }
 };
 
@@ -329,9 +335,22 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
     dockhost.apply(wm, dock_host, sink);
 
     // 9. Keyboard focus.
+    var focus_changed = false;
     var sit = wm.seats.first();
     while (sit) |s| : (sit = types.nextSeat(s, wm)) {
-        if (setSeatFocus(s, focus_target)) sink.focus(focus_target);
+        if (setSeatFocus(s, focus_target)) {
+            sink.focus(focus_target);
+            focus_changed = true;
+        }
+    }
+
+    // 9b. `warp_mouse_to_focus`: a focus change that came from the keyboard
+    //     (or a command) takes the pointer along. One that came from the
+    //     pointer must not, or the pointer would jump while it is used.
+    if (focus_changed and wm.cfg.warp_mouse_to_focus and !wm.focus_by_pointer) {
+        if (focus_target) |w| if ((w.visible orelse false) and w.mode != .fullscreen) {
+            sink.warp(w.target.x + @divTrunc(w.target.w, 2), w.target.y + @divTrunc(w.target.h, 2));
+        };
     }
 
     // 10. End a finished pointer operation (after layout, so its last delta is
@@ -866,6 +885,7 @@ const Rec = struct {
         focus: ?*Window,
         release: *Window,
         quit,
+        warp: [2]i32,
     };
 
     events: std.ArrayList(Event) = .empty,
@@ -878,6 +898,7 @@ const Rec = struct {
             .focus = focus,
             .release = release,
             .quit = quit,
+            .warp = warp,
         } };
     }
 
@@ -899,6 +920,18 @@ const Rec = struct {
     }
     fn quit(ctx: *anyopaque) void {
         me(ctx).events.append(testing.allocator, .quit) catch unreachable;
+    }
+    fn warp(ctx: *anyopaque, x: i32, y: i32) void {
+        me(ctx).events.append(testing.allocator, .{ .warp = .{ x, y } }) catch unreachable;
+    }
+
+    fn warps(r: *const Rec) usize {
+        var n: usize = 0;
+        for (r.events.items) |e| switch (e) {
+            .warp => n += 1,
+            else => {},
+        };
+        return n;
     }
 
     /// The last placement the sink got for `win`.
@@ -1066,6 +1099,35 @@ test "key bindings move focus between columns" {
     f.press(.focus_right);
     f.pass();
     try testing.expect(f.rec.focused == b);
+}
+
+test "warp_mouse_to_focus: a keyboard focus change moves the pointer, a pointer one does not, off does nothing" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const a = try f.open("a");
+    f.pass();
+    _ = try f.open("b");
+    f.pass();
+
+    // Off (the default): focusing by key warps nothing.
+    f.press(.focus_left);
+    f.pass();
+    try testing.expectEqual(@as(usize, 0), f.rec.warps());
+
+    // On: the focus goes back by key, and the pointer goes along.
+    f.wm.cfg.warp_mouse_to_focus = true;
+    f.press(.focus_right);
+    f.pass();
+    try testing.expectEqual(@as(usize, 1), f.rec.warps());
+
+    // A focus request that came from the pointer must not move it.
+    f.wm.focus_request = a;
+    f.wm.focus_by_pointer = true;
+    f.pass();
+    try testing.expect(f.rec.focused == a);
+    try testing.expectEqual(@as(usize, 1), f.rec.warps());
 }
 
 test "closing the focused window hands the focus on and frees it" {

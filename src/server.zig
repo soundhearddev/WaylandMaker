@@ -318,6 +318,7 @@ pub const Server = struct {
         .focus = sinkFocus,
         .release = sinkRelease,
         .quit = sinkQuit,
+        .warp = sinkWarp,
     };
 
     fn sinkConfigure(_: *anyopaque, win: *types.Window, c: manage.Configure) void {
@@ -337,6 +338,11 @@ pub const Server = struct {
     /// The model let go of the window. The view stays: it belongs to the
     /// client's toplevel, which may map again.
     fn sinkRelease(_: *anyopaque, _: *types.Window) void {}
+
+    fn sinkWarp(ctx: *anyopaque, x: i32, y: i32) void {
+        const server: *Server = @ptrCast(@alignCast(ctx));
+        server.cursor.warpTo(@floatFromInt(x), @floatFromInt(y));
+    }
 
     fn sinkQuit(ctx: *anyopaque) void {
         const server: *Server = @ptrCast(@alignCast(ctx));

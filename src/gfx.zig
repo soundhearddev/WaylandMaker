@@ -370,6 +370,8 @@ pub const Fonts = struct {
     menu_title: [64:0]u8 = [_:0]u8{0} ** 64,
     menu: [64:0]u8 = [_:0]u8{0} ** 64,
     dock: [64:0]u8 = [_:0]u8{0} ** 64,
+    dock_logo: [64:0]u8 = [_:0]u8{0} ** 64,
+    dock_number: [64:0]u8 = [_:0]u8{0} ** 64,
 
     fn put(dst: *[64:0]u8, src: []const u8) void {
         const n = @min(src.len, 63);
@@ -381,6 +383,18 @@ pub const Fonts = struct {
         put(&f.menu_title, menu_title);
         put(&f.menu, menu);
         put(&f.dock, dock);
+    }
+
+    pub fn setDockFaces(f: *Fonts, logo: []const u8, number: []const u8) void {
+        put(&f.dock_logo, logo);
+        put(&f.dock_number, number);
+    }
+
+    pub fn dockLogo(f: *const Fonts) [:0]const u8 {
+        return std.mem.sliceTo(&f.dock_logo, 0);
+    }
+    pub fn dockNumber(f: *const Fonts) [:0]const u8 {
+        return std.mem.sliceTo(&f.dock_number, 0);
     }
 
     pub fn menuTitle(f: *const Fonts) [:0]const u8 {
@@ -399,6 +413,7 @@ pub const Fonts = struct {
 pub var fonts: Fonts = blk: {
     var f: Fonts = .{};
     f.set("Sans Bold 10", "Sans 10", "Sans 8");
+    f.setDockFaces("Sans Bold 22", "Sans Bold 20");
     break :blk f;
 };
 

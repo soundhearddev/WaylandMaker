@@ -13,6 +13,7 @@ const config = model.config;
 const action = model.action;
 const workspace = model.workspace;
 const wm_files = model.wm_files;
+const style = @import("style.zig");
 
 const WindowManager = types.WindowManager;
 
@@ -33,6 +34,9 @@ pub fn loadModel(wm: *WindowManager) !wm_files.Loaded {
     wm.attrs = files.attributes;
     wm.dockapps = files.dockapps;
     wm.dock_state_path = files.dock_state_path;
+    // The look (palette, fonts) before the Dock is rebuilt: its tiles are
+    // drawn from it. Fonts used to be copied nowhere, so `font_*` did nothing.
+    style.apply(&wm.cfg);
     wm.dock_gen +%= 1;
     wm.monitors.configure(wm.cfg.monitor_rules.items, wm.cfg.monitor_profiles.items, wm.cfg.output_order, wm.cfg.monitor_settle_ms);
     return files;

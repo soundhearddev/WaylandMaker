@@ -80,7 +80,7 @@ Some Window Maker ideas do not carry over:
 
 - **Title bars** (22 px high in wlmaker's defaults, minimize left, close right, resize bar at the bottom),
   and with them the attributes above. Minimize, hide and show-all exist already, without a title bar.
-- **Themes** in a wlmaker-style file, and Window Maker's `~/GNUstep/Defaults/WindowMaker` keys
+- **Themes** for menus and title bars (Dock, Clip, borders and fonts are themed, see [THEMES.md](THEMES.md)), and Window Maker's `~/GNUstep/Defaults/WindowMaker` keys
   (`FTitleBack`, `UTitleBack`, `MenuTitleBack`, ...). What exists now are `theme("NAME")` files that set
   colours, border width and gaps.
 - **Sessions** (`SAVE_SESSION`).

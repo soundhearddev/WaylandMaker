@@ -44,6 +44,7 @@ test {
     _ = @import("plist.zig");
     _ = @import("pointer_op.zig");
     _ = @import("scale.zig");
+    _ = @import("style.zig");
     _ = @import("svg.zig");
     _ = @import("trace.zig");
     _ = @import("wm_attr.zig");

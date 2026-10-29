@@ -17,6 +17,7 @@ const std = @import("std");
 const gfx = @import("gfx.zig");
 const scale_mod = @import("scale.zig");
 const dock_view = @import("dock_view.zig");
+const style = @import("style.zig");
 
 pub const Look = dock_view.Look;
 pub const Content = struct {
@@ -28,26 +29,16 @@ pub const Content = struct {
 
 const Color = gfx.Color;
 
-// ---- palette (the NeXT look of the menu and the Dock) ----------------------------
+// ---- palette ------------------------------------------------------------------------
+//
+// What a theme can change lives in style.zig (`style.palette`, NeXT by
+// default). These stay fixed: they are overlays on top of whatever the theme
+// colours, not part of a look.
 
-const col_light = Color.rgb(0xffffff);
-const col_dark = Color.rgb(0x555555);
-const col_text = Color.rgb(0x000000);
-const col_tile_from = Color.rgb(0xc6c2c6);
-const col_tile_to = Color.rgb(0x9a969a);
-const col_hot_from = Color.rgb(0xdedade);
-const col_hot_to = Color.rgb(0xaeaaae);
-const col_logo_from = Color.rgb(0x5a5a62);
-const col_logo_to = Color.rgb(0x1e1e24);
 const col_shadow = Color.rgb(0x000000);
 const col_stipple: Color = .{ .r = 0, .g = 0, .b = 0, .a = 112.0 / 255.0 };
-const col_arrow = Color.rgb(0x303030);
-const col_arrow_hot = Color.rgb(0xffffff);
 const col_gap: Color = .{ .r = 64.0 / 255.0, .g = 64.0 / 255.0, .b = 68.0 / 255.0, .a = 176.0 / 255.0 };
 const col_fade: Color = .{ .r = 216.0 / 255.0, .g = 216.0 / 255.0, .b = 220.0 / 255.0, .a = 176.0 / 255.0 };
-
-const font_logo: []const u8 = "Sans Bold 22";
-const font_number: []const u8 = "Sans Bold 20";
 
 /// Device pixels of one side of the tile `look` at `scale` (the output's
 /// integer scale: 1, 2, ...).
@@ -74,8 +65,8 @@ pub fn render(pixels: []u8, look: Look, content: Content, scale: i32) !void {
     switch (look.kind) {
         .gap => drawGap(&cv, m),
         .logo => {
-            frame(&cv, m, look.hot, col_logo_from, col_logo_to);
-            centred(&cv, m, "WM", 16, font_logo, col_light);
+            frame(&cv, m, look.hot, style.palette.logo_from, style.palette.logo_to);
+            centred(&cv, m, "WM", 16, gfx.fonts.dockLogo(), style.palette.logo_text);
         },
         .clip => drawClip(&cv, m, look, content),
         .drawer => drawDrawer(&cv, m, look),
@@ -89,13 +80,14 @@ pub fn render(pixels: []u8, look: Look, content: Content, scale: i32) !void {
 
 /// The tile body: a diagonal gradient and the two-line NeXT bevel.
 fn frame(cv: *gfx.Canvas, m: scale_mod.Metrics, hot: bool, from: ?Color, to: ?Color) void {
-    const f = from orelse if (hot) col_hot_from else col_tile_from;
-    const t = to orelse if (hot) col_hot_to else col_tile_to;
+    const pal = style.palette;
+    const f = from orelse if (hot) pal.tile_hot_from else pal.tile_from;
+    const t = to orelse if (hot) pal.tile_hot_to else pal.tile_to;
     const s = m.side;
     cv.dGradient(0, 0, s, s, f, t);
     const b = m.stroke(1);
-    bevel(cv, 0, 0, s, s, b, col_light, col_dark);
-    bevel(cv, b, b, s - 2 * b, s - 2 * b, b, col_light, col_dark);
+    bevel(cv, 0, 0, s, s, b, pal.light, pal.dark);
+    bevel(cv, b, b, s - 2 * b, s - 2 * b, b, pal.light, pal.dark);
 }
 
 /// A bevel `w` px thick: light on top and left, dark on bottom and right.
@@ -126,7 +118,7 @@ fn drawNotRunning(cv: *gfx.Canvas, m: scale_mod.Metrics) void {
         const sh = m.box(dx + 1, 64 - 6 + 1, 3, 2);
         const dot = m.box(dx, 64 - 6, 3, 2);
         cv.fillRect(sh.x, sh.y, sh.w, sh.h, col_shadow);
-        cv.fillRect(dot.x, dot.y, dot.w, dot.h, col_light);
+        cv.fillRect(dot.x, dot.y, dot.w, dot.h, style.palette.light);
     }
 }
 
@@ -150,8 +142,8 @@ fn drawOmnipresent(cv: *gfx.Canvas, m: scale_mod.Metrics) void {
     const a = m.f(10);
     const b = m.f(8);
     const o = m.f(1);
-    cv.fillPolygon(&.{ .{ fx - a, fy }, .{ fx, fy }, .{ fx, fy + a } }, col_dark);
-    cv.fillPolygon(&.{ .{ fx - b, fy + o }, .{ fx - o, fy + o }, .{ fx - o, fy + b } }, col_light);
+    cv.fillPolygon(&.{ .{ fx - a, fy }, .{ fx, fy }, .{ fx, fy + a } }, style.palette.dark);
+    cv.fillPolygon(&.{ .{ fx - b, fy + o }, .{ fx - o, fy + o }, .{ fx - o, fy + b } }, style.palette.light);
 }
 
 /// What a tile shows when no icon can be found: a small window in the Dock's
@@ -165,10 +157,11 @@ pub fn drawPlaceholder(cv: *gfx.Canvas, x: i32, y: i32, size: i32) void {
     if (gw < 12 or gh < 12) return;
     const bar = @max(@divTrunc(gh, 4), 4);
 
-    cv.fillRect(gx + 2, gy + 2, gw, gh, col_dark);
-    cv.fillRect(gx, gy, gw, gh, col_tile_from);
-    cv.vGradient(gx + 1, gy + 1, gw - 2, bar, col_logo_from, col_logo_to);
-    cv.bevel(gx, gy, gw, gh, col_light, col_dark);
+    const pal = style.palette;
+    cv.fillRect(gx + 2, gy + 2, gw, gh, pal.dark);
+    cv.fillRect(gx, gy, gw, gh, pal.tile_from);
+    cv.vGradient(gx + 1, gy + 1, gw - 2, bar, pal.logo_from, pal.logo_to);
+    cv.bevel(gx, gy, gw, gh, pal.light, pal.dark);
 
     const gap = @max(mg, 3);
     const full = gw - 2 * gap;
@@ -176,7 +169,7 @@ pub fn drawPlaceholder(cv: *gfx.Canvas, x: i32, y: i32, size: i32) void {
     var i: i32 = 0;
     while (i < 3 and ly + 2 <= gy + gh - 2) : (i += 1) {
         const len = if (i == 2) @divTrunc(full * 2, 3) else full;
-        cv.fillRect(gx + gap, ly, len, 2, col_tile_to);
+        cv.fillRect(gx + gap, ly, len, 2, pal.tile_to);
         ly += gap;
     }
 }
@@ -202,22 +195,23 @@ fn drawClip(cv: *gfx.Canvas, m: scale_mod.Metrics, look: Look, content: Content)
     var num_buf: [12:0]u8 = undefined;
     const num = std.fmt.bufPrintZ(&num_buf, "{d}", .{look.workspace + 1}) catch "?";
     if (content.name) |name| {
-        centred(cv, m, num, 10, font_number, col_text);
+        centred(cv, m, num, 10, gfx.fonts.dockNumber(), style.palette.text);
         var name_buf: [24:0]u8 = undefined;
         const clipped = clipName(&name_buf, name);
         var fb: [96]u8 = undefined;
         const desc = m.fontDesc(&fb, gfx.fonts.dockLabel());
-        centredIn(cv, m, clipped, m.pos(41), desc, col_text);
+        centredIn(cv, m, clipped, m.pos(41), desc, style.palette.text);
     } else {
-        centred(cv, m, num, 20, font_number, col_text);
+        centred(cv, m, num, 20, gfx.fonts.dockNumber(), style.palette.text);
     }
 
     // The two arrows: upper right = next workspace, lower left = previous.
     const a = m.f(16);
     const e = m.f(3);
     const t = m.f(64);
-    const next_col = if (look.arrow == .next) col_arrow_hot else col_arrow;
-    const prev_col = if (look.arrow == .prev) col_arrow_hot else col_arrow;
+    const pal = style.palette;
+    const next_col = if (look.arrow == .next) pal.arrow_hot else pal.arrow;
+    const prev_col = if (look.arrow == .prev) pal.arrow_hot else pal.arrow;
     cv.fillPolygon(&.{ .{ t - e - a, e }, .{ t - e, e }, .{ t - e, e + a } }, next_col);
     cv.fillPolygon(&.{ .{ e, t - e - a }, .{ e, t - e }, .{ e + a, t - e } }, prev_col);
 }
@@ -227,16 +221,16 @@ fn drawDrawer(cv: *gfx.Canvas, m: scale_mod.Metrics, look: Look) void {
     const c = m.f(32);
     const s = m.f(10);
     if (look.chevron_left) {
-        cv.fillPolygon(&.{ .{ c - s, c }, .{ c + s, c - s }, .{ c + s, c + s } }, col_arrow);
+        cv.fillPolygon(&.{ .{ c - s, c }, .{ c + s, c - s }, .{ c + s, c + s } }, style.palette.arrow);
     } else {
-        cv.fillPolygon(&.{ .{ c + s, c }, .{ c - s, c - s }, .{ c - s, c + s } }, col_arrow);
+        cv.fillPolygon(&.{ .{ c + s, c }, .{ c - s, c - s }, .{ c - s, c + s } }, style.palette.arrow);
     }
 }
 
 /// The empty cell a dragged tile will drop into: a recessed tile.
 fn drawGap(cv: *gfx.Canvas, m: scale_mod.Metrics) void {
     cv.fillRect(0, 0, m.side, m.side, col_gap);
-    bevel(cv, 0, 0, m.side, m.side, m.stroke(1), col_dark, col_light);
+    bevel(cv, 0, 0, m.side, m.side, m.stroke(1), style.palette.dark, style.palette.light);
 }
 
 /// `name` cut so it still fits the tile; never splits a UTF-8 sequence.
@@ -397,4 +391,22 @@ test "clipName cuts on a character boundary and drops NULs" {
     const cut = clipName(&buf, "äääääääääääääääääääääääää");
     try testing.expect(cut.len <= 24);
     try testing.expect(std.unicode.utf8ValidateSlice(cut));
+}
+
+test "the palette decides the colours of a tile, the fonts of the Clip come from gfx.fonts" {
+    const saved = style.palette;
+    defer style.palette = saved;
+
+    const before = try draw(.{ .kind = .app, .size = 64 }, .{}, 1);
+    defer testing.allocator.free(before);
+
+    style.palette.tile_from = Color.rgb(0x204060);
+    style.palette.tile_to = Color.rgb(0x204060);
+    const after = try draw(.{ .kind = .app, .size = 64 }, .{}, 1);
+    defer testing.allocator.free(after);
+
+    // inside the bevel the tile is the gradient's colour: blue now, grey before.
+    try testing.expect(!std.mem.eql(u8, before, after));
+    const px = pixelAt(after, 64, 3, 3);
+    try testing.expect((px & 0xff) > ((px >> 16) & 0xff)); // blue beats red
 }

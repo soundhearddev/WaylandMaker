@@ -131,6 +131,13 @@ pub const Cursor = struct {
         c.processMotion(event.time_msec);
     }
 
+    /// Put the pointer at (x, y) in layout coordinates and tell whatever is
+    /// under it, as if it had moved there (`warp_mouse_to_focus`).
+    pub fn warpTo(c: *Cursor, x: f64, y: f64) void {
+        _ = c.wlr_cursor.warp(null, x, y);
+        c.processMotion(@truncate(c.server.nowMs()));
+    }
+
     fn processMotion(c: *Cursor, time_msec: u32) void {
         const server = c.server;
         const wm = server.wm;

@@ -58,11 +58,30 @@ border_focused = "#d8a657"
 border_unfocused = "#3c3836"
 border_floating = "#7daea3"
 
+-- ---- Dock, Clip and Drawers: the NeXT look ---------------------------------------
+-- A tile is a diagonal gradient from `from` to `to`, framed by a two-line
+-- bevel (light on top and left, dark below and right). `hot` is the tile
+-- under the pointer. Themes (see the end of this file) set all of these.
+tile_from = "#c6c2c6"            -- app, Clip and Drawer tiles
+tile_to = "#9a969a"
+tile_hot_from = "#dedade"        -- the same, under the pointer
+tile_hot_to = "#aeaaae"
+logo_from = "#5a5a62"            -- the first tile of the Dock ("WM") and the title bar of a placeholder icon
+logo_to = "#1e1e24"
+logo_text = "#ffffff"
+tile_text = "#000000"            -- the workspace number and name in the Clip
+bevel_light = "#ffffff"
+bevel_dark = "#555555"
+arrow = "#303030"                -- the Clip's workspace arrows and the Drawers' chevrons
+arrow_hot = "#ffffff"            -- the arrow under the pointer
+
 -- ---- fonts --------------------------------------------------------------------
 -- Pango font descriptions: "Family [Style] Size". Applied on the next reload.
 font_menu_title = "Sans Bold 10"   -- title bar of a menu
 font_menu = "Sans 10"              -- rows of a menu
 font_dock = "Sans 8"               -- the workspace name in the Clip
+font_dock_logo = "Sans Bold 22"    -- the "WM" of the Dock's first tile
+font_dock_number = "Sans Bold 20"  -- the workspace number in the Clip
 
 -- ---- menus --------------------------------------------------------------------
 menu_submenu_align = "right"       -- right | left: side of the parent a submenu opens on
@@ -128,9 +147,12 @@ enable_dockapps = true
 
 -- ---- Themes and includes ------------------------------------------------------
 -- `theme("NAME")` reads Themes/NAME.lua (next to this file, or in
--- /usr/share/wmaker-wl/Themes): colours, border width and gaps only -- a theme
--- runs with an empty environment, so it cannot bind a key or start a program.
--- Examples ship in share/Themes/.
+-- /usr/share/wmaker-wl/Themes): every colour (borders, Dock, Clip), the fonts,
+-- the border width and the gaps -- and nothing else. A theme runs with an
+-- empty environment, so it cannot bind a key or start a program. Shipped:
+-- next (grey, the Window Maker look), gruvbox, nord, graphite.
+-- Reload (Super+Shift+r) to see a new theme; single options after the theme()
+-- line win over it.
 -- `include("FILE")` runs any other file at that point (relative to this
 -- file); lines after it override it, lines before it are overridden.
 -- theme("nord")

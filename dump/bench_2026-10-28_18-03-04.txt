@@ -1,0 +1,23 @@
+wmaker-wl model benchmark (Debug build); times per call in microseconds
+
+case                                 n   runs        mean         p50         p95         p99         max
+layout columns, follow              10   2000         1.0         2.0         2.0         2.0        21.0
+layout columns                      10   2000         0.9         2.0         2.0         2.0        41.5
+invariants                          10   2000         0.7         2.0         2.0         2.0         3.9
+layout stacks of 4                  10   2000         0.7         2.0         2.0         2.0        68.5
+move all windows                    10    500       108.7       128.0       184.7       184.7       184.7
+place all windows                   10    200        79.7       128.0       128.0       128.0       150.7
+layout columns, follow             100    300         8.0         8.0        16.0        16.0        23.1
+layout columns                     100    300         7.1         8.0        16.0        25.0        25.0
+invariants                         100    300         4.3         8.0         8.0         8.0         9.4
+layout stacks of 4                 100    300         4.7         8.0         8.0         8.0        20.8
+move all windows                   100     75      1100.8      1237.5      1237.5      1237.5      1237.5
+place all windows                  100     30       751.7       953.0       953.0       953.0       953.0
+layout columns, follow            1000     40        80.5       105.4       105.4       105.4       105.4
+layout columns                    1000     40        66.1        81.4        81.4        81.4        81.4
+invariants                        1000     40        43.4        55.6        55.6        55.6        55.6
+layout stacks of 4                1000     40        52.6        64.0       128.0       129.5       129.5
+move all windows                  1000     10     11163.9     11890.4     11890.4     11890.4     11890.4
+place all windows                 1000      4      7637.7      8192.0      8260.4      8260.4      8260.4
+outputs: order+primary (16)         16   5000         3.6         4.0         4.0         8.0        49.9
+monitors: rules+profile (8)          8   5000        32.3        32.0        64.0        64.0       100.6
