@@ -1,0 +1,11 @@
+#!/bin/sh
+
+
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=wmaker-wl
+export XDG_CURRENT_DESKTOP=wmaker-wl
+
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- wmaker-wl "$@"
+fi
+exec wmaker-wl "$@"
