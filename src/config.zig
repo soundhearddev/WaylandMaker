@@ -331,6 +331,14 @@ pub const Config = struct {
     /// null: bindings follow the active xkb layout. N: always translate key
     /// events with layout N (0-based) of the keyboard that produced them.
     bind_layout: ?u32 = null,
+    /// The keymap, with the names of XKB_DEFAULT_LAYOUT & co: `de`, `de` +
+    /// variant `nodeadkeys`, `us,de` + options `grp:alt_shift_toggle`. An empty
+    /// one is not set: the environment is asked next, then the system's
+    /// keyboard setting (keyboard.zig `systemKeymap`), then xkbcommon's default.
+    keyboard_layout: [:0]const u8 = "",
+    keyboard_variant: [:0]const u8 = "",
+    keyboard_model: [:0]const u8 = "",
+    keyboard_options: [:0]const u8 = "",
     /// Auto-repeat of held keys, as clients get it (keys per second, 0 = off)
     /// and as wmaker-wl repeats the binds that make sense to repeat.
     repeat_rate: u32 = 25,
@@ -1214,8 +1222,9 @@ const colour_options = [_][]const u8{
 /// Options whose value is not a plain bool, number, colour, enum, font or
 /// command: they have their own reader and writer below.
 const special_options = [_][]const u8{
-    "width_presets",    "workspace_names", "bind_layout",          "mouse_mod",
-    "spawn_at_startup", "environment",     "anim_window_movement", "anim_window_open",
+    "width_presets",    "workspace_names",  "bind_layout",          "mouse_mod",
+    "spawn_at_startup", "environment",      "anim_window_movement", "anim_window_open",
+    "keyboard_layout",  "keyboard_variant", "keyboard_model",       "keyboard_options",
 };
 
 const Kind = enum { integer, fraction, colour, boolean, enumeration, font, command, special };
@@ -1448,6 +1457,18 @@ fn applySpecial(ctx: *Ctx, key: []const u8) ParseError!void {
         return;
     }
 
+    // The xkb names. Empty means "not set"; anything else must be plain text
+    // without control characters (it goes into xkb_rule_names, a C string).
+    inline for (.{ "keyboard_layout", "keyboard_variant", "keyboard_model", "keyboard_options" }) |name| {
+        if (eql(u8, key, name)) {
+            const s = lua.toSlice(L, -1) orelse return error.Invalid;
+            if (s.len > 128) return error.Invalid;
+            for (s) |ch| if (ch < 0x20 or ch == 0x7f) return error.Invalid;
+            @field(cfg, name) = a.dupeZ(u8, s) catch return error.OutOfMemory;
+            return;
+        }
+    }
+
     return error.UnknownKey;
 }
 
@@ -1551,6 +1572,8 @@ fn pushSpecial(ctx: *Ctx, comptime name: []const u8) std.mem.Allocator.Error!boo
     } else if (comptime std.mem.eql(u8, name, "mouse_mod")) {
         var buf: [48]u8 = undefined;
         lua.pushString(L, modsText(&buf, cfg.mouse_mod));
+    } else if (comptime std.mem.startsWith(u8, name, "keyboard_")) {
+        lua.pushString(L, @field(cfg, name));
     } else return false;
     return true;
 }

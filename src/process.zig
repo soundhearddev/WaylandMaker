@@ -6,6 +6,8 @@ const std = @import("std");
 const log = std.log.scoped(.process);
 const types = @import("types.zig");
 
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+
 /// Start `argv` detached. SIGCHLD is ignored process-wide (see main.zig),
 /// so children are reaped automatically and never become zombies.
 pub fn spawn(wm: *types.WindowManager, argv: []const []const u8) void {
@@ -42,4 +44,31 @@ pub fn spawnChecked(wm: *types.WindowManager, argv: []const []const u8) bool {
 pub fn spawnShell(wm: *types.WindowManager, cmd: []const u8) void {
     if (cmd.len == 0) return;
     spawn(wm, &.{ "/bin/sh", "-c", cmd });
+}
+
+/// Is there a program `name` we could start: an executable file at that path
+/// (when it has a `/`), or in one of the directories of $PATH.
+pub fn exists(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255) return false;
+    var buf: [4096]u8 = undefined;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        const z = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return false;
+        return access(z.ptr, 1) == 0; // X_OK
+    }
+    const path: [*:0]const u8 = std.c.getenv("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
+    var dirs = std.mem.splitScalar(u8, std.mem.span(path), ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        const z = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch continue;
+        if (access(z.ptr, 1) == 0) return true;
+    }
+    return false;
+}
+
+test "exists: programs in PATH, absolute paths, and nothing" {
+    try std.testing.expect(exists("sh"));
+    try std.testing.expect(exists("/bin/sh"));
+    try std.testing.expect(!exists("wmaker-wl-no-such-program"));
+    try std.testing.expect(!exists("/nonexistent/dir/prog"));
+    try std.testing.expect(!exists(""));
 }

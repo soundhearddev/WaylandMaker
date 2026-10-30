@@ -86,6 +86,40 @@ pub fn parseAll(a: std.mem.Allocator, cfg: *const config.Config) ![]const Comman
     return out;
 }
 
+/// What `spawn_terminal`, `spawn_launcher` and `spawn_browser` try when the
+/// configured program is not installed. The defaults of config.lua name
+/// programs that are not on every machine (`alacritty`, `fuzzel`, `firefox`);
+/// a key that silently starts nothing looks exactly like a key that does not
+/// work. The first one found wins, in this order.
+const Argv = []const []const u8;
+const terminal_fallbacks = [_]Argv{
+    &.{"foot"},       &.{"alacritty"},  &.{"kitty"},          &.{"wezterm"},
+    &.{"ghostty"},    &.{"konsole"},    &.{"gnome-terminal"}, &.{"xfce4-terminal"},
+    &.{"lxterminal"}, &.{"terminator"}, &.{"xterm"},
+};
+const launcher_fallbacks = [_]Argv{
+    &.{"fuzzel"},                  &.{"wofi"},      &.{"tofi-drun"},    &.{"bemenu-run"},
+    &.{ "rofi", "-show", "drun" }, &.{"wmenu-run"}, &.{"dmenu-wl_run"},
+};
+const browser_fallbacks = [_]Argv{
+    &.{"librewolf"}, &.{"firefox"}, &.{"chromium"}, &.{"google-chrome-stable"},
+    &.{"brave"},     &.{"vivaldi"}, &.{"epiphany"}, &.{"falkon"},
+};
+
+/// `argv` if its program exists, else the first of `fallbacks` that does (and
+/// a warning that says which), else `argv` again: starting it will fail with
+/// a message in the log, which is better than guessing.
+fn resolveProgram(argv: Argv, fallbacks: []const Argv, what: []const u8) Argv {
+    if (argv.len > 0 and proc.exists(argv[0])) return argv;
+    for (fallbacks) |fb| {
+        if (!proc.exists(fb[0])) continue;
+        log.warn("{s} `{s}` is not installed, using `{s}` (set `{s} = ...` in config.lua to choose)", .{ what, if (argv.len > 0) argv[0] else "", fb[0], what });
+        return fb;
+    }
+    log.warn("{s} `{s}` is not installed and no known alternative was found: the key will do nothing", .{ what, if (argv.len > 0) argv[0] else "" });
+    return argv;
+}
+
 pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) ParseError!Command {
     var it = std.mem.tokenizeAny(u8, text, " \t");
     const name = it.next() orelse return error.UnknownCommand;
@@ -100,9 +134,9 @@ pub fn parse(a: std.mem.Allocator, cfg: *const config.Config, text: []const u8) 
         }
     }
 
-    if (eql(u8, name, "spawn_terminal")) return .{ .spawn = cfg.terminal };
-    if (eql(u8, name, "spawn_launcher")) return .{ .spawn = cfg.launcher };
-    if (eql(u8, name, "spawn_browser")) return .{ .spawn = cfg.browser };
+    if (eql(u8, name, "spawn_terminal")) return .{ .spawn = resolveProgram(cfg.terminal, &terminal_fallbacks, "terminal") };
+    if (eql(u8, name, "spawn_launcher")) return .{ .spawn = resolveProgram(cfg.launcher, &launcher_fallbacks, "launcher") };
+    if (eql(u8, name, "spawn_browser")) return .{ .spawn = resolveProgram(cfg.browser, &browser_fallbacks, "browser") };
     if (eql(u8, name, "spawn")) {
         return .{ .spawn = config.parseCommand(a, rest) catch |e| return if (e == error.OutOfMemory)
             error.OutOfMemory
@@ -199,7 +233,12 @@ fn focusedWindow(wm: *WindowManager) ?*Window {
 
 pub fn run(wm: *WindowManager, cmd: Command) void {
     log.debug("run {s}", .{@tagName(cmd)});
-    const out = currentOutput(wm) orelse return;
+    const out = currentOutput(wm) orelse {
+        // Nothing can be done without a monitor, but the key press must not
+        // vanish without a trace.
+        log.warn("`{s}` dropped: there is no usable output yet", .{@tagName(cmd)});
+        return;
+    };
     const ws = out.ws();
     const strip = &ws.strip;
     const cfg = &wm.cfg;

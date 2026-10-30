@@ -1,64 +1,52 @@
+
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
 
-/// The system libraries every wmaker-wl / wlprefs module draws with, and the
-/// include directories their headers (and wm_text.h) are found in.
+/// The system libraries every wmaker-wl / wlprefs module draws with.
 fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
     const libs = [_][]const u8{
         "wayland-client",
         "xkbcommon",
         "cairo",
-        "pango-1.0",
-        "pangocairo-1.0",
+        "pango",
+        "pangocairo",
         "gobject-2.0",
         "glib-2.0",
     };
-    for (libs) |name| module.linkSystemLibrary(name, .{});
+
+    for (libs) |name| {
+        module.linkSystemLibrary(name, .{ .use_pkg_config = .force });
+    }
 
     module.addIncludePath(src_dir);
-
-    // Fallback include paths for systems where pkg-config does not already
-    // provide them (harmless where it does, e.g. on Guix).
-    const includes = [_][]const u8{
-        "/usr/include/glib-2.0",
-        "/usr/lib/glib-2.0/include",
-        "/usr/include/cairo",
-        "/usr/include/pango-1.0",
-        "/usr/include/harfbuzz",
-    };
-    for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
 }
 
-/// Cairo and Pango for the Dock's drawing (src/gfx.zig, src/wm_text.c). Used by
-/// the compositor and by the tests, so the drawing is tested without a compositor.
+/// Cairo and Pango for the Dock's drawing and tests.
 fn linkCairo(b: *std.Build, module: *std.Build.Module) void {
-    const libs = [_][]const u8{ "cairo", "pango-1.0", "pangocairo-1.0", "gobject-2.0", "glib-2.0" };
-    for (libs) |name| module.linkSystemLibrary(name, .{});
-    module.addIncludePath(b.path("src"));
-    const includes = [_][]const u8{
-        "/usr/include/glib-2.0",
-        "/usr/lib/glib-2.0/include",
-        "/usr/include/cairo",
-        "/usr/include/pango-1.0",
-        "/usr/include/harfbuzz",
+    const libs = [_][]const u8{
+        "cairo",
+        "pango",
+        "pangocairo",
+        "gobject-2.0",
+        "glib-2.0",
     };
-    for (includes) |path| module.addIncludePath(.{ .cwd_relative = path });
-    module.addCSourceFile(.{ .file = b.path("src/wm_text.c"), .flags = &.{} });
+
+    for (libs) |name| {
+        module.linkSystemLibrary(name, .{ .use_pkg_config = .force });
+    }
+
+    module.addIncludePath(b.path("src"));
+    module.addCSourceFile(.{
+        .file = b.path("src/wm_text.c"),
+        .flags = &.{},
+    });
 }
 
-/// Build wlprefs: a separate Wayland client in `wlprefs/`, built by the root
-/// `zig build` together with the compositor (it has no build.zig of its own).
+/// Build wlprefs as part of the root project.
 pub const Wlprefs = struct {
     exe: *std.Build.Step.Compile,
-    /// The library module (everything but main.zig); its tests are the
-    /// `test-wlprefs` step.
     mod: *std.Build.Module,
-    /// settings.zig on its own (no Wayland, no cairo). The compositor's own
-    /// tests import it, to check that what wlprefs writes is what
-    /// config.zig reads.
     settings: *std.Build.Module,
-    /// actions.zig on its own: the compositor's tests check it against
-    /// types.Command.
     actions: *std.Build.Module,
 };
 
@@ -68,16 +56,12 @@ pub fn buildWlprefs(
     optimize: std.builtin.OptimizeMode,
     use_llvm: bool,
 ) Wlprefs {
-
-    // Helper for paths belonging to this subproject.
     const projectPath = struct {
         fn get(
             bld: *std.Build,
             comptime p: []const u8,
         ) std.Build.LazyPath {
-            return bld.path(
-                bld.fmt("wlprefs/{s}", .{p}),
-            );
+            return bld.path(bld.fmt("wlprefs/{s}", .{p}));
         }
     }.get;
 
@@ -85,9 +69,7 @@ pub fn buildWlprefs(
 
     const scanner = Scanner.create(b, .{});
 
-    scanner.addSystemProtocol(
-        "stable/xdg-shell/xdg-shell.xml",
-    );
+    scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_shm", 1);
@@ -117,8 +99,6 @@ pub fn buildWlprefs(
     mod.addImport("wayland", wayland_module);
     mod.addImport("xkbcommon", xkbcommon_module);
 
-    // wmaker-wl's own default config. wlprefs takes its defaults from it,
-    // so "differs from the default" means the same in both programs.
     mod.addAnonymousImport("default_config.lua", .{
         .root_source_file = b.path("src/share/default_config.lua"),
     });
@@ -158,6 +138,7 @@ pub fn buildWlprefs(
         .target = target,
         .optimize = optimize,
     });
+
     settings_mod.addAnonymousImport("default_config.lua", .{
         .root_source_file = b.path("src/share/default_config.lua"),
     });
@@ -177,7 +158,7 @@ pub fn buildWlprefs(
 }
 
 // -------------------------------------------------------------------------
-// wmaker-wl (root project) -- also builds wlprefs via buildWlprefs() above
+// wmaker-wl -- also builds wlprefs
 // -------------------------------------------------------------------------
 
 pub fn build(b: *std.Build) void {
@@ -190,26 +171,24 @@ pub fn build(b: *std.Build) void {
         "Use LLVM backend + lld linker",
     ) orelse true;
 
-    // ---- dependencies ------------------------------------------------------
+    // ---- dependencies ---------------------------------------------------
 
-    const xkbcommon_module = b.dependency("xkbcommon", .{}).module("xkbcommon");
+    const xkbcommon_module =
+        b.dependency("xkbcommon", .{}).module("xkbcommon");
 
     const zlua_dep = b.dependency("zlua", .{
         .target = target,
         .optimize = optimize,
         .lang = .lua54,
     });
-    const zlua_module = zlua_dep.module("zlua");
 
+    const zlua_module = zlua_dep.module("zlua");
     const pixman_module = b.dependency("pixman", .{}).module("pixman");
 
-    // ---- Wayland protocols (server side) -----------------------------------
-    //
-    // One `wayland` module (one scanner) for the whole compositor: a module can
-    // exist only once per compilation, and the data model needs its `wl.list`
-    // types as much as the protocol code does.
+    // ---- Wayland protocols ---------------------------------------------
 
     const scanner = Scanner.create(b, .{});
+
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
     scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
     scanner.addSystemProtocol("staging/color-management/color-management-v1.xml");
@@ -221,8 +200,6 @@ pub fn build(b: *std.Build) void {
     scanner.addSystemProtocol("stable/viewporter/viewporter.xml");
     scanner.addSystemProtocol("staging/single-pixel-buffer/single-pixel-buffer-v1.xml");
 
-    // These versions only control Zig code generation. Too old a version can
-    // only make a compile fail, never a client misbehave.
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_subcompositor", 1);
     scanner.generate("wl_shm", 1);
@@ -237,11 +214,16 @@ pub fn build(b: *std.Build) void {
     scanner.generate("wp_viewporter", 1);
     scanner.generate("wp_single_pixel_buffer_manager_v1", 1);
     scanner.generate("zwp_tablet_manager_v2", 1);
-    scanner.generate("wp_color_manager_v1", b.option(
-        u32,
-        "color-manager-version",
-        "wp_color_manager_v1 version to generate (2 needs wayland-protocols >= 1.44; default 2)",
-    ) orelse 2);
+
+    scanner.generate(
+        "wp_color_manager_v1",
+        b.option(
+            u32,
+            "color-manager-version",
+            "wp_color_manager_v1 version to generate (2 needs wayland-protocols >= 1.44; default 2)",
+        ) orelse 2,
+    );
+
     scanner.generate("wp_cursor_shape_manager_v1", 2);
 
     const wayland_module = b.createModule(.{
@@ -250,15 +232,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // ---- wlroots module -------------------------------------------------
+
     const wlroots_module = b.dependency("wlroots", .{}).module("wlroots");
+
     wlroots_module.addImport("wayland", wayland_module);
     wlroots_module.addImport("xkbcommon", xkbcommon_module);
     wlroots_module.addImport("pixman", pixman_module);
-    // The dependency module is created without a target. Without this line
-    // linkSystemLibrary panics, and @cImport would not see the include path
-    // pkg-config reports for wlroots.
     wlroots_module.resolved_target = target;
-    wlroots_module.linkSystemLibrary("wlroots-0.20", .{});
+
+    wlroots_module.linkSystemLibrary(
+        "wlroots-0.20",
+        .{ .use_pkg_config = .force },
+    );
 
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "wayland", .module = wayland_module },
@@ -268,23 +254,53 @@ pub fn build(b: *std.Build) void {
         .{ .name = "pixman", .module = pixman_module },
     };
 
-    // ---- wmaker-wl and the probe -------------------------------------------
+    // ---- compositor and probe ------------------------------------------
 
-    const exe = addCompositor(b, imports, target, optimize, use_llvm, "wmaker-wl", "src/main.zig");
+    const exe = addCompositor(
+        b,
+        imports,
+        target,
+        optimize,
+        use_llvm,
+        "wmaker-wl",
+        "src/main.zig",
+    );
+
     b.installArtifact(exe);
 
-    const probe = addCompositor(b, imports, target, optimize, use_llvm, "wlr-probe", "src/probe.zig");
-    const probe_step = b.step("probe", "Build wlr-probe: can wlroots be used on this machine at all?");
+    const probe = addCompositor(
+        b,
+        imports,
+        target,
+        optimize,
+        use_llvm,
+        "wlr-probe",
+        "src/probe.zig",
+    );
+
+    const probe_step = b.step(
+        "probe",
+        "Build wlr-probe: can wlroots be used on this machine at all?",
+    );
+
     probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
 
-    // `zig build run -- --help`. Nested in a running session when
-    // WAYLAND_DISPLAY or DISPLAY is set, on the bare TTY otherwise.
+    // ---- run ------------------------------------------------------------
+
     const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run wmaker-wl (nested when a session is already up)");
+
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step(
+        "run",
+        "Run wmaker-wl (nested when a session is already up)",
+    );
+
     run_step.dependOn(&run_cmd.step);
 
-    // ---- wlprefs -------------------------------------------------------------
+    // ---- wlprefs --------------------------------------------------------
 
     const wlprefs = buildWlprefs(b, target, optimize, use_llvm);
     b.installArtifact(wlprefs.exe);
@@ -294,23 +310,29 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
-    const wlprefs_test_step = b.step("test-wlprefs", "Run the unit tests of wlprefs");
+
+    const wlprefs_test_step = b.step(
+        "test-wlprefs",
+        "Run the unit tests of wlprefs",
+    );
+
     wlprefs_test_step.dependOn(&b.addRunArtifact(wlprefs_tests).step);
 
-    // ---- tests ----------------------------------------------------------------
-    //
-    // Everything except what needs a compositor library: the model, the key
-    // matching, the manage pass (against a fake sink), the command line. So
-    // `zig build test` runs on a machine without wlroots.
+    // ---- tests ----------------------------------------------------------
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = imports[0..3], // wayland, xkbcommon, zlua
+        .imports = imports[0..3],
     });
-    test_module.linkSystemLibrary("xkbcommon", .{});
+
+    test_module.linkSystemLibrary(
+        "xkbcommon",
+        .{ .use_pkg_config = .force },
+    );
+
     linkCairo(b, test_module);
     test_module.addImport("wlprefs_settings", wlprefs.settings);
     test_module.addImport("wlprefs_actions", wlprefs.actions);
@@ -320,9 +342,10 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
+
     const run_tests = b.addRunArtifact(tests);
 
-    // ---- benchmark --------------------------------------------------------------
+    // ---- benchmark ------------------------------------------------------
 
     const bench_module = b.createModule(.{
         .root_source_file = b.path("src/bench.zig"),
@@ -331,41 +354,67 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = imports[0..3],
     });
-    bench_module.linkSystemLibrary("xkbcommon", .{});
+
+    bench_module.linkSystemLibrary(
+        "xkbcommon",
+        .{ .use_pkg_config = .force },
+    );
+
     linkCairo(b, bench_module);
     bench_module.addImport("wlprefs_settings", wlprefs.settings);
     bench_module.addImport("wlprefs_actions", wlprefs.actions);
+
     const bench_exe = b.addExecutable(.{
         .name = "wmaker-bench",
         .root_module = bench_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
     });
+
     const run_bench = b.addRunArtifact(bench_exe);
-    if (b.args) |args| run_bench.addArgs(args);
-    const bench_step = b.step("bench", "Time the window model on synthetic loads (use -Doptimize=ReleaseFast)");
+
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+
+    const bench_step = b.step(
+        "bench",
+        "Time the window model on synthetic loads (use -Doptimize=ReleaseFast)",
+    );
+
     bench_step.dependOn(&run_bench.step);
 
-    // ---- example DockApps ------------------------------------------------------------
+    // ---- example DockApps -----------------------------------------------
 
-    const examples_step = b.step("test-examples", "Run the unit tests of the example DockApps (wl-battery, wl-clock)");
+    const examples_step = b.step(
+        "test-examples",
+        "Run the unit tests of the example DockApps (wl-battery, wl-clock)",
+    );
+
     inline for (.{ "wl-battery", "wl-clock" }) |name| {
         const run_example = b.addSystemCommand(&.{ "zig", "build", "test" });
         run_example.setCwd(b.path("examples/" ++ name));
         examples_step.dependOn(&run_example.step);
     }
 
-    const test_step = b.step("test", "Run all unit tests: wmaker-wl and wlprefs");
+    const test_step = b.step(
+        "test",
+        "Run all unit tests: wmaker-wl and wlprefs",
+    );
+
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(wlprefs_test_step);
 
-    const test_all_step = b.step("test-all", "Run `test` and the tests of the examples");
+    const test_all_step = b.step(
+        "test-all",
+        "Run `test` and the tests of the examples",
+    );
+
     test_all_step.dependOn(test_step);
     test_all_step.dependOn(examples_step);
 }
 
-/// An executable of the compositor: the shared modules, plus the libraries
-/// wlroots' own module does not bring along.
+/// Build a compositor executable and link its required system libraries.
 fn addCompositor(
     b: *std.Build,
     imports: []const std.Build.Module.Import,
@@ -382,14 +431,35 @@ fn addCompositor(
         .link_libc = true,
         .imports = imports,
     });
-    module.linkSystemLibrary("wayland-server", .{});
-    module.linkSystemLibrary("xkbcommon", .{});
-    module.linkSystemLibrary("pixman-1", .{});
+
+    module.linkSystemLibrary(
+        "wayland-server",
+        .{ .use_pkg_config = .force },
+    );
+
+    module.linkSystemLibrary(
+        "xkbcommon",
+        .{ .use_pkg_config = .force },
+    );
+
+    module.linkSystemLibrary(
+        "pixman-1",
+        .{ .use_pkg_config = .force },
+    );
+
     linkCairo(b, module);
-    // wlr_buffer for the Dock's tiles (wlroots' buffer interface is C): the
-    // C file needs wlroots' headers, so this module links it too.
-    module.linkSystemLibrary("wlroots-0.20", .{});
-    module.addCSourceFile(.{ .file = b.path("src/wm_pixbuf.c"), .flags = &.{"-DWLR_USE_UNSTABLE"} });
+
+    module.linkSystemLibrary(
+        "wlroots-0.20",
+        .{ .use_pkg_config = .force },
+    );
+
+    // wm_pixbuf.c defines WLR_USE_UNSTABLE itself; don't define it twice.
+    module.addCSourceFile(.{
+        .file = b.path("src/wm_pixbuf.c"),
+        .flags = &.{},
+    });
+
     return b.addExecutable(.{
         .name = name,
         .root_module = module,
@@ -397,3 +467,4 @@ fn addCompositor(
         .use_lld = use_llvm,
     });
 }
+

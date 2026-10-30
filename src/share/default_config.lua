@@ -182,6 +182,18 @@ repeat_rate = 25                 -- keys per second
 repeat_delay = 600               -- ms until it starts
 repeat_binds = true              -- false: a bind fires once per press, however long it is held
 
+-- The keymap of the keyboards. Empty = not set: then XKB_DEFAULT_LAYOUT & co,
+-- then the system's own setting (/etc/default/keyboard, 00-keyboard.conf,
+-- vconsole.conf, a de_* locale), then us.
+--     keyboard_layout = "de"                      -- QWERTZ
+--     keyboard_variant = "nodeadkeys"
+--     keyboard_options = "caps:escape"
+--     keyboard_layout = "us,de"; keyboard_options = "grp:alt_shift_toggle"
+keyboard_layout = ""
+keyboard_variant = ""
+keyboard_model = ""
+keyboard_options = ""
+
 -- ---- Dock and Clip ----------------------------------------------------------
 -- The Dock is Window Maker's column of tiles (dock_size, 64 px by default) on a screen edge (a logo
 -- tile, then the entries of WMState). The Clip is

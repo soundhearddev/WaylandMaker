@@ -153,9 +153,13 @@ pub const View = struct {
         view.tree.node.setPosition(p.rect.x, p.rect.y);
 
         // The client draws its geometry box (shadows and the like lie outside
-        // it); that box is what fills the content rectangle. `clip` (relative
-        // to the content's corner) cuts it further.
-        view.surface_tree.node.setPosition(-geo.x, -geo.y);
+        // it); that box is what fills the content rectangle. wlroots already
+        // shifts the surface inside `surface_tree` by -geometry on every
+        // commit (wlr_scene_xdg_surface), so this tree itself stays at the
+        // corner. Shifting it as well moved every client with a shadow margin
+        // (GTK, LibreWolf, Firefox) up and left by twice its margin.
+        // `clip` (relative to the content's corner) cuts it further.
+        view.surface_tree.node.setPosition(0, 0);
         const content: Rect = .{ .x = 0, .y = 0, .w = p.rect.w, .h = p.rect.h };
         const shown = if (p.clip) |c| intersect(content, c) else content;
         if (shown) |r| {
@@ -226,7 +230,11 @@ pub const View = struct {
             manage.setActualSize(win, geo.width, geo.height);
             const cur = toplevel.current;
             manage.setHints(win, cur.min_width, cur.min_height, cur.max_width, cur.max_height);
-            if (old_w != geo.width or old_h != geo.height) view.server.scheduleManage();
+            // The geometry box can move without changing its size (a client
+            // that drops its shadow in maximized or tiled state): the clip is
+            // cut from it, so it has to be placed again.
+            const moved = if (view.last) |l| (l.geo_x != geo.x or l.geo_y != geo.y) else false;
+            if (old_w != geo.width or old_h != geo.height or moved) view.server.scheduleManage();
         }
     }
 

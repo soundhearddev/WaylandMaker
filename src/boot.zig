@@ -77,12 +77,17 @@ pub fn applyWorkspaceCount(wm: *WindowManager, old_count: u32) void {
     wm.follow_request = true;
 }
 
-/// Children are reaped by the kernel, so none becomes a zombie.
+fn noopChild(_: std.posix.SIG) callconv(.c) void {}
+
+/// Children are reaped by the kernel (SA_NOCLDWAIT), so none becomes a zombie.
+/// Not SIG_IGN: an ignored signal stays ignored across exec, so every program
+/// we start would inherit it and its own wait() calls would fail with ECHILD.
+/// A handler is reset to the default by exec.
 pub fn ignoreSigchld() void {
     const act: std.posix.Sigaction = .{
-        .handler = .{ .handler = std.posix.SIG.IGN },
+        .handler = .{ .handler = noopChild },
         .mask = std.posix.sigemptyset(),
-        .flags = 0,
+        .flags = std.posix.SA.NOCLDWAIT | std.posix.SA.RESTART,
     };
     std.posix.sigaction(.CHLD, &act, null);
 }

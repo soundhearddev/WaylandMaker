@@ -41,10 +41,12 @@ test {
     _ = @import("dockhost.zig");
     _ = @import("dock_view.zig");
     _ = @import("perf.zig");
+    _ = @import("process.zig");
     _ = @import("plist.zig");
     _ = @import("pointer_op.zig");
     _ = @import("scale.zig");
     _ = @import("style.zig");
+    _ = @import("sysmap.zig");
     _ = @import("svg.zig");
     _ = @import("trace.zig");
     _ = @import("wm_attr.zig");
