@@ -180,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
     // learns about them and `spawn_at_startup` runs. Clients that connect
     // before the loop runs wait in the socket's queue.
     boot.runStartup(wm);
+    defer boot.stopSessionTarget(wm);
 
     try server.run();
 }

@@ -1,0 +1,16 @@
+# systemd --user: "a wmaker-wl desktop session is running".
+#
+# Started by wmaker-wl itself once D-Bus/systemd know WAYLAND_DISPLAY & co
+# (config option `session_target`). Because it binds to
+# graphical-session.target, every user unit with
+# PartOf=/After=graphical-session.target (swaybg, waybar, mako, portals, ...)
+# starts with the session and stops with it.
+#
+# Install to /usr/lib/systemd/user/ (install.sh --system) or
+# ~/.config/systemd/user/ (install.sh).
+[Unit]
+Description=WaylandMaker compositor session
+Documentation=man:systemd.special(7)
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target

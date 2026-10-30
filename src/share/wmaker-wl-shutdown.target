@@ -1,0 +1,9 @@
+# systemd --user: started by wmaker-wl when it exits; stops the session
+# target and everything bound to it.
+[Unit]
+Description=Shut down running WaylandMaker session
+DefaultDependencies=no
+StopWhenUnneeded=true
+
+Conflicts=graphical-session.target graphical-session-pre.target
+After=graphical-session.target graphical-session-pre.target

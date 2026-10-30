@@ -306,6 +306,11 @@ pub const Config = struct {
     /// and friends (boot.importEnvironment), so portals and notification
     /// daemons find the compositor.
     import_environment: bool = true,
+    /// At session start also start `wmaker-wl-session.target` (it binds to
+    /// `graphical-session.target`), so systemd --user units written for a
+    /// desktop session (swaybg, waybar, mako, portals) start and stop with us.
+    /// Does nothing without systemd or without the unit installed.
+    session_target: bool = true,
 
     // ---- key bindings ---------------------------------------------------
     binds: []const Bind = &.{},
@@ -1908,17 +1913,20 @@ test "keyboard options: defaults, values, and nonsense is refused" {
     try std.testing.expectEqual(@as(u32, 600), cfg.repeat_delay);
     try std.testing.expect(cfg.repeat_binds);
     try std.testing.expect(cfg.import_environment);
+    try std.testing.expect(cfg.session_target);
 
     try parseText(arena.allocator(), &cfg,
         \\repeat_rate = 0
         \\repeat_delay = 250
         \\repeat_binds = false
         \\import_environment = false
+        \\session_target = false
     );
     try std.testing.expectEqual(@as(u32, 0), cfg.repeat_rate);
     try std.testing.expectEqual(@as(u32, 250), cfg.repeat_delay);
     try std.testing.expect(!cfg.repeat_binds);
     try std.testing.expect(!cfg.import_environment);
+    try std.testing.expect(!cfg.session_target);
     try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
 
     // A refused value changes nothing and is a warning.
@@ -1933,7 +1941,7 @@ test "keyboard options: defaults, values, and nonsense is refused" {
 
 test "the built-in config names each keyboard and session option once" {
     // A copy-pasted block in default_config.lua once set them twice.
-    inline for (.{ "repeat_rate", "repeat_delay", "repeat_binds", "import_environment" }) |name| {
+    inline for (.{ "repeat_rate", "repeat_delay", "repeat_binds", "import_environment", "session_target" }) |name| {
         var count: usize = 0;
         var it = std.mem.splitScalar(u8, default_config_text, '\n');
         while (it.next()) |line| {

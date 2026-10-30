@@ -6,9 +6,20 @@
 #     export XKB_DEFAULT_LAYOUT=de
 # The same can be written as `environment = { ... }` in config.lua.
 
+# Who we are. wmaker-wl sets the same values itself; they are set here too so
+# that the env file, dbus-run-session and everything before the compositor
+# already see a wmaker-wl desktop. Programs choose behaviour (portals,
+# OnlyShowIn=, tray/wallpaper helpers) from these.
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=wmaker-wl
 export XDG_CURRENT_DESKTOP=wmaker-wl
+
+# Toolkits: use Wayland. (Qt and GTK would otherwise guess; Electron and
+# Firefox need the hint.) The env file below can override all of it.
+export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland;xcb}"
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland,x11}"
+export _JAVA_AWT_WM_NONREPARENTING="${_JAVA_AWT_WM_NONREPARENTING:-1}"
 
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/wmaker-wl"
 if [ -r "$cfg/env" ]; then
@@ -20,6 +31,8 @@ if [ -z "$XDG_RUNTIME_DIR" ]; then
     echo "wmaker-wl-session: XDG_RUNTIME_DIR is not set (log in through logind or seatd)" >&2
 fi
 
+# A bus already exists with logind/pam_systemd: use it, so systemd --user
+# and D-Bus activation see the same session. Only without one start a private bus.
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
     exec dbus-run-session -- wmaker-wl "$@"
 fi
