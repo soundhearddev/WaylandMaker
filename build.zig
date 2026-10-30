@@ -199,6 +199,10 @@ pub fn build(b: *std.Build) void {
     scanner.addSystemProtocol("stable/linux-dmabuf/linux-dmabuf-v1.xml");
     scanner.addSystemProtocol("stable/viewporter/viewporter.xml");
     scanner.addSystemProtocol("staging/single-pixel-buffer/single-pixel-buffer-v1.xml");
+    // Not in wayland-protocols: panels, launchers, wallpapers and notification
+    // daemons (waybar, fuzzel, wofi, tofi, swaybg, mako, ...) are layer-shell
+    // clients. Vendored from wlr-protocols.
+    scanner.addCustomProtocol(b.path("protocol/wlr-layer-shell-unstable-v1.xml"));
 
     scanner.generate("wl_compositor", 6);
     scanner.generate("wl_subcompositor", 1);
@@ -213,6 +217,7 @@ pub fn build(b: *std.Build) void {
     scanner.generate("zwp_linux_dmabuf_v1", 4);
     scanner.generate("wp_viewporter", 1);
     scanner.generate("wp_single_pixel_buffer_manager_v1", 1);
+    scanner.generate("zwlr_layer_shell_v1", 4);
     scanner.generate("zwp_tablet_manager_v2", 1);
 
     scanner.generate(
@@ -444,6 +449,12 @@ fn addCompositor(
 
     module.linkSystemLibrary(
         "pixman-1",
+        .{ .use_pkg_config = .force },
+    );
+
+    // libinput.zig calls libinput_device_config_*() directly.
+    module.linkSystemLibrary(
+        "libinput",
         .{ .use_pkg_config = .force },
     );
 

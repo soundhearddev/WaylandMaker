@@ -23,6 +23,7 @@ const backend = @import("backend.zig");
 const keys = @import("keys.zig");
 const pointer_op = @import("pointer_op.zig");
 
+const layer = @import("layer.zig");
 const Server = @import("server.zig").Server;
 const View = @import("view.zig").View;
 
@@ -53,7 +54,9 @@ pub const Cursor = struct {
     frame: wl.Listener(*wlr.Cursor) = .init(onFrame),
     request_shape: wl.Listener(*wlr.CursorShapeManagerV1.event.RequestSetShape) = .init(onRequestShape),
 
-    const Hit = struct { view: *View, surface: *wlr.Surface, sx: f64, sy: f64 };
+    /// `view` is null for a surface that is not a window: a layer surface (a
+    /// launcher, a bar) or one of their popups. Those get the pointer too.
+    const Hit = struct { view: ?*View, surface: *wlr.Surface, sx: f64, sy: f64 };
 
     pub fn init(c: *Cursor, server: *Server) !void {
         c.* = .{
@@ -113,8 +116,7 @@ pub const Cursor = struct {
         if (node.type != .buffer) return null;
         const scene_buffer = wlr.SceneBuffer.fromNode(node);
         const scene_surface = wlr.SceneSurface.tryFromBuffer(scene_buffer) orelse return null;
-        const view = View.fromNode(node) orelse return null;
-        return .{ .view = view, .surface = scene_surface.surface, .sx = sx, .sy = sy };
+        return .{ .view = View.fromNode(node), .surface = scene_surface.surface, .sx = sx, .sy = sy };
     }
 
     // ---- events ----------------------------------------------------------------------
@@ -180,12 +182,22 @@ pub const Cursor = struct {
         };
         server.seat.pointerNotifyEnter(hit.surface, hit.sx, hit.sy);
         server.seat.pointerNotifyMotion(time_msec, hit.sx, hit.sy);
-        if (seat) |s| s.hovered = hit.view.win;
+        const hit_view = hit.view orelse {
+            if (seat) |s| s.hovered = null;
+            return;
+        };
+        if (seat) |s| s.hovered = hit_view.win;
 
         // focus_follows_mouse: hovering is a focus request, once per window.
-        if (wm.cfg.focus_follows_mouse and server.focused != hit.view) {
-            if (hit.view.win) |win| action.requestFocusFollow(wm, win, wm.cfg.focus_follows_mouse_scroll);
+        if (wm.cfg.focus_follows_mouse and server.focused != hit_view) {
+            if (hit_view.win) |win| action.requestFocusFollow(wm, win, wm.cfg.focus_follows_mouse_scroll);
         }
+    }
+
+    /// Tell whatever is under the pointer again, without the pointer moving:
+    /// a surface appeared or went away under it (a launcher closing).
+    pub fn refresh(c: *Cursor) void {
+        c.processMotion(@truncate(c.server.nowMs()));
     }
 
     /// Modifiers held on the seat's keyboard.
@@ -231,7 +243,7 @@ pub const Cursor = struct {
             else => null,
         };
         if (op != null and keys.normalize(c.heldMods()) == keys.normalize(config.modsBits(wm.cfg.mouse_mod))) {
-            if (seat) |s| if (hit) |h| if (h.view.win) |win| {
+            if (seat) |s| if (hit) |h| if (h.view) |hv| if (hv.win) |win| {
                 c.beginOp(s, op.?, win, event.button);
                 return;
             };
@@ -239,8 +251,16 @@ pub const Cursor = struct {
 
         _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
 
-        // Click to focus.
-        if (hit) |h| if (h.view.win) |win| action.requestFocus(wm, win);
+        // Click to focus: a window through the model; a layer surface that
+        // wants the keyboard on demand takes it itself.
+        if (hit) |h| {
+            if (h.view) |hv| {
+                server.releaseOnDemandFocus();
+                if (hv.win) |win| action.requestFocus(wm, win);
+            } else {
+                _ = layer.clicked(server, h.surface);
+            }
+        }
     }
 
     fn beginOp(c: *Cursor, seat: *types.Seat, op: types.PointerOp, win: *types.Window, button: u32) void {

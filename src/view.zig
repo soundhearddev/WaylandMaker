@@ -27,6 +27,7 @@ const backend = @import("backend.zig");
 const manage = @import("manage.zig");
 
 const Server = @import("server.zig").Server;
+const LayerSurface = @import("layer.zig").LayerSurface;
 const Rect = types.Rect;
 const intersect = manage.intersect;
 
@@ -395,23 +396,36 @@ pub const View = struct {
 pub const Popup = struct {
     server: *Server,
     xdg_popup: *wlr.XdgPopup,
+    /// The layer surface this is a popup of (a bar's menu); null for the
+    /// popup of a window.
+    layer: ?*LayerSurface = null,
 
     commit: wl.Listener(*wlr.Surface) = .init(onCommit),
     destroy: wl.Listener(void) = .init(onDestroy),
 
+    /// xdg_shell.new_popup. A popup of a layer surface has no xdg parent at
+    /// this point (it is named by `zwlr_layer_surface_v1.get_popup` a moment
+    /// later and arrives through `createForLayer`).
     pub fn create(server: *Server, xdg_popup: *wlr.XdgPopup) !void {
-        const xdg_surface = xdg_popup.base;
-        // A popup of something that is not an xdg surface (layer shell, later)
-        // is that other shell's business.
         const parent_surface = xdg_popup.parent orelse return;
         const parent = wlr.XdgSurface.tryFromWlrSurface(parent_surface) orelse return;
         const parent_tree: *wlr.SceneTree = @ptrCast(@alignCast(parent.data orelse return));
+        try attach(server, xdg_popup, parent_tree, null);
+    }
 
+    /// layer_surface.new_popup.
+    pub fn createForLayer(server: *Server, xdg_popup: *wlr.XdgPopup, ls: *LayerSurface) !void {
+        try attach(server, xdg_popup, ls.popups, ls);
+    }
+
+    fn attach(server: *Server, xdg_popup: *wlr.XdgPopup, parent_tree: *wlr.SceneTree, ls: ?*LayerSurface) !void {
+        const xdg_surface = xdg_popup.base;
+        const popup = try server.gpa.create(Popup);
+        errdefer server.gpa.destroy(popup);
         const scene_tree = try parent_tree.createSceneXdgSurface(xdg_surface);
         xdg_surface.data = scene_tree;
 
-        const popup = try server.gpa.create(Popup);
-        popup.* = .{ .server = server, .xdg_popup = xdg_popup };
+        popup.* = .{ .server = server, .xdg_popup = xdg_popup, .layer = ls };
         xdg_surface.surface.events.commit.add(&popup.commit);
         xdg_popup.events.destroy.add(&popup.destroy);
     }
@@ -423,20 +437,29 @@ pub const Popup = struct {
         _ = popup.xdg_popup.base.scheduleConfigure();
     }
 
-    /// Keep the popup on the monitor its window is on.
+    /// Keep the popup on the monitor its window (or its bar) is on.
     fn unconstrain(popup: *Popup) void {
         const server = popup.server;
-        const parent_surface = popup.xdg_popup.parent orelse return;
-        const parent = wlr.XdgSurface.tryFromWlrSurface(parent_surface) orelse return;
-        const tree: *wlr.SceneTree = @ptrCast(@alignCast(parent.data orelse return));
-        const view = View.fromNode(&tree.node) orelse return;
 
+        // The popup's parent surface sits at (lx, ly) on the desk; the box
+        // is given relative to it.
         var lx: c_int = 0;
         var ly: c_int = 0;
-        _ = view.tree.node.coords(&lx, &ly);
-        const wlr_output = server.output_layout.outputAt(@floatFromInt(lx), @floatFromInt(ly)) orelse return;
+        var wlr_output: ?*wlr.Output = null;
+        if (popup.layer) |ls| {
+            _ = ls.scene.tree.node.coords(&lx, &ly);
+            wlr_output = ls.monitor.wlr_output;
+        } else {
+            const parent_surface = popup.xdg_popup.parent orelse return;
+            const parent = wlr.XdgSurface.tryFromWlrSurface(parent_surface) orelse return;
+            const tree: *wlr.SceneTree = @ptrCast(@alignCast(parent.data orelse return));
+            const view = View.fromNode(&tree.node) orelse return;
+            _ = view.tree.node.coords(&lx, &ly);
+            wlr_output = server.output_layout.outputAt(@floatFromInt(lx), @floatFromInt(ly));
+        }
+        const out = wlr_output orelse return;
         var box: wlr.Box = undefined;
-        server.output_layout.getBox(wlr_output, &box);
+        server.output_layout.getBox(out, &box);
         const rel: wlr.Box = .{ .x = box.x - lx, .y = box.y - ly, .width = box.width, .height = box.height };
         popup.xdg_popup.unconstrainFromBox(&rel);
     }

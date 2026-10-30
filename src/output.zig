@@ -14,6 +14,7 @@ const types = model.types;
 const backend = @import("backend.zig");
 const manage = @import("manage.zig");
 
+const layer = @import("layer.zig");
 const Server = @import("server.zig").Server;
 
 pub const Monitor = struct {
@@ -22,12 +23,19 @@ pub const Monitor = struct {
     scene_output: *wlr.SceneOutput,
     out: *types.Output,
     link: wl.list.Link = undefined,
+    /// The output is being destroyed: nothing may be arranged on it any more.
+    gone: bool = false,
 
     frame: wl.Listener(*wlr.Output) = .init(onFrame),
     request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(onRequestState),
     destroy: wl.Listener(*wlr.Output) = .init(onDestroy),
 
     pub fn create(server: *Server, wlr_output: *wlr.Output) !void {
+        // VR headsets and the like: not part of the desktop.
+        if (wlr_output.non_desktop) {
+            log.info("output {s} is not a desktop output, ignored", .{wlr_output.name});
+            return;
+        }
         if (!wlr_output.initRender(server.allocator, server.renderer)) return error.InitRender;
 
         // Enable it at its preferred mode. (A saved `monitor()` rule can
@@ -66,6 +74,9 @@ pub const Monitor = struct {
             @intFromFloat(@round(wlr_output.scale)),
             now,
         );
+        // The cursor theme at this monitor's scale (a HiDPI screen would get
+        // a tiny cursor from the 1x images only).
+        if (wlr_output.scale > 1) server.cursor.xcursor.load(wlr_output.scale) catch {};
         m.syncRect();
         log.info("output {s}: {d}x{d}", .{ name, out.rect.w, out.rect.h });
         server.scheduleManage();
@@ -99,6 +110,11 @@ pub const Monitor = struct {
         const m: *Monitor = @fieldParentPtr("destroy", listener);
         const server = m.server;
         log.info("output {s} removed", .{m.wlr_output.name});
+
+        // Its panels and launchers close with it; nothing is arranged on it
+        // from here on.
+        m.gone = true;
+        layer.closeOn(server, m);
 
         manage.removeOutput(server.wm, m.out, server.nowMs());
         m.frame.link.remove();

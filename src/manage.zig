@@ -167,6 +167,15 @@ pub fn setOutputRect(wm: *WindowManager, out: *Output, rect: types.Rect, now: u6
     wm.monitors.changed(now);
 }
 
+/// The part of the monitor layer-shell bars and panels leave free (null: all
+/// of it). The compositor calls it after every arrangement of the layer
+/// surfaces; windows are placed inside it (`Output.workArea`).
+pub fn setOutputUsable(wm: *WindowManager, out: *Output, usable: ?types.Rect) void {
+    if (std.meta.eql(out.usable, usable)) return;
+    out.usable = usable;
+    backend.manageDirty(wm.obj);
+}
+
 pub fn setOutputInfo(wm: *WindowManager, out: *Output, name: []const u8, make: ?[]const u8, model_name: ?[]const u8, description: ?[]const u8, scale: i32, now: u64) void {
     out.mon.name.set(name);
     if (make) |s| out.mon.make.set(s);

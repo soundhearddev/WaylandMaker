@@ -180,6 +180,9 @@ bind_layout = "current"
 -- float_resize and the volume / brightness keys) the same way. repeat_rate = 0 turns it off.
 repeat_rate = 25                 -- keys per second
 repeat_delay = 600               -- ms until it starts
+tap_to_click = true              -- touchpad: a tap is a click (and tap-and-drag drags)
+natural_scroll = false           -- true: the page follows the fingers
+disable_while_typing = true      -- touchpad: ignore the pointer while typing
 repeat_binds = true              -- false: a bind fires once per press, however long it is held
 
 -- The keymap of the keyboards. Empty = not set: then XKB_DEFAULT_LAYOUT & co,

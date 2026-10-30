@@ -58,6 +58,16 @@ pub fn read() Names {
         fromVconsole(text, &names);
         if (names.layout[0] != 0) return names;
     }
+    // Arch & co. keep the locale here; a TTY login may not have exported it.
+    if (readFile("/etc/locale.conf", &buf)) |text| {
+        if (shellValue(text, "LC_ALL") orelse shellValue(text, "LC_MESSAGES") orelse shellValue(text, "LANG")) |v| {
+            if (localeLayout(v)) |layout| {
+                Names.set(&names.layout, layout);
+                log.info("no keyboard setting found, taking the layout from /etc/locale.conf ({s})", .{v});
+                return names;
+            }
+        }
+    }
     fromLocale(&names);
     return names;
 }

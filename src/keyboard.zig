@@ -77,7 +77,9 @@ pub const Keyboard = struct {
         }
 
         // The focus was decided before there was a keyboard.
-        if (server.focused) |v| if (v.toplevel) |t| server.enterKeyboard(t.base.surface);
+        if (server.layer_focus) |l| {
+            server.enterKeyboard(l.surface.surface);
+        } else if (server.focused) |v| if (v.toplevel) |t| server.enterKeyboard(t.base.surface);
     }
 
     /// config.lua (`keyboard_layout` & co) first, then XKB_DEFAULT_* (which

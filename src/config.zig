@@ -346,6 +346,13 @@ pub const Config = struct {
     repeat_delay: u32 = 600,
     /// false: a bind fires once per press, however long the key is held.
     repeat_binds: bool = true,
+    /// Touchpads: a tap is a click, and a tap-and-drag drags.
+    tap_to_click: bool = true,
+    /// Touchpads and mice: the content follows the fingers (scrolling up
+    /// moves the page up).
+    natural_scroll: bool = false,
+    /// Touchpads: no pointer movement while typing.
+    disable_while_typing: bool = true,
 
     // ---- Dock and Clip (dock_model.zig, dock_scene.zig) --------------------------
     /// Draw the Dock: a column of tiles on one screen edge. Its first tile is

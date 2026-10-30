@@ -29,6 +29,9 @@ const Decoration = @import("view.zig").Decoration;
 const Keyboard = @import("keyboard.zig").Keyboard;
 const Cursor = @import("cursor.zig").Cursor;
 const DockUi = @import("dock_scene.zig").DockUi;
+const layer = @import("layer.zig");
+const LayerSurface = layer.LayerSurface;
+const libinput = @import("libinput.zig");
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
@@ -54,6 +57,19 @@ pub const Server = struct {
     dock_above: *wlr.SceneTree,
     dock_ui: *DockUi = undefined,
 
+    /// wlr-layer-shell: one scene tree per layer (background, bottom, top,
+    /// overlay). Background and bottom lie under the windows, top over the
+    /// windows but under a fullscreen one, overlay over everything.
+    layer_trees: [layer.layer_count]*wlr.SceneTree,
+    /// Popups of layer surfaces, above all of it.
+    layer_popups: *wlr.SceneTree,
+    layer_shell: *wlr.LayerShellV1,
+    layer_surfaces: wl.list.Head(LayerSurface, .link) = undefined,
+    /// The layer surface that holds the keyboard (a launcher), if any. While
+    /// it does, the model's focused window stays `focused` but is not given
+    /// the keyboard.
+    layer_focus: ?*LayerSurface = null,
+
     xdg_shell: *wlr.XdgShell,
     seat: *wlr.Seat,
     cursor: Cursor = undefined,
@@ -76,6 +92,7 @@ pub const Server = struct {
     new_toplevel: wl.Listener(*wlr.XdgToplevel) = .init(onNewToplevel),
     new_popup: wl.Listener(*wlr.XdgPopup) = .init(onNewPopup),
     new_decoration: wl.Listener(*wlr.XdgToplevelDecorationV1) = .init(onNewDecoration),
+    new_layer_surface: wl.Listener(*wlr.LayerSurfaceV1) = .init(onNewLayerSurface),
     layout_change: wl.Listener(*wlr.OutputLayout) = .init(onLayoutChange),
     request_set_cursor: wl.Listener(*wlr.Seat.event.RequestSetCursor) = .init(onRequestSetCursor),
     request_set_selection: wl.Listener(*wlr.Seat.event.RequestSetSelection) = .init(onRequestSetSelection),
@@ -97,6 +114,9 @@ pub const Server = struct {
         const renderer = try wlr.Renderer.autocreate(wlr_backend);
         const output_layout = try wlr.OutputLayout.create(wl_server);
         const scene = try wlr.Scene.create();
+        // Created first, so they lie under everything else.
+        const layer_background = try scene.tree.createSceneTree();
+        const layer_bottom = try scene.tree.createSceneTree();
 
         server.* = .{
             .gpa = gpa,
@@ -117,11 +137,20 @@ pub const Server = struct {
                 try scene.tree.createSceneTree(),
             },
             .dock_above = try scene.tree.createSceneTree(),
+            .layer_trees = .{
+                layer_background,
+                layer_bottom,
+                try scene.tree.createSceneTree(),
+                try scene.tree.createSceneTree(),
+            },
+            .layer_popups = try scene.tree.createSceneTree(),
+            .layer_shell = try wlr.LayerShellV1.create(wl_server, 4),
             .xdg_shell = try wlr.XdgShell.create(wl_server, 6),
             .seat = try wlr.Seat.create(wl_server, "seat0"),
         };
         server.keyboards.init();
         server.monitors.init();
+        server.layer_surfaces.init();
 
         try renderer.initServer(wl_server);
         _ = try wlr.Compositor.create(wl_server, 6, renderer);
@@ -143,11 +172,15 @@ pub const Server = struct {
         // Created last in the scene, so raised into its place: above the
         // floating windows, below the fullscreen ones.
         server.dock_above.node.placeAbove(&server.layers[1].node);
+        // The top layer (panels) is over the windows and the Dock but under
+        // a fullscreen window; the overlay layer and the popups stay on top.
+        server.layer_trees[2].node.placeAbove(&server.dock_above.node);
         server.dock_ui = try DockUi.create(server);
 
         wlr_backend.events.new_output.add(&server.new_output);
         wlr_backend.events.new_input.add(&server.new_input);
         output_layout.events.change.add(&server.layout_change);
+        server.layer_shell.events.new_surface.add(&server.new_layer_surface);
         server.xdg_shell.events.new_toplevel.add(&server.new_toplevel);
         server.xdg_shell.events.new_popup.add(&server.new_popup);
         decoration.events.new_toplevel_decoration.add(&server.new_decoration);
@@ -180,6 +213,7 @@ pub const Server = struct {
         server.new_toplevel.link.remove();
         server.new_popup.link.remove();
         server.new_decoration.link.remove();
+        server.new_layer_surface.link.remove();
         server.request_set_cursor.link.remove();
         server.request_set_selection.link.remove();
         server.request_set_primary.link.remove();
@@ -373,6 +407,10 @@ pub const Server = struct {
         }
         server.focused = view;
 
+        // A launcher holding the keyboard keeps it; the window is only
+        // remembered (and given the keyboard when the launcher goes).
+        if (server.layer_focus != null) return;
+
         const v = view orelse {
             server.seat.keyboardNotifyClearFocus();
             return;
@@ -380,6 +418,38 @@ pub const Server = struct {
         const toplevel = v.toplevel orelse return;
         _ = toplevel.setActivated(true);
         server.enterKeyboard(toplevel.base.surface);
+    }
+
+    /// A layer surface takes the keyboard (null: it lets go and the focused
+    /// window gets it back).
+    pub fn setLayerFocus(server: *Server, ls: ?*LayerSurface) void {
+        if (server.layer_focus == ls) return;
+        server.layer_focus = ls;
+        if (ls) |l| {
+            if (server.focused) |v| if (v.toplevel) |t| {
+                _ = t.setActivated(false);
+            };
+            server.enterKeyboard(l.surface.surface);
+            return;
+        }
+        const v = server.focused orelse {
+            server.seat.keyboardNotifyClearFocus();
+            return;
+        };
+        const toplevel = v.toplevel orelse {
+            server.seat.keyboardNotifyClearFocus();
+            return;
+        };
+        _ = toplevel.setActivated(true);
+        server.enterKeyboard(toplevel.base.surface);
+    }
+
+    /// Clicking a window ends a keyboard focus a layer surface was given by a
+    /// click; an exclusive grab (launcher, lock) stays.
+    pub fn releaseOnDemandFocus(server: *Server) void {
+        const ls = server.layer_focus orelse return;
+        if (ls.surface.current.keyboard_interactive == .exclusive) return;
+        server.setLayerFocus(null);
     }
 
     /// Hand the keyboard to `surface` (also when a keyboard appears after the
@@ -407,6 +477,8 @@ pub const Server = struct {
     pub fn syncOutputRects(server: *Server) void {
         var it = server.monitors.iterator(.forward);
         while (it.next()) |m| m.syncRect();
+        // Where an output lies changed: bars and panels follow.
+        layer.arrangeAll(server);
         server.scheduleManage();
     }
 
@@ -417,7 +489,10 @@ pub const Server = struct {
                 log.err("cannot use keyboard {?s}: {t}", .{ device.name, err });
                 return;
             },
-            .pointer => server.cursor.attach(device),
+            .pointer => {
+                server.cursor.attach(device);
+                libinput.configure(&server.wm.cfg, device);
+            },
             else => return,
         }
         server.seat.setCapabilities(.{
@@ -429,6 +504,11 @@ pub const Server = struct {
     fn onNewToplevel(listener: *wl.Listener(*wlr.XdgToplevel), toplevel: *wlr.XdgToplevel) void {
         const server: *Server = @fieldParentPtr("new_toplevel", listener);
         View.create(server, toplevel) catch |err| log.err("cannot create a window: {t}", .{err});
+    }
+
+    fn onNewLayerSurface(listener: *wl.Listener(*wlr.LayerSurfaceV1), wlr_ls: *wlr.LayerSurfaceV1) void {
+        const server: *Server = @fieldParentPtr("new_layer_surface", listener);
+        layer.create(server, wlr_ls);
     }
 
     fn onNewPopup(listener: *wl.Listener(*wlr.XdgPopup), popup: *wlr.XdgPopup) void {
