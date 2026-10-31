@@ -110,15 +110,14 @@ const Model = struct {
     /// Every window on the first workspace of the first output, `per_col` to a column.
     fn placeAll(m: *Model, per_col: usize) !void {
         const ws = &m.outs[0].workspaces[0];
+        defer m.wm.cfg.new_window = .new_column;
         for (m.wins, 0..) |w, i| {
+            // Every window is placed once: the first of each group opens a
+            // column, the others join the active one (a stack). (This used
+            // to place every window as a new column first, take it out
+            // again and place it a second time.)
+            m.wm.cfg.new_window = if (per_col > 1 and i % per_col != 0) .stack else .new_column;
             try workspace.placeTiled(&m.wm, ws, w);
-            if (per_col > 1 and i % per_col != 0) {
-                // Fold into the column of the previous window: a stack.
-                workspace.unplace(&m.wm, w);
-                m.wm.cfg.new_window = .stack;
-                try workspace.placeTiled(&m.wm, ws, w);
-                m.wm.cfg.new_window = .new_column;
-            }
         }
     }
 };
@@ -129,6 +128,12 @@ const Case = struct {
     name: []const u8,
     n: usize,
     stat: perf.Stat,
+    /// Every single run in ns, sorted. perf.Stat's histogram rounds a
+    /// percentile up to the top of a power-of-two bucket of microseconds (and
+    /// never above the maximum), so below 2 us it reports the maximum for
+    /// p50, p95 and p99 alike -- useless for the sub-microsecond cases of an
+    /// optimized build. The percentiles in the table come from here.
+    samples: []u64,
     /// Mean budget in µs for optimized builds; 0: none.
     budget_us: u64,
 };
@@ -140,17 +145,44 @@ fn nowNs(io: std.Io) u64 {
     return perf.nowNs(io);
 }
 
+/// Nearest-rank percentile of sorted samples (ns).
+fn pct(sorted: []const u64, p: usize) u64 {
+    if (sorted.len == 0) return 0;
+    const rank = @max(1, (sorted.len * p + 99) / 100);
+    return sorted[rank - 1];
+}
+
+/// Sort the samples and file the case. On success it owns `samples` (the
+/// caller's `errdefer` frees them if this fails).
+fn addCase(name: []const u8, n: usize, st: perf.Stat, samples: []u64, budget_us: u64) !void {
+    std.mem.sort(u64, samples, {}, std.sort.asc(u64));
+    try cases.append(gpa_state, .{ .name = name, .n = n, .stat = st, .samples = samples, .budget_us = budget_us });
+}
+
+fn freeCases() void {
+    for (cases.items) |c| gpa_state.free(c.samples);
+    cases.deinit(gpa_state);
+}
+
 /// Run `f` `reps` times, each timed on its own, into a new case.
 fn measure(io: std.Io, name: []const u8, n: usize, reps: usize, budget_us: u64, ctx: anytype, comptime f: anytype) !void {
+    // A few untimed calls first: the first one pays for cold caches and page
+    // faults, which showed up as an outlier in `max`.
+    var warm: usize = 0;
+    while (warm < @min(reps, 3)) : (warm += 1) try f(ctx);
+
+    const samples = try gpa_state.alloc(u64, reps);
+    errdefer gpa_state.free(samples);
     var st: perf.Stat = .{};
-    var i: usize = 0;
-    while (i < reps) : (i += 1) {
+    for (samples) |*slot| {
         const t0 = nowNs(io);
         try f(ctx);
         std.mem.doNotOptimizeAway(ctx);
-        st.record(nowNs(io) - t0);
+        const dt = nowNs(io) - t0;
+        slot.* = dt;
+        st.record(dt);
     }
-    try cases.append(gpa_state, .{ .name = name, .n = n, .stat = st, .budget_us = budget_us });
+    try addCase(name, n, st, samples, budget_us);
 }
 
 fn repsFor(n: usize, quick: bool) usize {
@@ -208,15 +240,15 @@ fn runCases(io: std.Io, gpa: std.mem.Allocator, quick: bool) !void {
             const m = try Model.init(gpa, 1, n);
             defer m.deinit();
             try m.placeAll(1);
-            try measure(io, "layout columns, follow", n, reps, budget(n, 30, 4000), LayoutCtx{ .m = m, .follow = true }, runLayout);
-            try measure(io, "layout columns", n, reps, budget(n, 30, 4000), LayoutCtx{ .m = m, .follow = false }, runLayout);
-            try measure(io, "invariants", n, reps, budget(n, 60, 6000), m, runCheck);
+            try measure(io, "layout columns, follow", n, reps, budget(n, 30, 40), LayoutCtx{ .m = m, .follow = true }, runLayout);
+            try measure(io, "layout columns", n, reps, budget(n, 30, 40), LayoutCtx{ .m = m, .follow = false }, runLayout);
+            try measure(io, "invariants", n, reps, budget(n, 60, 60), m, runCheck);
         }
         {
             const m = try Model.init(gpa, 1, n);
             defer m.deinit();
             try m.placeAll(4);
-            try measure(io, "layout stacks of 4", n, reps, budget(n, 30, 4000), LayoutCtx{ .m = m, .follow = true }, runLayout);
+            try measure(io, "layout stacks of 4", n, reps, budget(n, 30, 40), LayoutCtx{ .m = m, .follow = true }, runLayout);
         }
         // placing and moving
         {
@@ -224,22 +256,26 @@ fn runCases(io: std.Io, gpa: std.mem.Allocator, quick: bool) !void {
             defer m.deinit();
             var mv = MoveCtx{ .m = m, .to = 1 };
             try m.placeAll(1);
-            try measure(io, "move all windows", n, @max(3, reps / 4), budget(n, 120, 15000), &mv, runMove);
+            try measure(io, "move all windows", n, @max(3, reps / 4), budget(n, 120, 150), &mv, runMove);
         }
         {
-            // Placement cost: build a fresh model each time (timed together
-            // with the allocation, which is part of what a user sees).
+            // Placement cost: a fresh model each time, because placing needs
+            // unplaced windows. Only the placing is timed (columns are
+            // allocated in it), not building the model.
             var st: perf.Stat = .{};
-            var i: usize = 0;
             const rr = @max(3, reps / 10);
-            while (i < rr) : (i += 1) {
+            const samples = try gpa.alloc(u64, rr);
+            errdefer gpa.free(samples);
+            for (samples) |*slot| {
                 const m = try Model.init(gpa, 1, n);
+                defer m.deinit();
                 const t0 = nowNs(io);
                 try m.placeAll(1);
-                st.record(nowNs(io) - t0);
-                m.deinit();
+                const dt = nowNs(io) - t0;
+                slot.* = dt;
+                st.record(dt);
             }
-            try cases.append(gpa, .{ .name = "place all windows", .n = n, .stat = st, .budget_us = budget(n, 60, 8000) });
+            try addCase("place all windows", n, st, samples, budget(n, 60, 80));
         }
     }
 
@@ -271,10 +307,13 @@ fn runCases(io: std.Io, gpa: std.mem.Allocator, quick: bool) !void {
     }
 }
 
-fn budget(n: usize, per_window_ns: u64, floor_us: u64) u64 {
-    // About ten times the cost measured on a laptop, with a floor so that the
-    // small cases do not fail on a noisy machine.
-    return @max(floor_us, per_window_ns * 10 * n / 1000 + floor_us / 8);
+fn budget(n: usize, per_window_ns: u64, base_us: u64) u64 {
+    // About ten times the cost per window measured on a laptop, plus a small
+    // fixed part so that the small cases do not fail on a noisy machine.
+    // (The fixed part used to be a floor of 4-15 ms: `@max(floor, ...)` was
+    // always the floor, so no budget depended on `n` and a layout that had
+    // become quadratic, ~1 ms at 1000 windows, would have passed.)
+    return base_us + per_window_ns * 10 * n / 1000;
 }
 
 // ---- output ----------------------------------------------------------------------
@@ -287,14 +326,14 @@ fn printTable(w: *std.Io.Writer, csv: bool) !void {
     if (csv) {
         try w.writeAll("case,windows,runs,mean_us,p50_us,p95_us,p99_us,max_us\n");
         for (cases.items) |c| try w.print("{s},{d},{d},{d:.2},{d:.2},{d:.2},{d:.2},{d:.2}\n", .{
-            c.name, c.n, c.stat.count, us(c.stat.meanNs()), us(c.stat.percentileNs(50)), us(c.stat.percentileNs(95)), us(c.stat.percentileNs(99)), us(c.stat.max_ns),
+            c.name, c.n, c.stat.count, us(c.stat.meanNs()), us(pct(c.samples, 50)), us(pct(c.samples, 95)), us(pct(c.samples, 99)), us(c.stat.max_ns),
         });
         return;
     }
     try w.print("wmaker-wl model benchmark ({s} build); times per call in microseconds\n\n", .{@tagName(builtin.mode)});
     try w.print("{s:<30} {s:>7} {s:>6} {s:>11} {s:>11} {s:>11} {s:>11} {s:>11}\n", .{ "case", "n", "runs", "mean", "p50", "p95", "p99", "max" });
-    for (cases.items) |c| try w.print("{s:<30} {d:>7} {d:>6} {d:>11.1} {d:>11.1} {d:>11.1} {d:>11.1} {d:>11.1}\n", .{
-        c.name, c.n, c.stat.count, us(c.stat.meanNs()), us(c.stat.percentileNs(50)), us(c.stat.percentileNs(95)), us(c.stat.percentileNs(99)), us(c.stat.max_ns),
+    for (cases.items) |c| try w.print("{s:<30} {d:>7} {d:>6} {d:>11.2} {d:>11.2} {d:>11.2} {d:>11.2} {d:>11.2}\n", .{
+        c.name, c.n, c.stat.count, us(c.stat.meanNs()), us(pct(c.samples, 50)), us(pct(c.samples, 95)), us(pct(c.samples, 99)), us(c.stat.max_ns),
     });
 }
 
@@ -329,8 +368,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    defer freeCases(); // before runCases: a failing case still frees what it filed
     try runCases(io, gpa, quick);
-    defer cases.deinit(gpa);
 
     var buf: [8192]u8 = undefined;
     var fw = std.Io.File.stdout().writer(io, &buf);
@@ -354,6 +393,10 @@ test "bench: a small model is built, laid out and checked" {
     const m = try Model.init(std.testing.allocator, 2, 20);
     defer m.deinit();
     try m.placeAll(3);
+    // 20 windows, three to a column: seven columns (six of three, one of two).
+    // Without this the "stacks of 4" case could silently measure single columns.
+    try std.testing.expectEqual(@as(usize, 7), m.outs[0].workspaces[0].strip.columns.length());
+    try std.testing.expectEqual(config.NewWindowMode.new_column, m.wm.cfg.new_window);
     layout.compute(m.outs[0].ws(), &m.wm.cfg, true);
     try std.testing.expect(invariants.check(&m.wm).clean());
     var mv = MoveCtx{ .m = m, .to = 2 };

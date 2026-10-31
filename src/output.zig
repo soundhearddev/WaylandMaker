@@ -13,6 +13,7 @@ const model = @import("model.zig");
 const types = model.types;
 const backend = @import("backend.zig");
 const manage = @import("manage.zig");
+const perf = @import("perf.zig");
 
 const layer = @import("layer.zig");
 const Server = @import("server.zig").Server;
@@ -91,7 +92,9 @@ pub const Monitor = struct {
 
     fn onFrame(listener: *wl.Listener(*wlr.Output), _: *wlr.Output) void {
         const m: *Monitor = @fieldParentPtr("frame", listener);
+        const span = perf.start(m.server.wm.io, .render);
         _ = m.scene_output.commit(null);
+        _ = perf.stop(m.server.wm.io, span);
         var now: std.posix.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.CLOCK.MONOTONIC, &now);
         m.scene_output.sendFrameDone(&now);

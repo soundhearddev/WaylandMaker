@@ -21,6 +21,7 @@ const backend = @import("backend.zig");
 const manage = @import("manage.zig");
 const boot = @import("boot.zig");
 const diag = @import("diag.zig");
+const perf = @import("perf.zig");
 
 const Monitor = @import("output.zig").Monitor;
 const View = @import("view.zig").View;
@@ -344,6 +345,11 @@ pub const Server = struct {
 
     fn runManage(server: *Server) void {
         server.manage_idle = null;
+        // The whole pass, what the user waits for: the model (layout and
+        // all), the config, the Dock. Feeds `perf` (SIGUSR1 dump) and the
+        // slow-pass warning, which had no caller until now.
+        const span = perf.start(server.wm.io, .manage);
+        defer _ = perf.stop(server.wm.io, span);
         manage.run(server.wm, server.sink(), server.nowMs());
         server.applyConfig();
         // The Dock shows what the pass decided (tiles, workspace, config).

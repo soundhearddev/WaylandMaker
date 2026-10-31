@@ -151,6 +151,10 @@ pub const Model = struct {
     /// are already in the convention of the corner the config names, so
     /// that first call must not mirror them.
     laid_out: bool = false,
+    /// Fingerprint of everything `setRunning` / `pruneAttached` read, taken
+    /// after they last ran (dockhost.syncModel): while it still matches, a
+    /// manage pass does not run them again. 0: never ran.
+    running_sig: u64 = 0,
 
     pub const Error = error{ OutOfMemory, Full, NoDrawer };
 

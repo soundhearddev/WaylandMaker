@@ -20,11 +20,13 @@ const std = @import("std");
 const log = std.log.scoped(.perf);
 
 pub const Probe = enum {
-    /// A whole manage sequence (main.onManage).
+    /// A whole manage pass (Server.runManage): model, config, Dock.
     manage,
-    /// layout.compute for all outputs.
+    /// layout.compute for all outputs. Not measured at the moment
+    /// (manage.run runs in tests without a usable `io`); `manage` includes it.
     layout,
-    /// A whole render sequence.
+    /// What the scene needs to draw one frame of one output
+    /// (`Monitor.onFrame`: wlr_scene_output_commit).
     render,
     /// invariants.check (only with WMAKER_CHECKS=1).
     checks,

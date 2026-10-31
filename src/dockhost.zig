@@ -195,6 +195,15 @@ pub fn syncModel(wm: *WindowManager, m: *dock_model.Model) bool {
     }
     if (live_complete and m.pruneMinimized(live.items)) changed = true;
 
+    // Who is running. This is the expensive part of the pass -- every tile
+    // against every window, `DockApp.matches` doing several case-insensitive
+    // compares each -- and it ran on EVERY manage pass, so on every frame of
+    // an animation, although it only has to run when a window came, went or
+    // changed its app_id, or a tile changed. The fingerprint covers exactly
+    // what it reads; the results are a pure function of that.
+    const sig_before = runningSignature(wm, m);
+    if (sig_before == m.running_sig) return changed;
+
     var ids: std.ArrayList([]const u8) = .empty;
     defer ids.deinit(wm.gpa);
     var ids_complete = true;
@@ -221,7 +230,61 @@ pub fn syncModel(wm: *WindowManager, m: *dock_model.Model) bool {
     if (!ids_complete) return changed;
     if (m.setRunning(ids.items)) changed = true;
     if (m.pruneAttached()) changed = true;
+    // Taken after the update, which changed flags and maybe removed tiles:
+    // the next pass with nothing new then matches it.
+    m.running_sig = runningSignature(wm, m);
     return changed;
+}
+
+fn fnv(h: u64, bytes: []const u8) u64 {
+    var x = h;
+    for (bytes) |b| {
+        x ^= b;
+        x *%= 0x100000001b3;
+    }
+    // The length too, so that ("ab", "c") and ("a", "bc") differ.
+    x ^= @as(u64, bytes.len);
+    x *%= 0x100000001b3;
+    return x;
+}
+
+fn fnvInt(h: u64, v: u64) u64 {
+    var x = v;
+    return fnv(h, std.mem.asBytes(&x));
+}
+
+/// A fingerprint of the inputs of `setRunning` and `pruneAttached`: the
+/// app_id of every open window and DockApp, and per tile everything
+/// `DockApp.matches` looks at plus the flags those two functions read or write.
+fn runningSignature(wm: *WindowManager, m: *const dock_model.Model) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    var it = wm.windows.first();
+    while (it) |w| : (it = types.nextWindow(w, wm)) {
+        if (w.closed) continue;
+        h = fnv(h, w.app_id orelse continue);
+    }
+    h = fnvInt(h, 1); // windows end, DockApps begin
+    var dit = wm.dock_windows.first();
+    while (dit) |w| : (dit = types.nextDockWindow(w, wm)) {
+        if (w.closed) continue;
+        h = fnv(h, w.app_id orelse continue);
+    }
+    h = fnvInt(h, 2);
+    for (m.slots.items) |s| {
+        var flags: u64 = 0;
+        if (s.alive) flags |= 1;
+        if (s.running) flags |= 2;
+        if (s.launching) flags |= 4;
+        if (s.app.attached) flags |= 8;
+        if (s.app.mini_window != 0) flags |= 16;
+        if (s.app.app_id != null) flags |= 32;
+        h = fnvInt(h, flags);
+        h = fnv(h, s.app.name);
+        h = fnv(h, s.app.app_id orelse "");
+        h = fnvInt(h, @as(u64, s.app.command.len));
+        for (s.app.command) |arg| h = fnv(h, arg);
+    }
+    return h;
 }
 
 /// The DockApp window that belongs to `app`'s tile, if one is running.

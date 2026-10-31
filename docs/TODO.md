@@ -131,6 +131,21 @@ Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the 
 - [ ] Tests of the example DockApps run only with `test-all`.
 - [ ] A fuzz test for the Lua config loader (the XPM and menu parsers have one).
 
+### Benchmark improvements
+
+- [ ] **Increase sample sizes.** Run at least 1,000 measured iterations per test case where practical, especially for `place all windows` and benchmarks with 1,000 windows.
+- [ ] **Add warm-up iterations.** Execute and discard initial iterations before collecting measurements to reduce startup and initialization effects.
+- [ ] **Expand window-count coverage.** Benchmark 1, 10, 50, 100, 500, and 1,000 windows to identify scaling trends and potential bottlenecks.
+- [ ] **Improve percentile reliability.** Report p50, p95, p99, and max only when enough samples are available; document sample counts and avoid overinterpreting sparse tails.
+- [ ] **Measure allocations.** Track allocation counts and allocated bytes per operation, particularly for layout recalculation, `move all windows`, and `place all windows`.
+- [ ] **Separate benchmark overhead.** Measure timer and harness overhead, use sufficiently long batches, and verify that measurement overhead does not dominate short operations.
+- [ ] **Repeat benchmark runs.** Run each benchmark multiple times and report per-run results or aggregate statistics to identify system noise and inconsistent results.
+- [ ] **Add regression tracking.** Save benchmark results as machine-readable output and compare against a baseline to detect performance regressions between commits.
+- [ ] **Profile expensive operations.** Investigate outliers in `invariants`, `outputs: order+primary`, and `monitors: rules+profile` to distinguish measurement noise from actual bottlenecks.
+- [ ] **Benchmark the real compositor.** Measure manage and render paths with real Wayland clients at 1, 10, 50, and 100 windows, including p50/p95/p99 and maximum latency.
+- [ ] **Measure end-to-end frame performance.** Track frame times and missed frame deadlines separately from internal model-operation timings.
+- [ ] **Document benchmark scope.** Explicitly distinguish ReleaseSafe model benchmarks from live compositor measurements, including hardware, compiler version, build flags, and test conditions.
+
 ## Small things
 
 - [ ] **Remove `protocol/`**: fetch `wlr-protocols` as a pinned dependency instead of keeping a copy of its XML, and prune
