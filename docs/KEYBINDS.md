@@ -67,6 +67,9 @@ Order: `environment` is set; with `import_environment = true` (default) `WAYLAND
 `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE` and the names in `environment` are given to D-Bus and
 `systemd --user` (`dbus-update-activation-environment --systemd`), because programs started by
 D-Bus (portals, notification daemons) otherwise cannot find the compositor; then the programs start.
+The import runs in a shell of its own while the compositor already shows its first frame (it used
+to delay the start of the compositor itself); the programs and `READY=1` follow when it is done
+(at most six seconds later).
 A program that cannot be started is a warning in the log. DockApps with `AutoLaunch = Yes` in
 WMState start as before.
 

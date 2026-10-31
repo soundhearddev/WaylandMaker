@@ -142,6 +142,56 @@ pub fn setActualSize(win: *Window, w: i32, h: i32) void {
     win.ready = w > 0 and h > 0;
 }
 
+/// What a toplevel has said about its size before it is mapped.
+pub const InitialHints = struct { min_w: i32 = 0, min_h: i32 = 0, max_w: i32 = 0, max_h: i32 = 0 };
+pub const InitialSize = struct { w: i32, h: i32 };
+
+/// The size a NEW window will be given by the first manage pass, worked out
+/// before there is a `Window` at all.
+///
+/// Why: a toplevel is only mapped (and only becomes a `Window`) after its
+/// first buffer, and that buffer is drawn for whatever size the very first
+/// configure said. That configure used to be 0x0, "pick your own size", so
+/// every client drew its first frame at its default size, was mapped, got its
+/// real size from the first pass and drew everything again: two renders, one
+/// of them thrown away, and a first visible frame that is the wrong one. With
+/// the size known here the first buffer is already the right one.
+///
+/// It must agree with `layout.compute` + `applyManage` for the plain case (a
+/// new tiled window in a new column) and say nothing for every case in which
+/// the window will not simply get a column of the default width: dialogs,
+/// windows that cannot be resized, floating or special rules, a window that
+/// stacks into an existing column, one that starts on another workspace.
+/// null then means "0x0, the client picks", which is what always happened.
+/// A wrong guess costs one more configure, like before; it never breaks.
+pub fn initialSize(wm: *WindowManager, app_id: ?[]const u8, has_parent: bool, hints: InitialHints) ?InitialSize {
+    const cfg = &wm.cfg;
+    if (has_parent) return null;
+    if (hints.min_w > 0 and hints.min_w == hints.max_w and hints.min_h > 0 and hints.min_h == hints.max_h) return null;
+
+    const out = types.workingOutput(wm) orelse return null;
+    const attrs = wm.attrs.lookup(app_id);
+    if (attrs.floating orelse false) return null;
+    if (attrs.is("omnipresent") or attrs.is("keep_on_top") or attrs.is("start_maximized") or attrs.is("unfocusable")) return null;
+    if (attrs.start_workspace != null) return null;
+    if (cfg.new_window == .stack and out.ws().strip.active != null) return null;
+
+    const work = out.workArea();
+    const bw: i32 = if (attrs.is("no_border")) 0 else cfg.border_width;
+    const outer_w = layout.columnWidthFor(work.w, cfg.default_column_width, cfg);
+    const col_h = @max(1, work.h - 2 * cfg.outer_gap);
+
+    // The same arithmetic as `layout.compute` (one window: the whole column)
+    // and `Window.clampSize`.
+    var w: i32 = @max(1, outer_w - 2 * bw);
+    var h: i32 = @max(1, col_h - 2 * bw);
+    w = @max(w, @max(cfg.min_window_size, hints.min_w));
+    h = @max(h, @max(cfg.min_window_size, hints.min_h));
+    if (hints.max_w > 0) w = @min(w, @max(hints.max_w, hints.min_w));
+    if (hints.max_h > 0) h = @min(h, @max(hints.max_h, hints.min_h));
+    return .{ .w = @max(1, w), .h = @max(1, h) };
+}
+
 /// A monitor appeared. `now` is milliseconds on a clock that only goes
 /// forward (the monitor manager settles after a quiet time).
 pub fn createOutput(wm: *WindowManager, obj: *backend.Output, now: u64) !*Output {
@@ -1068,6 +1118,44 @@ test "a new window is placed, sized to its column, focused and drawn with the fo
     try testing.expectEqual(f.wm.cfg.border_width, p.border_width);
     try testing.expect(p.rect.x >= 0 and p.rect.right() <= 1920);
     try testing.expect(p.raise);
+}
+
+test "initialSize is what the first pass then configures for a plain new window" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.pass(); // the output settles
+
+    const guess = initialSize(&f.wm, "foot", false, .{}).?;
+    const w = try f.open("foot");
+    f.pass();
+
+    const c = f.rec.lastConfigure(w).?;
+    try testing.expectEqual(guess.w, c.size.?.w);
+    try testing.expectEqual(guess.h, c.size.?.h);
+}
+
+test "initialSize says nothing where the window will not get a plain column" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.pass();
+
+    // A dialog, a window that cannot be resized.
+    try testing.expectEqual(@as(?InitialSize, null), initialSize(&f.wm, "foot", true, .{}));
+    try testing.expectEqual(@as(?InitialSize, null), initialSize(&f.wm, "foot", false, .{ .min_w = 300, .max_w = 300, .min_h = 200, .max_h = 200 }));
+
+    // Hints are honoured the way `clampSize` does.
+    const big = initialSize(&f.wm, "foot", false, .{ .min_w = 1500 }).?;
+    try testing.expectEqual(@as(i32, 1500), big.w);
+    const small = initialSize(&f.wm, "foot", false, .{ .max_w = 400 }).?;
+    try testing.expectEqual(@as(i32, 400), small.w);
+
+    // `new_window = stack` joins the column of the active window.
+    _ = try f.open("a");
+    f.pass();
+    f.wm.cfg.new_window = .stack;
+    try testing.expectEqual(@as(?InitialSize, null), initialSize(&f.wm, "foot", false, .{}));
 }
 
 test "nothing is sent twice: a second pass with no change configures nobody" {

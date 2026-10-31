@@ -14,11 +14,11 @@ const action = model.action;
 const workspace = model.workspace;
 const wm_files = model.wm_files;
 const style = @import("style.zig");
+const session = @import("session.zig");
 
 const WindowManager = types.WindowManager;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn system(command: [*:0]const u8) c_int;
 
 /// Everything derived from `wm.cfg` that must be (re)built together, because
 /// it all lives in `wm.cfg.arena`: the bind commands, the root menu, the
@@ -101,41 +101,43 @@ const session_vars = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_S
 /// file manager opened from a browser -- get their environment from there,
 /// not from us, so without this they cannot find the compositor.
 ///
-/// Runs synchronously (it takes a few milliseconds) so that everything
-/// started afterwards already finds the variables. A missing
-/// `dbus-update-activation-environment` is no error; `timeout` keeps a
-/// broken bus from holding up the session.
-pub fn importEnvironment(wm: *WindowManager) void {
-    var buf: [4096]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    w.writeAll("T=; command -v timeout >/dev/null 2>&1 && T='timeout 5'; V='" ++ session_vars) catch return;
+/// This used to run through `system()` BEFORE the backend was started, so the
+/// first frame waited for a shell, `timeout` and `dbus-update-activation-
+/// environment` (tens of milliseconds, up to five seconds on a broken bus).
+/// Now the shell is started in the background once the backend runs, and it
+/// sends us SIGUSR2 when it is done (`Server.onStartupDone`): only then do
+/// the `spawn_at_startup` programs start and `READY=1` go to systemd, so the
+/// order that matters -- environment imported, then programs, then "the
+/// session is up" -- is the same as before.
+///
+/// A missing `dbus-update-activation-environment` is no error; `timeout`
+/// keeps a broken bus from holding up the session.
+fn writeImportScript(w: *std.Io.Writer, wm: *WindowManager) !void {
+    try w.writeAll("T=; command -v timeout >/dev/null 2>&1 && T='timeout 5'; V='" ++ session_vars);
     for (wm.cfg.environment) |e| w.print(" {s}", .{e.name}) catch break;
-    w.writeAll("'; if command -v dbus-update-activation-environment >/dev/null 2>&1; then " ++
+    try w.writeAll("'; if command -v dbus-update-activation-environment >/dev/null 2>&1; then " ++
         "$T dbus-update-activation-environment --systemd $V; " ++
         "elif command -v systemctl >/dev/null 2>&1; then $T systemctl --user import-environment $V; fi " ++
-        ">/dev/null 2>&1") catch return;
-    const text = w.buffered();
-    if (text.len >= buf.len) return;
-    buf[text.len] = 0;
-
-    // `ignoreSigchld` makes the kernel reap children on its own, and then
-    // `system` cannot wait for its shell (it reports -1 although the command
-    // ran). The default action is put back for the time of the call.
-    const dfl: std.posix.Sigaction = .{
-        .handler = .{ .handler = std.posix.SIG.DFL },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    var previous: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.CHLD, &dfl, &previous);
-    const rc = system(@ptrCast(&buf));
-    std.posix.sigaction(.CHLD, &previous, null);
-    log.info("environment imported into D-Bus / systemd (status {d})", .{rc});
+        ">/dev/null 2>&1");
 }
 
-/// Run once at session start, never on a reload: the environment import,
-/// then every program of `spawn_at_startup`.
-pub fn runStartup(wm: *WindowManager) void {
-    if (wm.cfg.import_environment) importEnvironment(wm);
+/// Start the environment import in the background. True: a shell is running
+/// and will send SIGUSR2 to this process when it is done. False: it could not
+/// be started, the caller goes on without it.
+pub fn beginEnvironmentImport(wm: *WindowManager) bool {
+    var buf: [4352]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    writeImportScript(&w, wm) catch return false;
+    w.print("; kill -USR2 {d}", .{std.c.getpid()}) catch return false;
+    return model.proc.spawnChecked(wm, &.{ "/bin/sh", "-c", w.buffered() });
+}
+
+/// The environment is known to D-Bus and systemd (or there is nothing to
+/// import): start `spawn_at_startup`, then tell systemd the session is up.
+/// Run once at session start, never on a reload.
+pub fn finishStartup(wm: *WindowManager) void {
     for (wm.cfg.spawn_at_startup) |argv| model.proc.spawn(wm, argv);
+    // Under `Type=notify` (wmaker-wl.service) the session counts as up now,
+    // so graphical-session.target and what hangs on it can start.
+    session.notify("READY=1\nSTATUS=running");
 }

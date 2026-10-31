@@ -303,7 +303,7 @@ pub const Config = struct {
     /// program it starts inherits it.
     environment: []const EnvVar = &.{},
     /// At session start tell D-Bus and `systemd --user` about WAYLAND_DISPLAY
-    /// and friends (boot.importEnvironment), so portals and notification
+    /// and friends (boot.beginEnvironmentImport), so portals and notification
     /// daemons find the compositor.
     import_environment: bool = true,
 

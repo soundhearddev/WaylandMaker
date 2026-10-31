@@ -2,6 +2,15 @@ const std = @import("std");
 const Scanner = @import("wayland").Scanner;
 const session = @import("src/session.zig");
 
+/// ReleaseSafe makes Zig define _FORTIFY_SOURCE, and glibc's fortified
+/// headers (poll, open, ...) do not survive translate-c: the `@cImport`s fail
+/// with "expected type 'c_int', found 'bool'" or `__open_missing_mode`. The
+/// fortify wrappers add nothing here (Zig's own safety checks stay on), so
+/// every module that imports C headers switches it off.
+fn noFortify(module: *std.Build.Module) void {
+    module.addCMacro("_FORTIFY_SOURCE", "0");
+}
+
 /// The system libraries every wmaker-wl / wlprefs module draws with.
 fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
     const libs = [_][]const u8{
@@ -19,6 +28,7 @@ fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
     }
 
     module.addIncludePath(src_dir);
+    noFortify(module);
 }
 
 /// Cairo and Pango for the Dock's drawing and tests.
@@ -35,6 +45,7 @@ fn linkCairo(b: *std.Build, module: *std.Build.Module) void {
         module.linkSystemLibrary(name, .{ .use_pkg_config = .force });
     }
 
+    noFortify(module);
     module.addIncludePath(b.path("src"));
     module.addCSourceFile(.{
         .file = b.path("src/wm_text.c"),
@@ -194,7 +205,22 @@ pub fn installSession(b: *std.Build) void {
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // `zig build` used to mean Debug: no inlining, no vectorising, bounds and
+    // overflow checks on every access -- a compositor that is an order of
+    // magnitude slower than it has to be (docs/DEBUGGING.md: Debug timings are
+    // not representative). The default is now ReleaseSafe: optimised, and a
+    // broken invariant still stops with a trace instead of undefined
+    // behaviour. `-Doptimize=Debug` for debugging, `-Doptimize=ReleaseFast`
+    // to drop the checks as well, `--release=...` works as before.
+    const optimize = b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size (default: ReleaseSafe)",
+    ) orelse switch (b.release_mode) {
+        .off, .any, .safe => std.builtin.OptimizeMode.ReleaseSafe,
+        .fast => .ReleaseFast,
+        .small => .ReleaseSmall,
+    };
 
     const use_llvm = b.option(
         bool,

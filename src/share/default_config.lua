@@ -49,8 +49,8 @@ maximize_keep_focus = false      -- a new tiled window does not take the focus f
 -- ease-out-cubic | ease-out-expo. "off" turns that one animation off.
 animations = true                -- false: everything jumps
 anim_slowdown = 1.0              -- 2.0 = everything runs at half speed, 0.5 = twice as fast
-anim_window_movement = "spring 1.0 800 0.0001"   -- a tiled window moves (scroll, a column opens/closes/resizes)
-anim_window_open = "ease-out-cubic 250"          -- a new window is uncovered from its middle (niri: "ease-out-expo 150", abrupt)
+anim_window_movement = "spring 1.0 1800 0.001"   -- a tiled window moves (scroll, a column opens/closes/resizes); niri: "spring 1.0 800 0.0001" (~0.33 s, here ~0.16 s)
+anim_window_open = "ease-out-quad 80"            -- a new window is uncovered from its middle (was "ease-out-cubic 250"; niri: "ease-out-expo 150", abrupt; "off": it just appears)
 
 -- ---- look -------------------------------------------------------------------
 border_width = 2

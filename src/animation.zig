@@ -194,13 +194,22 @@ pub const Spec = union(enum) {
     spring: SpringSpec,
     easing: EasingSpec,
 
-    /// niri's default for window movement, resize and the horizontal view.
-    pub const default_movement: Spec = .{ .spring = .{ .damping_ratio = 1.0, .stiffness = 800.0, .epsilon = 0.0001 } };
+    /// Window movement, resize and the horizontal view. niri's default is
+    /// `spring 1.0 800 0.0001`, about 0.33 s until it is at rest, which on a
+    /// 60 Hz screen is twenty frames in which the strip is still sliding
+    /// into place. Here: the same critically damped curve (no overshoot) with
+    /// a stiffer spring, and an epsilon of a tenth of a pixel over 100 px,
+    /// which no eye sees but which ends the animation sooner: ~0.16 s, ten
+    /// frames, and ten frames fewer that the compositor has to run a whole
+    /// manage pass and a redraw for.
+    pub const default_movement: Spec = .{ .spring = .{ .damping_ratio = 1.0, .stiffness = 1800.0, .epsilon = 0.001 } };
     /// A window that opens. niri uses `ease-out-expo 150`, which shows about
     /// half of the window in the very first frame and is over after five: it
-    /// looks like a pop. A cubic over 250 ms starts gently and ends about when
-    /// the spring of the windows making room for it settles (~0.33 s).
-    pub const default_open: Spec = .{ .easing = .{ .curve = .@"ease-out-cubic", .duration_ms = 250 } };
+    /// looks like a pop. This used to be a cubic over 250 ms, a quarter of a
+    /// second in which a window that is ready to be used is still being
+    /// uncovered. An ease-out-quad over 80 ms is five frames: the first one
+    /// already shows a third of the window, the last one all of it.
+    pub const default_open: Spec = .{ .easing = .{ .curve = .@"ease-out-quad", .duration_ms = 80 } };
 
     // niri's limits (niri-config/src/animations.rs).
     pub const max_duration_ms: u32 = 60_000;
@@ -428,13 +437,13 @@ test "overdamped springs: no NaN, no crash (niri's two regression tests)" {
 
 test "Animation: easing runs for its duration, spring from -> to" {
     const open = Animation.init(Spec.default_open, 0, 1, 0, 1000).?;
-    try std.testing.expect(near(open.duration, 0.250, 1e-12));
+    try std.testing.expect(near(open.duration, 0.080, 1e-12));
     try std.testing.expectEqual(@as(f64, 0), open.valueAt(900)); // before the start
-    try std.testing.expect(open.valueAt(1125) > 0.5); // ease-out-cubic is fast at first ...
-    try std.testing.expect(open.valueAt(1016) < 0.25); // ... but the first 16 ms frame is no jump
-    try std.testing.expectEqual(@as(f64, 1), open.valueAt(1250));
-    try std.testing.expect(!open.isDone(1249));
-    try std.testing.expect(open.isDone(1250));
+    try std.testing.expect(open.valueAt(1040) > 0.5); // ease-out is fast at first ...
+    try std.testing.expect(open.valueAt(1016) < 0.4); // ... but the first 16 ms frame is no jump
+    try std.testing.expectEqual(@as(f64, 1), open.valueAt(1100));
+    try std.testing.expect(!open.isDone(1079));
+    try std.testing.expect(open.isDone(1081));
 
     const mv = Animation.init(Spec.default_movement, 500, 100, 0, 0).?; // downwards: from > to
     try std.testing.expectEqual(@as(f64, 500), mv.valueAt(0));
@@ -465,8 +474,8 @@ test "Spec: parse / format round trip and niri's limits" {
         const s = Spec.parse(txt).?;
         try std.testing.expectEqualStrings(txt, s.format(&buf));
     }
-    try std.testing.expectEqual(Spec.default_movement, Spec.parse("spring 1.0 800 0.0001").?);
-    try std.testing.expectEqual(Spec.default_open, Spec.parse("  ease-out-cubic   250 ").?);
+    try std.testing.expectEqual(Spec.default_movement, Spec.parse("spring 1.0 1800 0.001").?);
+    try std.testing.expectEqual(Spec.default_open, Spec.parse("  ease-out-quad   80 ").?);
 
     for ([_][]const u8{
         "",                       "spring",               "spring 1 800",        "spring 1 800 0.0001 9",
@@ -475,4 +484,21 @@ test "Spec: parse / format round trip and niri's limits" {
         "ease-in 150",            "ease-out-expo 150 1",  "off 1",               "spring a b c",
         "ease-out-expo 99999999",
     }) |txt| try std.testing.expectEqual(@as(?Spec, null), Spec.parse(txt));
+}
+
+test "the defaults are quick: opening under 0.1 s, movement at rest within 0.2 s, no overshoot" {
+    const open = Animation.init(Spec.default_open, 0, 1, 0, 0).?;
+    try std.testing.expect(open.duration <= 0.1);
+
+    const mv = Animation.init(Spec.default_movement, 0, 1000, 0, 0).?;
+    try std.testing.expect(mv.duration > 0.05 and mv.duration <= 0.2);
+    var t: f64 = 0;
+    var prev: f64 = 0;
+    while (t <= mv.duration * 1000.0 + 1.0) : (t += 1.0) {
+        const v = mv.valueAt(t);
+        try std.testing.expect(v >= prev - 1e-9); // critically damped: monotonic
+        try std.testing.expect(v <= 1000.0 + 1e-9); // never past the target
+        prev = v;
+    }
+    try std.testing.expectEqual(@as(f64, 1000), mv.valueAt(mv.duration * 1000.0 + 1.0));
 }

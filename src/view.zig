@@ -56,6 +56,12 @@ pub const View = struct {
     /// them have not changed, and the scene calls are skipped for those.
     last: ?Drawn = null,
     sent_maximized: bool = false,
+    /// What the first configure (answering the initial commit) already said:
+    /// the size and the tiled state a new window is given before it is
+    /// mapped. The first pass skips what it would only repeat, so the client
+    /// is not asked to draw twice for the same thing. Consumed by `configure`.
+    first_size: ?manage.InitialSize = null,
+    first_tiled: bool = false,
 
     commit: wl.Listener(*wlr.Surface) = .init(onCommit),
     map: wl.Listener(void) = .init(onMap),
@@ -113,9 +119,19 @@ pub const View = struct {
     pub fn configure(view: *View, c: manage.Configure) void {
         const toplevel = view.toplevel orelse return;
         if (!toplevel.base.initialized) return;
-        if (c.tiled) |t| _ = toplevel.setTiled(if (t) all_edges else .{});
+        // What the first configure said is not said again (`first_size`).
+        const first_size = view.first_size;
+        const first_tiled = view.first_tiled;
+        view.first_size = null;
+        view.first_tiled = false;
+        if (c.tiled) |t| {
+            if (!(t and first_tiled)) _ = toplevel.setTiled(if (t) all_edges else .{});
+        }
         if (c.fullscreen) |f| _ = toplevel.setFullscreen(f);
-        if (c.size) |s| _ = toplevel.setSize(s.w, s.h);
+        if (c.size) |s| {
+            const same = if (first_size) |fs| fs.w == s.w and fs.h == s.h else false;
+            if (!same) _ = toplevel.setSize(s.w, s.h);
+        }
     }
 
     pub fn place(view: *View, cfg: *const config.Config, p: manage.Placement) void {
@@ -221,7 +237,24 @@ pub const View = struct {
             // comes from the manage pass once the window is placed; 0x0 lets
             // the client pick until then.
             _ = toplevel.setWmCapabilities(.{ .fullscreen = true, .maximize = true, .minimize = true });
-            _ = toplevel.setSize(0, 0);
+            // Tell the client the size (and the tiled state) it will get
+            // anyway, so that its first buffer is already the right one
+            // (`manage.initialSize`). 0x0 where that is not known: it picks.
+            const cur = toplevel.current;
+            const guess = manage.initialSize(
+                view.server.wm,
+                if (toplevel.app_id) |s| std.mem.span(s) else null,
+                toplevel.parent != null,
+                .{ .min_w = cur.min_width, .min_h = cur.min_height, .max_w = cur.max_width, .max_h = cur.max_height },
+            );
+            if (guess) |g| {
+                _ = toplevel.setTiled(all_edges);
+                _ = toplevel.setSize(g.w, g.h);
+                view.first_size = g;
+                view.first_tiled = true;
+            } else {
+                _ = toplevel.setSize(0, 0);
+            }
             return;
         }
         if (view.win) |win| {

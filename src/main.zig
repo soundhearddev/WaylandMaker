@@ -132,6 +132,14 @@ pub fn main(init: std.process.Init) !void {
     };
     // Before anything is started: no program of ours may see the socket.
     session.captureNotifySocket();
+    // SIGUSR2 reports the end of the environment import (`Server.beginStartup`).
+    // It is blocked here, before any thread exists: the graphics stack starts
+    // some while the renderer is created, and a thread that inherited the
+    // signal unblocked could be handed it and die of its default action. Left
+    // pending, it is read from the signalfd of the event loop.
+    var usr2 = std.posix.sigemptyset();
+    std.posix.sigaddset(&usr2, .USR2);
+    std.posix.sigprocmask(std.posix.SIG.BLOCK, &usr2, null);
     config.config_path_override = cli.config_path;
     config.config_dir_override = cli.config_dir;
 
@@ -203,14 +211,11 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(socket);
     log.info("running on WAYLAND_DISPLAY={s} (config: {s})", .{ socket, wm.cfg.config_file });
 
-    // The socket exists and the session variables are exported: now D-Bus
-    // learns about them and `spawn_at_startup` runs. Clients that connect
-    // before the loop runs wait in the socket's queue.
-    boot.runStartup(wm);
-
-    // Under `Type=notify` (wmaker-wl.service) the session counts as up now,
-    // so graphical-session.target and what hangs on it can start.
-    session.notify("READY=1\nSTATUS=running");
+    // The socket exists and the session variables are exported. What used to
+    // follow here -- the D-Bus / systemd environment import, `spawn_at_startup`
+    // and READY=1 -- now starts from `server.run()`, after the backend is up
+    // (`Server.beginStartup`): the first frame no longer waits for a shell.
+    // Clients that connect before the loop runs wait in the socket's queue.
     defer session.notify("STOPPING=1");
 
     try server.run();

@@ -18,12 +18,16 @@ libpixman-1-dev`; wayland-protocols older than 1.44 needs `-Dcolor-manager-versi
 needs cairo, pango and glib. Lua 5.4 is built from source as a Zig dependency, so no system Lua is needed.
 
 ```sh
-zig build                                # wmaker-wl and wlprefs into zig-out/bin
+zig build                                # wmaker-wl and wlprefs into zig-out/bin (ReleaseSafe by default)
 zig build test                           # unit tests, no compositor needed
 zig build probe                          # can wlroots be used on this machine at all?
 zig build run                            # nested in the current session (WLR_BACKENDS=wayland)
 ./zig-out/bin/wmaker-wl                  # from a TTY: DRM + libinput, no other session needed
 ```
+
+`zig build` makes an optimised **ReleaseSafe** build by default (it used to be Debug, which is
+an order of magnitude slower and not meant for a compositor you sit in front of). For debugging use
+`-Doptimize=Debug`, to drop the safety checks as well `-Doptimize=ReleaseFast`.
 
 ## Install
 

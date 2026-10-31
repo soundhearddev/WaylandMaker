@@ -85,6 +85,10 @@ pub const Server = struct {
     /// Wakes the loop when monitor changes have been quiet long enough to
     /// apply the rules (`outputs.settle`); armed only while one is pending.
     settle_timer: ?*wl.EventSource = null,
+    /// Safety net of the start-up (`beginStartup`): if the environment import
+    /// never reports back, the session starts anyway.
+    startup_timer: ?*wl.EventSource = null,
+    startup_done: bool = false,
     quitting: bool = false,
 
     new_output: wl.Listener(*wlr.Output) = .init(onNewOutput),
@@ -205,6 +209,8 @@ pub const Server = struct {
         server.manage_idle = null;
         if (server.settle_timer) |t| t.remove();
         server.settle_timer = null;
+        if (server.startup_timer) |t| t.remove();
+        server.startup_timer = null;
         server.wl_server.destroyClients();
 
         server.new_output.link.remove();
@@ -244,7 +250,53 @@ pub const Server = struct {
     pub fn run(server: *Server) !void {
         try server.backend.start();
         server.scheduleManage();
+        server.beginStartup();
         server.wl_server.run();
+    }
+
+    // ---- start-up ----------------------------------------------------------------
+
+    /// How long the session waits for the environment import before it starts
+    /// without it (the shell has its own `timeout 5`).
+    const startup_timeout_ms: i32 = 6000;
+
+    /// The backend is running: the outputs are coming up and the first frame
+    /// is on its way. Only now does the D-Bus / systemd environment import
+    /// start, in a shell of its own; this process goes on to the event loop
+    /// instead of waiting for it. `spawn_at_startup` and READY=1 follow when
+    /// it reports back (SIGUSR2, `onStartupDone`), or when
+    /// `startup_timeout_ms` has passed.
+    fn beginStartup(server: *Server) void {
+        if (server.wm.cfg.import_environment and boot.beginEnvironmentImport(server.wm)) {
+            const timer = server.loop.addTimer(*Server, onStartupTimer, server) catch {
+                // No safety net: the signal is all there is.
+                return;
+            };
+            server.startup_timer = timer;
+            timer.timerUpdate(startup_timeout_ms) catch |err| log.warn("start-up timer: {t}", .{err});
+            return;
+        }
+        server.finishStartup();
+    }
+
+    /// Once: the programs of `spawn_at_startup`, then READY=1.
+    fn finishStartup(server: *Server) void {
+        if (server.startup_done) return;
+        server.startup_done = true;
+        if (server.startup_timer) |t| t.remove();
+        server.startup_timer = null;
+        boot.finishStartup(server.wm);
+    }
+
+    fn onStartupDone(_: c_int, server: *Server) c_int {
+        server.finishStartup();
+        return 0;
+    }
+
+    fn onStartupTimer(server: *Server) c_int {
+        if (!server.startup_done) log.warn("the environment import did not report back in {d} ms, starting anyway", .{startup_timeout_ms});
+        server.finishStartup();
+        return 0;
     }
 
     // ---- signals -----------------------------------------------------------------
@@ -254,6 +306,8 @@ pub const Server = struct {
         _ = try server.loop.addSignal(*Server, @intFromEnum(posix.SIG.TERM), onTerminate, server);
         _ = try server.loop.addSignal(*Server, @intFromEnum(posix.SIG.HUP), onHangup, server);
         _ = try server.loop.addSignal(*Server, @intFromEnum(posix.SIG.USR1), onDump, server);
+        // The environment import (boot.beginEnvironmentImport) is done.
+        _ = try server.loop.addSignal(*Server, @intFromEnum(posix.SIG.USR2), onStartupDone, server);
     }
 
     fn onTerminate(_: c_int, server: *Server) c_int {
