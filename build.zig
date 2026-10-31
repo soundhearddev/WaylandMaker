@@ -1,6 +1,6 @@
-
 const std = @import("std");
 const Scanner = @import("wayland").Scanner;
+const session = @import("src/session.zig");
 
 /// The system libraries every wmaker-wl / wlprefs module draws with.
 fn linkGraphics(module: *std.Build.Module, src_dir: std.Build.LazyPath) void {
@@ -157,6 +157,37 @@ pub fn buildWlprefs(
     };
 }
 
+/// The login session: wmaker-wl-session, wmaker-wl.desktop, the systemd user
+/// units, the portal config, wlprefs.desktop and the themes, into the install
+/// prefix (`zig build install -p /usr`, DESTDIR works). The list and the texts
+/// are src/session.zig's, which `wmaker-wl --install-session` uses too.
+/// `@BINDIR@` becomes the absolute bin directory of the prefix.
+pub fn installSession(b: *std.Build) void {
+    const prefix = if (std.fs.path.isAbsolute(b.install_prefix))
+        b.install_prefix
+    else
+        b.pathFromRoot(b.install_prefix);
+    const layout: session.Layout = .{ .prefix = prefix };
+    const bindir = layout.bindir(b.allocator) catch @panic("OOM");
+
+    const files = b.addWriteFiles();
+    for (session.items) |item| {
+        const text = session.render(b.allocator, item, bindir) catch @panic("OOM");
+        const src = files.add(item.file, text);
+        const rel = b.fmt("{s}/{s}", .{ layout.subdir(item.place), item.file });
+        const install = b.addInstallFileWithDir(src, .prefix, rel);
+        b.getInstallStep().dependOn(&install.step);
+
+        // A generated file is not executable.
+        if (item.mode & 0o111 != 0) {
+            const chmod = b.addSystemCommand(&.{ "chmod", "755" });
+            chmod.addArg(b.getInstallPath(.prefix, rel));
+            chmod.step.dependOn(&install.step);
+            b.getInstallStep().dependOn(&chmod.step);
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // wmaker-wl -- also builds wlprefs
 // -------------------------------------------------------------------------
@@ -272,6 +303,7 @@ pub fn build(b: *std.Build) void {
     );
 
     b.installArtifact(exe);
+    installSession(b);
 
     const probe = addCompositor(
         b,
@@ -478,4 +510,3 @@ fn addCompositor(
         .use_lld = use_llvm,
     });
 }
-

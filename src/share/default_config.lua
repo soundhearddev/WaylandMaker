@@ -145,12 +145,6 @@ environment = {}
 -- start. Portals, notification daemons and user services need it.
 import_environment = true
 
--- Also start wmaker-wl-session.target (installed by install.sh --system or
--- into ~/.config/systemd/user), which binds to graphical-session.target.
--- That is what makes systemd --user, portals and user services see this as a
--- desktop session. Harmless without systemd or without the unit.
-session_target = true
-
 -- ---- dock apps ----------------------------------------------------------------
 -- DockApps are programs that put themselves into the Dock (app_id
 -- `dockapp:<name>`): start them with `spawn_at_startup` above, from a menu

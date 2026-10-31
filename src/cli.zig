@@ -34,6 +34,22 @@ pub const usage =
     \\                      process output). The same as the environment variable
     \\                      WMAKER_LOG; the default is `info`
     \\
+    \\      --install-session    install the login session: wmaker-wl-session,
+    \\                      wmaker-wl.desktop, systemd user units, portal config,
+    \\                      wlprefs.desktop and themes; also copies wmaker-wl and
+    \\                      wlprefs into BINDIR when they are not there yet. Needs
+    \\                      no display. (`zig build install` does the same.)
+    \\      --uninstall-session
+    \\                      remove those files (not the programs); exit
+    \\      --session-status
+    \\                      show which of them are installed and current; exit
+    \\                      (0: all, 1: something missing)
+    \\      --prefix DIR    for the three options above: install below DIR
+    \\                      (default /usr/local, /usr if run from /usr/bin)
+    \\      --destdir DIR   stage everything below DIR (packaging)
+    \\      --user          install below ~/.local instead of a system prefix
+    \\      --dry-run       only say what would be done
+    \\
     \\A running session reloads its files on `pkill -HUP wmaker-wl`.
     \\
 ;
@@ -47,7 +63,14 @@ pub const Cli = struct {
     config_path: ?[]const u8 = null,
     config_dir: ?[]const u8 = null,
     log_spec: ?[]const u8 = null,
+    session: ?SessionAction = null,
+    prefix: ?[]const u8 = null,
+    destdir: ?[]const u8 = null,
+    user_install: bool = false,
+    dry_run: bool = false,
 };
+
+pub const SessionAction = enum { install, uninstall, status };
 
 pub const Parsed = union(enum) {
     /// Start (or `--check`, `--paths`, `--print-config`).
@@ -58,6 +81,11 @@ pub const Parsed = union(enum) {
     unknown: []const u8,
     /// An option that needs a value and has none (the option).
     needs_value: []const u8,
+    /// An option that only goes with --install-session, --uninstall-session
+    /// or --session-status, given without one (the option).
+    needs_session: []const u8,
+    /// Two options that exclude each other (the second).
+    conflict: []const u8,
 };
 
 /// Read the command line. `args` is anything with a `next()` that gives the
@@ -76,6 +104,24 @@ pub fn parseArgs(args: anytype) Parsed {
             cli.show_paths = true;
         } else if (std.mem.eql(u8, arg, "--binds")) {
             cli.show_binds = true;
+        } else if (std.mem.eql(u8, arg, "--install-session") or
+            std.mem.eql(u8, arg, "--uninstall-session") or
+            std.mem.eql(u8, arg, "--session-status"))
+        {
+            if (cli.session != null) return .{ .conflict = arg };
+            cli.session = if (std.mem.eql(u8, arg, "--install-session")) .install else if (std.mem.eql(u8, arg, "--uninstall-session")) .uninstall else .status;
+        } else if (std.mem.eql(u8, arg, "--prefix")) {
+            cli.prefix = args.next() orelse return .{ .needs_value = "--prefix" };
+        } else if (std.mem.startsWith(u8, arg, "--prefix=")) {
+            cli.prefix = arg["--prefix=".len..];
+        } else if (std.mem.eql(u8, arg, "--destdir")) {
+            cli.destdir = args.next() orelse return .{ .needs_value = "--destdir" };
+        } else if (std.mem.startsWith(u8, arg, "--destdir=")) {
+            cli.destdir = arg["--destdir=".len..];
+        } else if (std.mem.eql(u8, arg, "--user")) {
+            cli.user_install = true;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            cli.dry_run = true;
         } else if (std.mem.eql(u8, arg, "--print-config")) {
             cli.print_config = true;
         } else if (std.mem.eql(u8, arg, "--config")) {
@@ -93,6 +139,14 @@ pub fn parseArgs(args: anytype) Parsed {
         } else {
             return .{ .unknown = arg };
         }
+    }
+    if (cli.session == null) {
+        if (cli.prefix != null) return .{ .needs_session = "--prefix" };
+        if (cli.destdir != null) return .{ .needs_session = "--destdir" };
+        if (cli.user_install) return .{ .needs_session = "--user" };
+        if (cli.dry_run) return .{ .needs_session = "--dry-run" };
+    } else if (cli.user_install and cli.prefix != null) {
+        return .{ .conflict = "--user" };
     }
     return .{ .run = cli };
 }
@@ -185,7 +239,7 @@ test "command line: a missing value and an unknown argument are reported, not ig
 }
 
 test "command line: the help text names every option parseArgs knows" {
-    for ([_][]const u8{ "-h", "--help", "-V", "--version", "--check", "--paths", "--print-config", "--config", "--config-dir", "--log" }) |opt| {
+    for ([_][]const u8{ "-h", "--help", "-V", "--version", "--check", "--paths", "--print-config", "--config", "--config-dir", "--log", "--install-session", "--uninstall-session", "--session-status", "--prefix", "--destdir", "--user", "--dry-run" }) |opt| {
         try std.testing.expect(std.mem.indexOf(u8, usage, opt) != null);
     }
 }
@@ -237,4 +291,24 @@ test "main() sets the log filter before it loads anything" {
     try std.testing.expect(env_at < opt_at);
     try std.testing.expect(opt_at < std.mem.indexOf(u8, body, "config.load(").?);
     try std.testing.expect(std.mem.indexOf(u8, src, "pub const std_options: std.Options = .{ .log_level = .debug, .logFn = log_mod.logFn }") != null);
+}
+
+test "command line: the session options" {
+    switch (parseTest(&.{ "--install-session", "--prefix", "/usr", "--destdir=/pkg", "--dry-run" })) {
+        .run => |cli| {
+            try std.testing.expect(cli.session.? == .install and cli.dry_run);
+            try std.testing.expectEqualStrings("/usr", cli.prefix.?);
+            try std.testing.expectEqualStrings("/pkg", cli.destdir.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseTest(&.{ "--session-status", "--user" })) {
+        .run => |cli| try std.testing.expect(cli.session.? == .status and cli.user_install),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(parseTest(&.{ "--install-session", "--uninstall-session" }) == .conflict);
+    try std.testing.expect(parseTest(&.{ "--install-session", "--user", "--prefix=/usr" }) == .conflict);
+    try std.testing.expect(parseTest(&.{"--prefix=/usr"}) == .needs_session);
+    try std.testing.expect(parseTest(&.{"--dry-run"}) == .needs_session);
+    try std.testing.expect(parseTest(&.{ "--install-session", "--prefix" }) == .needs_value);
 }

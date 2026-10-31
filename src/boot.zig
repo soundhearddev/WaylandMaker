@@ -92,14 +92,8 @@ pub fn ignoreSigchld() void {
     std.posix.sigaction(.CHLD, &act, null);
 }
 
-/// The name this compositor goes by as a desktop environment: the value of
-/// `XDG_CURRENT_DESKTOP` / `XDG_SESSION_DESKTOP`, `DesktopNames=` in the
-/// session file, and the prefix of `wmaker-wl-portals.conf`.
-pub const desktop_name: [:0]const u8 = "wmaker-wl";
-
 /// Variables D-Bus and systemd --user learn about at session start, besides
-/// the ones of the `environment` option. DISPLAY is not in the list: there is
-/// no X server, and a stale value would send X11 clients to the wrong place.
+/// the ones of the `environment` option.
 const session_vars = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP";
 
 /// Tell D-Bus (and with `--systemd`, systemd --user) where this session is.
@@ -139,51 +133,9 @@ pub fn importEnvironment(wm: *WindowManager) void {
     log.info("environment imported into D-Bus / systemd (status {d})", .{rc});
 }
 
-/// Reach `graphical-session.target` the way sway and niri do: start
-/// `wmaker-wl-session.target`, which binds to it. User services of other
-/// programs (`PartOf=graphical-session.target`, `After=graphical-session.target`,
-/// for example waybar, swaybg or mako as units) wait for exactly this, and
-/// xdg-desktop-portal and friends use it to tell that a desktop session runs.
-///
-/// Must come after `importEnvironment`: the services the target pulls in read
-/// the imported variables. `--no-block` keeps the session from waiting for
-/// them, and a machine without systemd, or without the unit installed, is
-/// not an error (the `systemctl` call just fails quietly).
-pub fn startSessionTarget(wm: *WindowManager) void {
-    if (!wm.cfg.session_target) return;
-    runShell("command -v systemctl >/dev/null 2>&1 && systemctl --user list-unit-files " ++
-        "wmaker-wl-session.target >/dev/null 2>&1 && " ++
-        "systemctl --user start --no-block wmaker-wl-session.target >/dev/null 2>&1", "session target");
-}
-
-/// The counterpart at exit: `wmaker-wl-shutdown.target` conflicts with the
-/// session target and stops it (and every service bound to the session).
-pub fn stopSessionTarget(wm: *WindowManager) void {
-    if (!wm.cfg.session_target) return;
-    runShell("command -v systemctl >/dev/null 2>&1 && " ++
-        "systemctl --user start --job-mode=replace-irreversibly wmaker-wl-shutdown.target " ++
-        ">/dev/null 2>&1", "session target stop");
-}
-
-/// `system()` for one fixed command line, with the default SIGCHLD action
-/// back for its duration (see `importEnvironment`).
-fn runShell(comptime command: [:0]const u8, what: []const u8) void {
-    const dfl: std.posix.Sigaction = .{
-        .handler = .{ .handler = std.posix.SIG.DFL },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    var previous: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.CHLD, &dfl, &previous);
-    const rc = system(command.ptr);
-    std.posix.sigaction(.CHLD, &previous, null);
-    log.info("{s} (status {d})", .{ what, rc });
-}
-
 /// Run once at session start, never on a reload: the environment import,
 /// then every program of `spawn_at_startup`.
 pub fn runStartup(wm: *WindowManager) void {
     if (wm.cfg.import_environment) importEnvironment(wm);
-    startSessionTarget(wm);
     for (wm.cfg.spawn_at_startup) |argv| model.proc.spawn(wm, argv);
 }

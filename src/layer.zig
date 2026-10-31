@@ -45,6 +45,10 @@ pub const LayerSurface = struct {
     /// above everything, at the surface's position.
     popups: *wlr.SceneTree,
     mapped: bool = false,
+    /// What the client asked for when we last arranged it. A commit that
+    /// asks for the same (a wallpaper redrawing) does not arrange again.
+    last: @FieldType(wlr.LayerSurfaceV1, "current") = undefined,
+    arranged: bool = false,
     link: wl.list.Link = undefined,
 
     commit: wl.Listener(*wlr.Surface) = .init(onCommit),
@@ -56,16 +60,28 @@ pub const LayerSurface = struct {
     fn onCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
         const ls: *LayerSurface = @fieldParentPtr("commit", listener);
         const wlr_ls = ls.surface;
+        // Nothing to place before the first commit has been taken in.
+        if (!wlr_ls.initialized) return;
         // The layer can change after the surface exists (set_layer).
         const want = ls.server.layer_trees[layerIndex(wlr_ls)];
         if (ls.scene.tree.node.parent != want) ls.scene.tree.node.reparent(want);
-        // Also answers the initial commit: arranging sends the first configure.
+
+        // Arranging answers with a configure, and a client that redraws on
+        // every configure (swaybg, waybar) commits again: arranging on every
+        // commit made the two chase each other forever, with the compositor
+        // busy and the wallpaper never settling. So only a change of what the
+        // client asked for (and the first commit, which has to be answered)
+        // is arranged; a plain buffer commit is not.
+        if (ls.arranged and sameRequest(&ls.last, &wlr_ls.current)) return;
+        ls.last = wlr_ls.current;
+        ls.arranged = true;
         arrange(ls.server, ls.monitor);
     }
 
     fn onMap(listener: *wl.Listener(void)) void {
         const ls: *LayerSurface = @fieldParentPtr("map", listener);
         ls.mapped = true;
+        log.info("layer surface `{s}` mapped on {s}", .{ ls.surface.namespace, ls.monitor.wlr_output.name });
         arrange(ls.server, ls.monitor);
         ls.server.cursor.refresh();
     }
@@ -101,6 +117,19 @@ pub const LayerSurface = struct {
         Popup.createForLayer(ls.server, xdg_popup, ls) catch |err| log.err("cannot create a popup: {t}", .{err});
     }
 };
+
+/// Do two states ask for the same place, size, layer and keyboard? The
+/// serial and the size of the last configure are left out on purpose: they
+/// change when the client answers us.
+fn sameRequest(a: anytype, b: anytype) bool {
+    return std.meta.eql(a.anchor, b.anchor) and
+        a.exclusive_zone == b.exclusive_zone and
+        std.meta.eql(a.margin, b.margin) and
+        a.desired_width == b.desired_width and
+        a.desired_height == b.desired_height and
+        a.layer == b.layer and
+        a.keyboard_interactive == b.keyboard_interactive;
+}
 
 fn layerIndex(wlr_ls: *wlr.LayerSurfaceV1) usize {
     return @min(@as(usize, @intCast(@intFromEnum(wlr_ls.current.layer))), layer_count - 1);

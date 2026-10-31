@@ -25,6 +25,15 @@ zig build run                            # nested in the current session (WLR_BA
 ./zig-out/bin/wmaker-wl                  # from a TTY: DRM + libinput, no other session needed
 ```
 
+## Install
+
+```sh
+sudo zig build install -p /usr          # programs + login session (see docs/SESSION.md)
+sudo ./zig-out/bin/wmaker-wl --install-session   # fallback: session files from the binary
+```
+
+Then pick WaylandMaker in the login manager, or run `wmaker-wl-session` from a TTY.
+
 Nix and Scheme files are provided for Nix and Guix users.
 
 ## Configuration
@@ -70,6 +79,8 @@ wmaker-wl [OPTION]       without an option: start the session
       --paths            list the files wmaker-wl reads and which of them exist
       --binds            list the key bindings in effect (also on Super+/ in a session)
       --print-config     print the built-in default config.lua
+      --install-session  install the login session (also --uninstall-session, --session-status;
+                         with --prefix DIR, --destdir DIR, --user, --dry-run), see docs/SESSION.md
       --log SPEC         log filter, e.g. info,anim=debug (same as WMAKER_LOG)
 ```
 
@@ -85,6 +96,7 @@ An unknown option is an error and does not start a session.
 | [docs/MONITORS.md](docs/MONITORS.md) | multiple monitors and hotplug |
 | [docs/THEMES.md](docs/THEMES.md) | the look: colours, fonts, `theme("nord")` |
 | [docs/WMPREFS.md](docs/WMPREFS.md) | `wlprefs`, the settings window |
+| [docs/SESSION.md](docs/SESSION.md) | login manager, systemd units, `wmaker-wl-session` |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | logging, state dump, tests, benchmark |
 | [docs/TODO.md](docs/TODO.md) | open work |
 

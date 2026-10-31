@@ -1,39 +1,107 @@
 #!/bin/sh
-# Session start script
+# wmaker-wl-session: start a WaylandMaker session (login manager entry point).
 #
-# ~/.config/wmaker-wl/env (optional, plain sh) is read first: export what
-# should reach the compositor itself, for example
-#     export XKB_DEFAULT_LAYOUT=de
-# The same can be written as `environment = { ... }` in config.lua.
+# Started through wmaker-wl.desktop, or by hand from a TTY. In order:
+#   1. sets the XDG_* session variables
+#   2. logs to $XDG_STATE_HOME/wmaker-wl/session.log when there is no terminal
+#   3. reads ~/.config/wmaker-wl/env (optional, plain sh), e.g.
+#          export XKB_DEFAULT_LAYOUT=de
+#   4. makes sure XDG_RUNTIME_DIR exists
+#   5. runs the compositor: as the systemd user unit wmaker-wl.service when it
+#      is installed and a user manager is running (then graphical-session.target
+#      works, and the compositor log is in `journalctl --user -u wmaker-wl`),
+#      otherwise directly, under dbus-run-session if there is no session bus.
+#
+# Overrides: WMAKER_WL=/path/to/wmaker-wl   WMAKER_NO_SYSTEMD=1
 
-# Who we are. wmaker-wl sets the same values itself; they are set here too so
-# that the env file, dbus-run-session and everything before the compositor
-# already see a wmaker-wl desktop. Programs choose behaviour (portals,
-# OnlyShowIn=, tray/wallpaper helpers) from these.
+name=wmaker-wl-session
+
+die() {
+    echo "$name: $*" >&2
+    exit 1
+}
+
+# The compositor: next to this script, else in PATH.
+wm=${WMAKER_WL:-}
+if [ -z "$wm" ]; then
+    case $0 in
+    */*) bindir=$(cd "$(dirname "$0")" && pwd) ;;
+    *) bindir= ;;
+    esac
+    if [ -n "$bindir" ] && [ -x "$bindir/wmaker-wl" ]; then
+        wm=$bindir/wmaker-wl
+    else
+        wm=wmaker-wl
+    fi
+fi
+
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=wmaker-wl
 export XDG_CURRENT_DESKTOP=wmaker-wl
 
-# Toolkits: use Wayland. (Qt and GTK would otherwise guess; Electron and
-# Firefox need the hint.) The env file below can override all of it.
-export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland;xcb}"
-export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland,x11}"
-export _JAVA_AWT_WM_NONREPARENTING="${_JAVA_AWT_WM_NONREPARENTING:-1}"
+# No terminal (login manager): keep the output, one old log is kept.
+state=${XDG_STATE_HOME:-${HOME:-}/.local/state}/wmaker-wl
+if [ ! -t 2 ] && [ -n "${HOME:-}" ] && mkdir -p "$state" 2>/dev/null; then
+    log=$state/session.log
+    if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 1048576 ]; then
+        mv -f "$log" "$log.old"
+    fi
+    exec >>"$log" 2>&1
+    echo "== $(date '+%F %T') $name (pid $$)"
+fi
 
-cfg="${XDG_CONFIG_HOME:-$HOME/.config}/wmaker-wl"
+cfg=${XDG_CONFIG_HOME:-${HOME:-}/.config}/wmaker-wl
 if [ -r "$cfg/env" ]; then
-    # shellcheck disable=SC1091
-    . "$cfg/env"
+    # A syntax error would end this shell, and with it the login.
+    if sh -n "$cfg/env" 2>/dev/null; then
+        # shellcheck disable=SC1091
+        . "$cfg/env"
+    else
+        echo "$name: $cfg/env has a syntax error, ignored" >&2
+    fi
 fi
 
-if [ -z "$XDG_RUNTIME_DIR" ]; then
-    echo "wmaker-wl-session: XDG_RUNTIME_DIR is not set (log in through logind or seatd)" >&2
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    rd=/run/user/$(id -u)
+    if [ -d "$rd" ] && [ -w "$rd" ]; then
+        XDG_RUNTIME_DIR=$rd
+        export XDG_RUNTIME_DIR
+    else
+        die "XDG_RUNTIME_DIR is not set (log in through logind/elogind, or set it in $cfg/env)"
+    fi
 fi
 
-# A bus already exists with logind/pam_systemd: use it, so systemd --user
-# and D-Bus activation see the same session. Only without one start a private bus.
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
-    exec dbus-run-session -- wmaker-wl "$@"
+command -v "$wm" >/dev/null 2>&1 || die "cannot find the compositor ($wm); set WMAKER_WL"
+
+use_systemd() {
+    [ -z "${WMAKER_NO_SYSTEMD:-}" ] && [ -z "${WMAKER_WL:-}" ] || return 1
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl --user cat wmaker-wl.service >/dev/null 2>&1
+}
+
+if use_systemd; then
+    if systemctl --user is-active --quiet wmaker-wl.service; then
+        die "wmaker-wl.service is already running"
+    fi
+    # A failed earlier session must not keep graphical-session.target down.
+    systemctl --user reset-failed 2>/dev/null
+    # The unit gets the environment of this script.
+    systemctl --user import-environment
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment --all
+    fi
+    echo "$name: starting wmaker-wl.service"
+    systemctl --user --wait start wmaker-wl.service
+    rc=$?
+    # Stop everything that was bound to graphical-session.target.
+    systemctl --user start --job-mode=replace-irreversibly wmaker-wl-shutdown.target
+    systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY NOTIFY_SOCKET \
+        XDG_SESSION_TYPE XDG_SESSION_DESKTOP XDG_CURRENT_DESKTOP
+    exit "$rc"
 fi
-exec wmaker-wl "$@"
+
+echo "$name: starting $wm"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- "$wm" "$@"
+fi
+exec "$wm" "$@"

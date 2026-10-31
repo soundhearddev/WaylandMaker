@@ -66,9 +66,7 @@ table.insert(spawn_at_startup, "blueman-applet")
 Order: `environment` is set; with `import_environment = true` (default) `WAYLAND_DISPLAY`,
 `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE` and the names in `environment` are given to D-Bus and
 `systemd --user` (`dbus-update-activation-environment --systemd`), because programs started by
-D-Bus (portals, notification daemons) otherwise cannot find the compositor; then, with
-`session_target = true` (default), `wmaker-wl-session.target` is started so that `graphical-session.target`
-is reached (user units for swaybg, waybar & co); then the programs start.
+D-Bus (portals, notification daemons) otherwise cannot find the compositor; then the programs start.
 A program that cannot be started is a warning in the log. DockApps with `AutoLaunch = Yes` in
 WMState start as before.
 
@@ -78,32 +76,3 @@ Programs that need protocols the compositor does not serve yet are missing from 
 defaults on purpose: a screen locker (`ext-session-lock`), screenshots with `grim`
 (`wlr-screencopy`; the `Super+p` bind is there for when it comes), clipboard managers
 (`wlr-data-control`), bars and wallpapers (`wlr-layer-shell`). See `docs/TODO wlroots.md`, section 5.
-
-## Being a desktop environment
-
-wmaker-wl sets `XDG_SESSION_TYPE=wayland`, `XDG_SESSION_DESKTOP=wmaker-wl` and
-`XDG_CURRENT_DESKTOP=wmaker-wl` itself (and `wmaker-wl-session` sets them before it starts), tells D-Bus
-and `systemd --user` about them, and starts `wmaker-wl-session.target`. For that to work install
-(`./install.sh` per user, `sudo ./install.sh --system` for everyone):
-
-| File | Goes to | Why |
-|---|---|---|
-| `wmaker-wl-session.target`, `wmaker-wl-shutdown.target` | `systemd/user/` | `graphical-session.target` is reached; user services bound to it start and stop with the session |
-| `wmaker-wl-portals.conf` | `xdg-desktop-portal/` | which portal backend serves `XDG_CURRENT_DESKTOP=wmaker-wl` |
-| `wmaker-wl.desktop` | `/usr/share/wayland-sessions/` | `DesktopNames=wmaker-wl`, for login managers |
-
-Check: `systemctl --user is-active graphical-session.target` and `busctl --user` /
-`systemctl --user show-environment | grep XDG`. A wallpaper as a unit instead of `spawn_at_startup`:
-
-```ini
-# ~/.config/systemd/user/swaybg.service
-[Unit]
-PartOf=graphical-session.target
-After=graphical-session.target
-Requisite=graphical-session.target
-[Service]
-ExecStart=/usr/bin/swaybg -i %h/wall.png
-Restart=on-failure
-[Install]
-WantedBy=wmaker-wl-session.target
-```

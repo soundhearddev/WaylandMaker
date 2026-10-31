@@ -20,6 +20,7 @@ Roughly in the order I care about them. Nothing here is promised.
 - [ ] **`wmaker-wl --restart` / `RESTART` menu entry.** Re-executing the process would drop the existing
       compositor, which would end the session. `SIGHUP` reload
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
+- [ ] **Window menus and the window list** (root menu is done): see section 4 of [TODO wlroots.md](TODO%20wlroots.md).
 - [ ] **Icons from `~/.local/share/icons` and `~/.icons`.** Only `/usr/share/icons` and
       `/usr/share/pixmaps` are searched.
 
@@ -76,9 +77,74 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Document reference numbers for fixed, real hardware rather than a container.
 - [ ] Compare build configurations: `ReleaseSafe` vs. `ReleaseFast`, stripping, and LTO. If the performance difference is small, recommend `ReleaseSafe`.
 
+## Session and installation
+
+The session files are in place ([SESSION.md](SESSION.md)); none of it has run on a real login yet.
+
+- [ ] **Try the session for real**: from GDM, SDDM, greetd and ly, and from a TTY. With and without
+      systemd (`WMAKER_NO_SYSTEMD=1`), with elogind and seatd. Check that `graphical-session.target`
+      comes up, that `READY=1` arrives, and that `wmaker-wl-shutdown.target` stops what it should.
+- [ ] A **crash** ends the whole session. At least write the last log lines and a state dump to
+      `session.log` before dying, and show a short message on the TTY.
+- [ ] `wmaker-wl --session-status` should also check that `wmaker-wl.service` is known to
+      `systemctl --user` and that the login manager lists the session.
+- [ ] **Packages**: `flake.nix` and `manifest.scm` are development shells only. Add a Nix package
+      and NixOS module (`services.displayManager.sessionPackages`), a Guix package, an AUR
+      `PKGBUILD`, a Debian/Fedora spec.
+- [ ] **CI**: `zig build test` and `zig build test-all` on every push, plus `zig build` against
+      wlroots 0.20 in a container. There is none (no `.github`, no `.gitea`).
+- [ ] Release tags and a changelog; `build.zig.zon` says 0.3.0.
+- [ ] Per-seat/session variables: `XDG_SESSION_ID`, `XDG_VTNR` and `LIBSEAT_BACKEND` are not looked at.
+- [ ] Add `wmaker-wl --check` to the session script, so a broken config is reported in
+      `session.log` before the compositor starts (it starts with defaults anyway).
+
+## Desktop integration
+
+Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the moment:
+
+- [ ] `ext-session-lock` (screen locker), idle notify and inhibit, `xdg-activation`
+- [ ] Screen capture (`ext-image-copy-capture`, screencopy) for `grim` and screen sharing, and the
+      matching portal; until then `wmaker-wl-portals.conf` only knows the GTK backend
+- [ ] `wlr-output-management`, foreign-toplevel, gamma control, pointer constraints
+- [ ] Touch, tablet, switches (only keyboard and pointer are used)
+- [ ] XWayland (decide whether at all)
+- [ ] Notifications, a wallpaper, a screenshot key and a lock key in the default config, once the
+      protocols above exist
+
+## Documentation
+
+- [ ] `docs/WLPREFS-ICONS.md` is named in `wlprefs/src/icons.zig` and `wlprefs/TODO.md`, but does not exist.
+- [ ] `INTEGRATION.md` says `wlr-layer-shell` is not served, yet `src/layer.zig` and `build.zig` have it.
+      Check the list of served protocols there against `server.zig`.
+- [ ] `TODO wlroots.md` is out of date: layer-shell, the Dock, libinput options (`tap_to_click`,
+      `natural_scroll`) and the clipboard exist now; tick them off or delete the done parts. It
+      still says "not yet run".
+- [ ] `wlprefs/TODO.md` is German, everything else is English.
+- [ ] `docs/KEYBINDS.md`/`README.md`: the key table and `--help` must stay in step; a test that
+      compares them would do.
+- [ ] A manual page (`wmaker-wl.1`, `wmaker-wl-session.1`), installed by `zig build install`.
+
+## Tests
+
+- [ ] Nothing in `zig build test` runs a compositor. Add a nested smoke test
+      (`WLR_BACKENDS=headless`): start, connect a client, open a window, exit.
+- [ ] Tests of the example DockApps run only with `test-all`.
+- [ ] A fuzz test for the Lua config loader (the XPM and menu parsers have one).
+
+## Small things
+
+- [ ] **Remove `protocol/`**: fetch `wlr-protocols` as a pinned dependency instead of keeping a copy of its XML, and prune
+      the unused `scanner.generate` lines. Details: section 8 of [TODO wlroots.md](TODO%20wlroots.md).
+- [ ] `build.zig` is not `zig fmt` clean.
+- [ ] Temp files are made under a fixed `/tmp/...-XXXXXX` template in `xpm.zig`, `wlprefs`: use `$XDG_RUNTIME_DIR` or `mkstemp`.
+- [ ] `dump/` holds two benchmark outputs in the repository; move them to a release page or `.gitignore` them.
+- [ ] `.gitignore` ends with `.gitea` without a newline.
+
 ## The Rest
 
-- [ ] Better Live config reload
+- [ ] Better live config reload: a reload does not re-create the keymap (`XKB_DEFAULT_*`), and
+      `environment` changes need a new session.
+- [ ] libinput: more options per device (accel profile, click method, disable while typing).
 
 ## wlprefs
 

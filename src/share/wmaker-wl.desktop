@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=WaylandMaker
 Comment=A Wayland compositor that feels like Window Maker
-Exec=wmaker-wl-session
-TryExec=wmaker-wl
+Exec=@BINDIR@/wmaker-wl-session
+TryExec=@BINDIR@/wmaker-wl-session
 Type=Application
 DesktopNames=wmaker-wl
 Keywords=wm;wayland;compositor;windowmaker;

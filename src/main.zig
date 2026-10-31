@@ -24,6 +24,7 @@ const boot = @import("boot.zig");
 const cli_mod = @import("cli.zig");
 const diag = @import("diag.zig");
 const keys = @import("keys.zig");
+const session = @import("session.zig");
 const Server = @import("server.zig").Server;
 
 /// Every message reaches `log_mod.logFn`, which counts warnings and errors for
@@ -91,6 +92,27 @@ fn checkConfig(io: std.Io, gpa: std.mem.Allocator) !void {
     std.debug.print("{s}: OK\n", .{cfg.config_file});
 }
 
+/// `--install-session`, `--uninstall-session`, `--session-status`.
+fn runSession(io: std.Io, gpa: std.mem.Allocator, cli: cli_mod.Cli) !void {
+    var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe: ?[]const u8 = if (std.process.executablePath(io, &exe_buf)) |n| exe_buf[0..n] else |_| null;
+    var buf: [1024]u8 = undefined;
+    var fw = std.Io.File.stdout().writer(io, &buf);
+    const what: session.Action = switch (cli.session.?) {
+        .install => .install,
+        .uninstall => .uninstall,
+        .status => .status,
+    };
+    const ok = session.run(io, gpa, what, .{
+        .prefix = cli.prefix,
+        .destdir = cli.destdir,
+        .user = cli.user_install,
+        .dry_run = cli.dry_run,
+    }, exe, &fw.interface) catch false;
+    try fw.interface.flush();
+    if (!ok) std.process.exit(1);
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -105,7 +127,11 @@ pub fn main(init: std.process.Init) !void {
         .version => return stdoutPrint(io, "wmaker-wl {s} (built with zig {s}, wlroots {s})\n", .{ model.version.version, builtin.zig_version_string, wlr.version.str }),
         .unknown => |bad_arg| usageError("unknown argument `{s}`", .{bad_arg}),
         .needs_value => |bad_opt| usageError("{s} needs a value", .{bad_opt}),
+        .needs_session => |bad_opt| usageError("{s} goes with --install-session, --uninstall-session or --session-status", .{bad_opt}),
+        .conflict => |bad_opt| usageError("{s} cannot be combined with the other options given", .{bad_opt}),
     };
+    // Before anything is started: no program of ours may see the socket.
+    session.captureNotifySocket();
     config.config_path_override = cli.config_path;
     config.config_dir_override = cli.config_dir;
 
@@ -114,6 +140,7 @@ pub fn main(init: std.process.Init) !void {
     diag.initFromEnv();
     if (cli.log_spec) |spec| log_mod.setSpec(spec) catch |err| usageError("--log `{s}`: {t}", .{ spec, err });
 
+    if (cli.session != null) return runSession(io, gpa, cli);
     if (cli.print_config) return stdoutPrint(io, "{s}", .{config.builtin_text});
     if (cli.show_paths) return showPaths(io, gpa);
     if (cli.show_binds) return showBinds(io, gpa);
@@ -180,7 +207,11 @@ pub fn main(init: std.process.Init) !void {
     // learns about them and `spawn_at_startup` runs. Clients that connect
     // before the loop runs wait in the socket's queue.
     boot.runStartup(wm);
-    defer boot.stopSessionTarget(wm);
+
+    // Under `Type=notify` (wmaker-wl.service) the session counts as up now,
+    // so graphical-session.target and what hangs on it can start.
+    session.notify("READY=1\nSTATUS=running");
+    defer session.notify("STOPPING=1");
 
     try server.run();
 }

@@ -236,13 +236,8 @@ pub const Server = struct {
         const name = try server.wl_server.addSocketAuto(&buf);
         const stored = try server.gpa.dupeZ(u8, name);
         boot.exportVar("WAYLAND_DISPLAY", stored);
-        // Who we are, for D-Bus, portals, .desktop files (OnlyShowIn) and every
-        // program that asks `XDG_CURRENT_DESKTOP`. Set here as well as in
-        // wmaker-wl-session, so that a start from a bare TTY or a login
-        // manager that ignores the session script is a desktop too.
         boot.exportVar("XDG_SESSION_TYPE", "wayland");
-        boot.exportVar("XDG_CURRENT_DESKTOP", boot.desktop_name);
-        boot.exportVar("XDG_SESSION_DESKTOP", boot.desktop_name);
+        boot.exportVar("XDG_CURRENT_DESKTOP", "wmaker-wl");
         return stored;
     }
 
