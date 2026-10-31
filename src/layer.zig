@@ -128,6 +128,7 @@ fn sameRequest(a: anytype, b: anytype) bool {
         a.desired_width == b.desired_width and
         a.desired_height == b.desired_height and
         a.layer == b.layer and
+        a.exclusive_edge == b.exclusive_edge and
         a.keyboard_interactive == b.keyboard_interactive;
 }
 

@@ -167,8 +167,14 @@ pub const Server = struct {
         // GPU clients hand over dmabufs; with this the scene can also show a
         // fullscreen client's buffer on the display plane directly (direct
         // scanout: no copy, no compositing, the biggest win for games and video).
-        const dmabuf = try wlr.LinuxDmabufV1.createWithRenderer(wl_server, 4, renderer);
-        scene.setLinuxDmabufV1(dmabuf);
+        // A renderer without a DRM device (pixman, a VM without a GPU) cannot
+        // offer it: that is not a reason to refuse to start, clients then
+        // share memory (wl_shm) only.
+        if (wlr.LinuxDmabufV1.createWithRenderer(wl_server, 4, renderer)) |dmabuf| {
+            scene.setLinuxDmabufV1(dmabuf);
+        } else |err| {
+            log.warn("no linux-dmabuf ({t}): clients can only share memory", .{err});
+        }
         _ = try wlr.Viewporter.create(wl_server);
         _ = try wlr.SinglePixelBufferManagerV1.create(wl_server);
         _ = try wlr.XdgOutputManagerV1.create(wl_server, output_layout);
