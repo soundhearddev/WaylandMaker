@@ -50,7 +50,6 @@ Files: `main` (entry) `cli` `boot` (config/env, no wlroots) `server` (globals, l
 - [x] VT switching (`XF86Switch_VT_n`), session via `Backend.autocreate`, libinput devices (keyboard, pointer)
 - [ ] Run it: nested, then from a TTY (open until someone has wlroots 0.20)
 - [x] libinput settings (tap, natural scroll): `tap_to_click`, `natural_scroll` in config.lua (`libinput.zig`)
-- [ ] More libinput settings: acceleration profile and speed, click method, disable-while-typing, per device
 - [ ] Only keyboard and pointer are used; touch, tablet, switches are ignored
 
 Also done beyond the list: window placement, tiling, borders, fullscreen requests and multi-output migration

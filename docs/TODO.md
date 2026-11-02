@@ -24,8 +24,6 @@
 
 See [MONITORS.md](MONITORS.md).
 
-- [ ] Release `wl_output` globals when they are removed (`global_remove`). Right now the entry stays in
-      `wm.wl_outputs`.
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
 - [ ] Workspace names per monitor.
 - [ ] Configure modes, scale and position directly through `wlr-output-management`, instead of only running
@@ -45,7 +43,6 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Make `Ui.sync` redraw only changed content. Check whether the menu, dock, and clip are redrawn on every manage sequence, even when nothing changes. If so, add per-panel dirty flags and row-/tile-level damage tracking instead of full redraws.
 - [ ] Optimize the animation path so only changed windows receive requests. While `anim_active` is set, a frame runs every 16 ms, but stationary windows must not receive `set_position` or `propose_dimensions` requests. Check whether the 16 ms timer drifts relative to the actual refresh rate.
 - [ ] Reduce idle costs to zero. When nothing is happening, `poll` should sleep without a timeout. Count wakeups per second with `strace -c` or `perf`. Autocollapse, monitor-settle, and animation timers must stop when no longer needed.
-- [ ] Check the desktop catcher's `wl_shm` memory usage. It uses a transparent surface covering the full output size on each monitor. A single 4K buffer takes approximately 33 MB; double buffering doubles that. If confirmed, switch to a tiny buffer with a viewport or `wp_single_pixel_buffer`.
 - [ ] Eliminate file I/O from the Manage/Render paths. Icon searches (themes and `.desktop` files), SVG loading, and `WMState` writes must never block a sequence. Cache results or defer work until outside the frame path.
 - [ ] Investigate benchmark outliers. In the checked-in benchmark, `layout columns` with 100 windows reaches 2721 µs maximum against a 20 µs average, while `layout stacks of 4` reaches 360 µs against an 8 µs average. Allocator overhead or page faults may be responsible, but this needs verification.
 - [ ] Run long-duration memory soak tests. Open and close windows, connect and disconnect monitors, and reload with `SIGHUP` for several hours while monitoring RSS. Check for leaks with Valgrind or the debug allocator.
@@ -126,7 +123,8 @@ Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the 
 
 - [ ] Better live config reload: a reload does not re-create the keymap (`XKB_DEFAULT_*`), and
       `environment` changes need a new session.
-- [ ] libinput: more options per device (accel profile, click method, disable while typing).
+- [ ] libinput: the options (`accel_speed`, `accel_profile`, `click_method`, `left_handed`, `disable_while_typing`) are global;
+      per-device settings (by name/vendor) are still open.
 
 ## wlprefs
 

@@ -105,6 +105,15 @@ pub const ClipCorner = enum { top_left, top_right, bottom_left, bottom_right };
 /// Where a submenu opens relative to its parent menu.
 pub const SubmenuAlign = enum { right, left };
 
+/// Touchpads and mice: how the pointer speed follows the finger speed.
+/// `default` leaves what libinput (and the device) chose.
+pub const AccelProfile = enum { default, flat, adaptive };
+
+/// Touchpads: how a physical click is told apart. `button_areas` = the bottom
+/// of the pad is the right (and middle) button, `clickfinger` = the number of
+/// fingers decides. `default` leaves what libinput chose.
+pub const ClickMethod = enum { default, button_areas, clickfinger };
+
 /// Window Maker's `IconificationStyle`: what a window does on its way to the
 /// Dock when it is minimized and back when it is restored (anim.zig).
 /// `random` picks one of the three for every window.
@@ -353,6 +362,16 @@ pub const Config = struct {
     natural_scroll: bool = false,
     /// Touchpads: no pointer movement while typing.
     disable_while_typing: bool = true,
+    /// Touchpads and mice: pointer speed in percent, -100 (slowest) to 100
+    /// (fastest). 0 is libinput's own default.
+    accel_speed: i32 = 0,
+    /// Touchpads and mice: `flat` (the pointer follows the finger 1:1),
+    /// `adaptive` (faster movement goes further) or `default`.
+    accel_profile: AccelProfile = .default,
+    /// Touchpads: `button_areas`, `clickfinger` or `default`.
+    click_method: ClickMethod = .default,
+    /// Touchpads and mice: swap the left and the right button.
+    left_handed: bool = false,
 
     // ---- Dock and Clip (dock_model.zig, dock_scene.zig) --------------------------
     /// Draw the Dock: a column of tiles on one screen edge. Its first tile is
@@ -1283,6 +1302,7 @@ fn intRange(comptime name: []const u8) struct { min: i64, max: i64 } {
     if (comptime std.mem.eql(u8, name, "dock_size")) return .{ .min = min_dock_size, .max = max_dock_size };
     if (comptime std.mem.eql(u8, name, "workspace_count")) return .{ .min = 1, .max = max_workspaces };
     if (comptime std.mem.eql(u8, name, "monitor_settle_ms")) return .{ .min = 0, .max = 10_000 };
+    if (comptime std.mem.eql(u8, name, "accel_speed")) return .{ .min = -100, .max = 100 };
     return .{ .min = 0, .max = max_pixels };
 }
 
@@ -1929,6 +1949,37 @@ test "keyboard options: defaults, values, and nonsense is refused" {
     try std.testing.expectEqual(@as(u32, 0), cfg.repeat_rate);
     try std.testing.expect(!cfg.repeat_binds);
     try std.testing.expectEqual(@as(u32, 2), cfg.parse_warnings);
+}
+
+test "libinput options: defaults, values, and what is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try std.testing.expectEqual(@as(i32, 0), cfg.accel_speed);
+    try std.testing.expectEqual(AccelProfile.default, cfg.accel_profile);
+    try std.testing.expectEqual(ClickMethod.default, cfg.click_method);
+    try std.testing.expect(!cfg.left_handed);
+    try parseText(arena.allocator(), &cfg,
+        \\accel_speed = -40
+        \\accel_profile = "flat"
+        \\click_method = "clickfinger"
+        \\left_handed = true
+    );
+    try std.testing.expectEqual(@as(i32, -40), cfg.accel_speed);
+    try std.testing.expectEqual(AccelProfile.flat, cfg.accel_profile);
+    try std.testing.expectEqual(ClickMethod.clickfinger, cfg.click_method);
+    try std.testing.expect(cfg.left_handed);
+    // Out of range or not a name: refused, the value stays.
+    try parseText(arena.allocator(), &cfg,
+        \\accel_speed = 101
+        \\accel_profile = "turbo"
+        \\click_method = 3
+    );
+    try std.testing.expectEqual(@as(i32, -40), cfg.accel_speed);
+    try std.testing.expectEqual(AccelProfile.flat, cfg.accel_profile);
+    try std.testing.expectEqual(ClickMethod.clickfinger, cfg.click_method);
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
 }
 
 test "the built-in config names each keyboard and session option once" {

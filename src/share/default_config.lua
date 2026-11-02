@@ -183,6 +183,10 @@ repeat_delay = 600               -- ms until it starts
 tap_to_click = true              -- touchpad: a tap is a click (and tap-and-drag drags)
 natural_scroll = false           -- true: the page follows the fingers
 disable_while_typing = true      -- touchpad: ignore the pointer while typing
+accel_speed = 0                  -- pointer speed, -100 .. 100 (percent; 0 = libinput's default)
+accel_profile = "default"        -- "flat" (1:1) | "adaptive" | "default" (what libinput chose)
+click_method = "default"         -- touchpad: "button_areas" | "clickfinger" | "default"
+left_handed = false              -- swap the left and the right button
 repeat_binds = true              -- false: a bind fires once per press, however long it is held
 
 -- The keymap of the keyboards. Empty = not set: then XKB_DEFAULT_LAYOUT & co,
