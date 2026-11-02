@@ -1,0 +1,53 @@
+wmaker-wl MODEL benchmark: not a compositor measurement
+build ReleaseSafe, zig 0.16.0, x86_64-linux, cpu rocketlake
+3 run(s) of the whole set, warm-up a tenth of the repetitions (3 to 100 calls), timer overhead about 18 ns per read
+times per call in microseconds; `-`: too few samples for that percentile; `*` timer-bound; `!` outlier max
+
+case                             n samples     mean       p50       p95       p99        max spread%  allocs     bytes
+layout columns, follow           1    3000     0.02      0.02      0.03      0.07      0.10     4.3        0         0
+layout columns                   1    3000     0.02      0.02      0.03      0.05      0.10     5.3        0         0
+invariants                       1    3000     0.45      0.43      0.45      0.83      2.29     2.5        0         0
+layout stacks of 4               1    3000     0.02      0.02      0.02      0.04      0.10     9.1        0         0
+layout 4 outputs, follow         1    3000     0.06      0.06      0.06      0.11      0.21     7.4        0         0
+move all windows                 1    3000     0.03      0.03      0.03      0.06      0.09    17.9        1        64
+place all windows                1    3000     0.04      0.04      0.05      0.09      0.55    20.0*       1        64
+layout columns, follow          10    3000     0.11      0.11      0.11      0.19      0.49     9.4        0         0
+layout columns                  10    3000     0.09      0.09      0.10      0.24      0.42     4.3        0         0
+invariants                      10    3000     0.50      0.50      0.52      0.80      1.98     5.9        0         0
+layout stacks of 4              10    3000     0.07      0.07      0.07      0.10      0.29     7.7        0         0
+layout 4 outputs, follow        10    3000     0.14      0.14      0.15      0.17      0.46     5.0        0         0
+move all windows                10    3000     0.27      0.26      0.27      0.56      1.10     4.6       10       640
+place all windows               10    3000     0.19      0.18      0.20      0.22      9.01!    7.2*      10       640
+layout columns, follow          50    3000     0.74      0.73      0.76      1.47      2.01     3.3        0         0
+layout columns                  50    3000     0.56      0.55      0.58      1.06      1.88     2.7        0         0
+invariants                      50    3000     0.92      0.88      0.99      1.73      3.93    10.6        0         0
+layout stacks of 4              50    3000     0.28      0.27      0.29      0.52      1.20    11.3        0         0
+layout 4 outputs, follow        50    3000     0.56      0.55      0.58      0.97      1.83     4.7        0         0
+move all windows                50    3000     1.28      1.25      1.31      2.36      5.70     5.1       50      3200
+place all windows               50    3000     1.11      1.08      1.16      1.47     16.58!    5.4       50      3200
+layout columns, follow         100    3000     1.46      1.41      1.51      2.76      4.36     8.7        0         0
+layout columns                 100    3000     1.08      1.07      1.13      1.76      3.09     5.6        0         0
+invariants                     100    3000     1.41      1.38      1.44      2.70      5.62     3.4        0         0
+layout stacks of 4             100    3000     0.62      0.57      0.68      1.20      2.59    13.1        0         0
+layout 4 outputs, follow       100    3000     1.21      1.17      1.24      2.32      5.02     6.5        0         0
+move all windows               100    3000     2.64      2.54      2.72      4.37     20.02     2.7      100      6400
+place all windows              100    3000     2.40      2.24      2.80      4.58     19.76    14.6      100      6400
+layout columns, follow         500    3000     7.75      7.41      8.78     20.34     38.69    14.6        0         0
+layout columns                 500    3000     5.86      5.61      6.45     10.41     23.57    11.9        0         0
+invariants                     500    3000     7.06      6.86      7.86     12.95     24.49     4.9        0         0
+layout stacks of 4             500    3000     3.47      3.33      3.82      5.34     18.21    10.7        0         0
+layout 4 outputs, follow       500    3000     8.13      8.01      9.03     13.27     24.15    11.2        0         0
+move all windows               500     900    12.90     12.35     14.47     25.39     28.66    10.2      500     32000
+place all windows              500     900    11.20     10.65     15.23     23.70     27.53    10.8      500     32000
+layout columns, follow        1000    3000    21.79     20.51     29.19     38.14     58.36     3.2        0         0
+layout columns                1000    3000    15.64     14.86     20.33     30.77     48.39     5.6        0         0
+invariants                    1000    3000    15.74     15.34     19.65     29.62     50.36     4.4        0         0
+layout stacks of 4            1000    3000     7.41      7.18      8.49     13.35     37.66     8.4        0         0
+layout 4 outputs, follow      1000    3000    17.38     16.94     21.27     32.25     45.76     5.3        0         0
+move all windows              1000     300    27.29     25.57     41.62     45.77     60.05    18.1     1000     64000
+place all windows             1000     300    23.64     22.88     30.17     38.30     38.40     5.1     1000     64000
+outputs: order+primary          16   15000     0.94      0.88      1.37      2.44      4.86     2.2        0         0
+monitors: rules+profile          8   15000     3.89      3.74      3.99      6.97     37.33     3.3        0         0
+
+*  the median is within a few timer reads: treat it as an upper bound.
+!  the maximum is over ten times the p99: look at p99 for the typical worst case.

@@ -18,6 +18,7 @@ const layout = @import("layout.zig");
 const workspace = @import("workspace.zig");
 const proc = @import("process.zig");
 const backend = @import("backend.zig");
+const monitors = @import("monitors.zig");
 
 const Command = types.Command;
 const WindowManager = types.WindowManager;
@@ -275,6 +276,14 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
         .focus_output_prev => focusOutput(wm, out, false),
         .move_to_output_next => moveToOutput(wm, out, true),
         .move_to_output_prev => moveToOutput(wm, out, false),
+        .focus_output_left => focusOutputToward(wm, out, .left),
+        .focus_output_right => focusOutputToward(wm, out, .right),
+        .focus_output_up => focusOutputToward(wm, out, .up),
+        .focus_output_down => focusOutputToward(wm, out, .down),
+        .move_to_output_left => moveToOutputToward(wm, out, .left),
+        .move_to_output_right => moveToOutputToward(wm, out, .right),
+        .move_to_output_up => moveToOutputToward(wm, out, .up),
+        .move_to_output_down => moveToOutputToward(wm, out, .down),
 
         .restore => if (workspace.lastMinimized(wm)) |w| restoreWindow(wm, w, out),
         .show_all => showAll(wm, out),
@@ -459,17 +468,37 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
 /// next workspace/spawn/move command then applies to THAT output.
 fn focusOutput(wm: *WindowManager, from: *Output, forward: bool) void {
     const target = types.cycleOutput(wm, from, forward) orelse return;
+    focusOutputTarget(wm, from, target);
+}
+
+fn focusOutputTarget(wm: *WindowManager, from: *Output, target: *Output) void {
     if (target == from) return;
     wm.active_output = target;
     wm.focus_request = workspace.defaultFocus(target.ws());
     wm.follow_request = true;
 }
 
+/// The monitor next to `from` in `dir`; nothing happens when there is none
+/// (no wrap-around: "left" of the leftmost monitor is nowhere).
+fn focusOutputToward(wm: *WindowManager, from: *Output, dir: monitors.Direction) void {
+    const target = types.outputToward(wm, from, dir) orelse return;
+    focusOutputTarget(wm, from, target);
+}
+
 /// Send the focused window to the next/previous output's current workspace
 /// and follow it there.
 fn moveToOutput(wm: *WindowManager, from: *Output, forward: bool) void {
-    const w = focusedWindow(wm) orelse return;
     const target = types.cycleOutput(wm, from, forward) orelse return;
+    moveToOutputTarget(wm, from, target);
+}
+
+fn moveToOutputToward(wm: *WindowManager, from: *Output, dir: monitors.Direction) void {
+    const target = types.outputToward(wm, from, dir) orelse return;
+    moveToOutputTarget(wm, from, target);
+}
+
+fn moveToOutputTarget(wm: *WindowManager, from: *Output, target: *Output) void {
+    const w = focusedWindow(wm) orelse return;
     if (target == from) return;
     w.home = .{}; // moved on purpose: it no longer belongs to the monitor it was taken from
     workspace.moveToWorkspace(wm, w, target.ws()) catch |err| {

@@ -315,6 +315,24 @@ pub fn run(
                 if (!there and std.mem.eql(u8, bin, "wmaker-wl")) all_ok = false;
                 try w.print("  [{s}] {s}\n", .{ if (there) "ok     " else "missing", final });
             }
+            // Installed is not the same as found: say where a login manager
+            // and systemd really look. Only on the real system (not with
+            // --destdir), and these notes do not change the exit status:
+            // a machine without systemd is not a broken install.
+            for (items) |item| {
+                if (item.place != .sessions) continue;
+                const final = try layout.path(a, item);
+                if (!loginManagerReads(final)) {
+                    try w.print("  [note   ] {s} is not in a directory login managers read ({s}): from a TTY run wmaker-wl-session\n", .{ final, session_dirs_text });
+                }
+            }
+            if (opts.destdir == null) {
+                const known = systemdKnowsUnit("wmaker-wl.service");
+                try w.print("  [{s}] systemctl --user knows wmaker-wl.service{s}\n", .{
+                    if (known) "ok     " else "note   ",
+                    if (known) "" else " (no user manager, or the unit is not in a directory systemd reads; the session then starts the compositor directly)",
+                });
+            }
             return all_ok;
         },
         .install => {
@@ -347,6 +365,35 @@ pub fn run(
             return true;
         },
     }
+}
+
+// ---- what a login manager and systemd can see -----------------------------------
+
+/// The directories login managers read `wayland-sessions` from. A session
+/// file anywhere else works from a TTY but is not in their list.
+const session_dirs = [_][]const u8{
+    "/usr/share/wayland-sessions",
+    "/usr/local/share/wayland-sessions",
+};
+const session_dirs_text = "/usr/share/wayland-sessions, /usr/local/share/wayland-sessions";
+
+/// Is the session file `path` in a directory the login managers read?
+pub fn loginManagerReads(path: []const u8) bool {
+    const dir = path[0 .. std.mem.lastIndexOfScalar(u8, path, '/') orelse 0];
+    for (session_dirs) |d| {
+        if (std.mem.eql(u8, dir, d)) return true;
+    }
+    return false;
+}
+
+extern "c" fn system(command: [*:0]const u8) c_int;
+
+/// Does `systemctl --user cat <unit>` find the unit? false without systemctl,
+/// without a user manager, or when the unit is not in a directory it reads.
+fn systemdKnowsUnit(unit: []const u8) bool {
+    var buf: [128]u8 = undefined;
+    const cmd = std.fmt.bufPrintZ(&buf, "systemctl --user cat {s} >/dev/null 2>&1", .{unit}) catch return false;
+    return system(cmd.ptr) == 0;
 }
 
 // ---- systemd readiness -----------------------------------------------------------
@@ -494,4 +541,22 @@ test "notify: a datagram reaches the socket" {
     var buf: [32]u8 = undefined;
     const got = std.c.recv(fd, &buf, buf.len, 0);
     try std.testing.expectEqualStrings("READY=1", buf[0..@intCast(got)]);
+}
+
+test "loginManagerReads: only the two system directories count" {
+    try std.testing.expect(loginManagerReads("/usr/share/wayland-sessions/wmaker-wl.desktop"));
+    try std.testing.expect(loginManagerReads("/usr/local/share/wayland-sessions/wmaker-wl.desktop"));
+    try std.testing.expect(!loginManagerReads("/home/me/.local/share/wayland-sessions/wmaker-wl.desktop"));
+    try std.testing.expect(!loginManagerReads("/opt/x/share/wayland-sessions/wmaker-wl.desktop"));
+    try std.testing.expect(!loginManagerReads("/usr/share/wayland-sessions-extra/wmaker-wl.desktop"));
+}
+
+test "the session script checks the config and reports a crash" {
+    const script = @embedFile("share/wmaker-wl-session");
+    try std.testing.expect(std.mem.indexOf(u8, script, "--check") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "after_exit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "XDG_VTNR") != null);
+    // The compositor must not be `exec`ed any more, or nothing could report its end.
+    try std.testing.expect(std.mem.indexOf(u8, script, "exec \"$wm\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "exec dbus-run-session") == null);
 }

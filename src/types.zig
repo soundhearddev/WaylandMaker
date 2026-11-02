@@ -636,6 +636,17 @@ pub const Command = union(enum) {
     /// Move the focused window to the next / previous output.
     move_to_output_next,
     move_to_output_prev,
+    /// The monitor next to the current one on the desk, by position
+    /// (`outputToward`). Nothing happens when there is none that way.
+    focus_output_left,
+    focus_output_right,
+    focus_output_up,
+    focus_output_down,
+    /// Move the focused window to the monitor in that direction.
+    move_to_output_left,
+    move_to_output_right,
+    move_to_output_up,
+    move_to_output_down,
 };
 
 // ============================================================================

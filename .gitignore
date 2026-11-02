@@ -4,3 +4,4 @@ zig-pkg/
 docs/other/*
 log.txt
 .gitea
+dump/

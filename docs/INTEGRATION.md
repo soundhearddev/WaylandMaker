@@ -59,10 +59,11 @@ tiles are not made from arbitrary windows.
 wmaker-wl is the compositor, so there is no separate window manager protocol. It serves `wl_compositor`,
 `wl_subcompositor`, `wl_shm`, `wl_data_device_manager`, primary selection, `wl_seat`, `wl_output`,
 `xdg_wm_base`, `xdg-decoration` (server side: it draws only the border), `xdg-output`, `viewporter`,
-`single-pixel-buffer`, `linux-dmabuf` (and direct scanout of a fullscreen client through it) and
-`cursor-shape-v1`.
+`single-pixel-buffer`, `linux-dmabuf` (and direct scanout of a fullscreen client through it),
+`cursor-shape-v1` and `wlr-layer-shell` (panels, launchers, wallpapers and notification daemons; see
+`src/layer.zig`).
 
-Not served yet: `wlr-layer-shell`, `ext-session-lock`, idle notify and inhibit, `xdg-activation`,
+Not served yet: `ext-session-lock`, idle notify and inhibit, `xdg-activation`,
 foreign-toplevel, screencopy, `wlr-output-management`, pointer constraints. See
 [TODO wlroots.md](TODO%20wlroots.md) for the order.
 

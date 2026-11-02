@@ -307,15 +307,17 @@ pub fn signalReload() usize {
 // Tests
 // ----------------------------------------------------------------------------
 
-/// A fresh directory under /tmp, removed (with what the tests put in it)
+/// A fresh directory (see tmpdir.zig), removed (with what the tests put in it)
 /// by `cleanup`.
+const tmpdir = @import("tmpdir.zig");
+
 const TmpDir = struct {
     path: [:0]u8,
 
     fn make(gpa: std.mem.Allocator) !TmpDir {
-        var tmpl = "/tmp/wlprefs-test-XXXXXX".*;
-        const made = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
-        return .{ .path = try gpa.dupeZ(u8, std.mem.span(made)) };
+        var tmpl: [tmpdir.buf_len]u8 = undefined;
+        const made = try tmpdir.make(&tmpl, "wlprefs-test");
+        return .{ .path = try gpa.dupeZ(u8, made) };
     }
 
     fn file(d: TmpDir, gpa: std.mem.Allocator, name: []const u8) ![:0]u8 {

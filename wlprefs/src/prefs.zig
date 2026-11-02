@@ -418,14 +418,16 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
+const tmpdir = @import("tmpdir.zig");
+
 const Tmp = struct {
     dir: [:0]u8,
     gpa: std.mem.Allocator,
 
     fn make(gpa: std.mem.Allocator) !Tmp {
-        var tmpl = "/tmp/wlprefs-prefs-XXXXXX".*;
-        const d = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
-        return .{ .dir = try gpa.dupeZ(u8, std.mem.span(d)), .gpa = gpa };
+        var tmpl: [tmpdir.buf_len]u8 = undefined;
+        const d = try tmpdir.make(&tmpl, "wlprefs-prefs");
+        return .{ .dir = try gpa.dupeZ(u8, d), .gpa = gpa };
     }
 
     fn path(t: Tmp, name: []const u8) ![]u8 {

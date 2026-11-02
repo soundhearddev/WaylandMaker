@@ -1,7 +1,5 @@
 # TODO
 
-Roughly in the order I care about them. Nothing here is promised.
-
 ## Window manager
 
 - [ ] **Title bars.** There are none; windows only have a border. Draw them as scene
@@ -21,16 +19,11 @@ Roughly in the order I care about them. Nothing here is promised.
       compositor, which would end the session. `SIGHUP` reload
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
 - [ ] **Window menus and the window list** (root menu is done): see section 4 of [TODO wlroots.md](TODO%20wlroots.md).
-- [ ] **Icons from `~/.local/share/icons` and `~/.icons`.** Only `/usr/share/icons` and
-      `/usr/share/pixmaps` are searched.
 
 ## Monitors
 
 See [MONITORS.md](MONITORS.md).
 
-- [ ] Commands `focus_output_left/right/up/down` and `move_to_output_left/...`. The neighbour search
-      (`types.outputToward`) is done; the commands still need entries in `types.Command`, `action.zig` and
-      `wlprefs/src/actions.zig`.
 - [ ] Release `wl_output` globals when they are removed (`global_remove`). Right now the entry stays in
       `wm.wl_outputs`.
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
@@ -73,7 +66,8 @@ See [MONITORS.md](MONITORS.md).
 #### Nice to have
 
 - [ ] Add benchmarks with animations and multiple outputs to `src/bench.zig`.
-- [ ] Run `bench -- --check` in CI against a stored baseline to catch regressions. Current performance budgets are intentionally loose.
+      *Multiple outputs: done (`layout 4 outputs`). Animations: not yet.*
+- [ ] Run `bench -- --check` in CI against a stored baseline (CI runs the budgets; `--json` / `--baseline` exist, but a baseline from a hosted runner means little) to catch regressions. Current performance budgets are intentionally loose.
 - [ ] Document reference numbers for fixed, real hardware rather than a container.
 - [ ] Compare build configurations: `ReleaseSafe` vs. `ReleaseFast`, stripping, and LTO. If the performance difference is small, recommend `ReleaseSafe`.
 
@@ -86,17 +80,10 @@ The session files are in place ([SESSION.md](SESSION.md)); none of it has run on
       comes up, that `READY=1` arrives, and that `wmaker-wl-shutdown.target` stops what it should.
 - [ ] A **crash** ends the whole session. At least write the last log lines and a state dump to
       `session.log` before dying, and show a short message on the TTY.
-- [ ] `wmaker-wl --session-status` should also check that `wmaker-wl.service` is known to
-      `systemctl --user` and that the login manager lists the session.
+      *Partly done: `wmaker-wl-session` logs the exit status (and the last journal lines under systemd) and prints a message on the terminal. A state dump from the dying process itself is still missing.*
 - [ ] **Packages**: `flake.nix` and `manifest.scm` are development shells only. Add a Nix package
-      and NixOS module (`services.displayManager.sessionPackages`), a Guix package, an AUR
-      `PKGBUILD`, a Debian/Fedora spec.
-- [ ] **CI**: `zig build test` and `zig build test-all` on every push, plus `zig build` against
-      wlroots 0.20 in a container. There is none (no `.github`, no `.gitea`).
-- [ ] Release tags and a changelog; `build.zig.zon` says 0.3.0.
-- [ ] Per-seat/session variables: `XDG_SESSION_ID`, `XDG_VTNR` and `LIBSEAT_BACKEND` are not looked at.
-- [ ] Add `wmaker-wl --check` to the session script, so a broken config is reported in
-      `session.log` before the compositor starts (it starts with defaults anyway).
+      and NixOS module (`services.displayManager.sessionPackages`), a Guix package
+
 
 ## Desktop integration
 
@@ -113,47 +100,27 @@ Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the 
 
 ## Documentation
 
-- [ ] `docs/WLPREFS-ICONS.md` is named in `wlprefs/src/icons.zig` and `wlprefs/TODO.md`, but does not exist.
-- [ ] `INTEGRATION.md` says `wlr-layer-shell` is not served, yet `src/layer.zig` and `build.zig` have it.
-      Check the list of served protocols there against `server.zig`.
-- [ ] `TODO wlroots.md` is out of date: layer-shell, the Dock, libinput options (`tap_to_click`,
-      `natural_scroll`) and the clipboard exist now; tick them off or delete the done parts. It
-      still says "not yet run".
-- [ ] `wlprefs/TODO.md` is German, everything else is English.
 - [ ] `docs/KEYBINDS.md`/`README.md`: the key table and `--help` must stay in step; a test that
       compares them would do.
-- [ ] A manual page (`wmaker-wl.1`, `wmaker-wl-session.1`), installed by `zig build install`.
+      *Done for the options: a test compares the README command-line block, the manual page and `--help`. The key table is not compared.*
 
 ## Tests
 
 - [ ] Nothing in `zig build test` runs a compositor. Add a nested smoke test
       (`WLR_BACKENDS=headless`): start, connect a client, open a window, exit.
 - [ ] Tests of the example DockApps run only with `test-all`.
-- [ ] A fuzz test for the Lua config loader (the XPM and menu parsers have one).
 
 ### Benchmark improvements
 
-- [ ] **Increase sample sizes.** Run at least 1,000 measured iterations per test case where practical, especially for `place all windows` and benchmarks with 1,000 windows.
-- [ ] **Add warm-up iterations.** Execute and discard initial iterations before collecting measurements to reduce startup and initialization effects.
-- [ ] **Expand window-count coverage.** Benchmark 1, 10, 50, 100, 500, and 1,000 windows to identify scaling trends and potential bottlenecks.
-- [ ] **Improve percentile reliability.** Report p50, p95, p99, and max only when enough samples are available; document sample counts and avoid overinterpreting sparse tails.
-- [ ] **Measure allocations.** Track allocation counts and allocated bytes per operation, particularly for layout recalculation, `move all windows`, and `place all windows`.
-- [ ] **Separate benchmark overhead.** Measure timer and harness overhead, use sufficiently long batches, and verify that measurement overhead does not dominate short operations.
-- [ ] **Repeat benchmark runs.** Run each benchmark multiple times and report per-run results or aggregate statistics to identify system noise and inconsistent results.
-- [ ] **Add regression tracking.** Save benchmark results as machine-readable output and compare against a baseline to detect performance regressions between commits.
+
 - [ ] **Profile expensive operations.** Investigate outliers in `invariants`, `outputs: order+primary`, and `monitors: rules+profile` to distinguish measurement noise from actual bottlenecks.
 - [ ] **Benchmark the real compositor.** Measure manage and render paths with real Wayland clients at 1, 10, 50, and 100 windows, including p50/p95/p99 and maximum latency.
 - [ ] **Measure end-to-end frame performance.** Track frame times and missed frame deadlines separately from internal model-operation timings.
-- [ ] **Document benchmark scope.** Explicitly distinguish ReleaseSafe model benchmarks from live compositor measurements, including hardware, compiler version, build flags, and test conditions.
 
 ## Small things
 
 - [ ] **Remove `protocol/`**: fetch `wlr-protocols` as a pinned dependency instead of keeping a copy of its XML, and prune
       the unused `scanner.generate` lines. Details: section 8 of [TODO wlroots.md](TODO%20wlroots.md).
-- [ ] `build.zig` is not `zig fmt` clean.
-- [ ] Temp files are made under a fixed `/tmp/...-XXXXXX` template in `xpm.zig`, `wlprefs`: use `$XDG_RUNTIME_DIR` or `mkstemp`.
-- [ ] `dump/` holds two benchmark outputs in the repository; move them to a release page or `.gitignore` them.
-- [ ] `.gitignore` ends with `.gitea` without a newline.
 
 ## The Rest
 

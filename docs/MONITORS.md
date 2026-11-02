@@ -24,6 +24,10 @@ does two things:
 - **Order by position.** `focus_output_next` / `focus_output_prev` go left to right
   (`output_order = "position"`), not in the order the monitors were announced. `"connection"` gives that
   old behaviour back.
+- **Directions.** `focus_output_left/right/up/down` and `move_to_output_left/right/up/down` go to the
+  monitor that lies next to the current one on the desk (the one that shares most of its edge, nearest
+  first). They do not wrap around: left of the leftmost monitor is nowhere, and nothing happens.
+  Windows moved this way lose their remembered home monitor, like with `move_to_output_next`.
 - **Primary monitor.** New windows, the Dock and the Clip go there unless something else decides.
 - The only connected monitor can never be disabled.
 
@@ -73,8 +77,6 @@ the profile chosen last, and for windows `home=<key>/wsN`. See [DEBUGGING.md](DE
 
 ## Not done
 
-- `focus_output_left/right/up/down` and moving a window to the neighbouring monitor. The neighbour search
-  (`types.outputToward`, `monitors.neighbor`) exists and is tested; the commands themselves are missing.
 - Setting modes, scale and position directly through `wlr-output-management` instead of only running hook
   commands.
 - Dock and Clip per monitor, and separate workspace names per monitor.

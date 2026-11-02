@@ -7,12 +7,21 @@
 #   3. reads ~/.config/wmaker-wl/env (optional, plain sh), e.g.
 #          export XKB_DEFAULT_LAYOUT=de
 #   4. makes sure XDG_RUNTIME_DIR exists
-#   5. runs the compositor: as the systemd user unit wmaker-wl.service when it
+#   5. checks config.lua and friends (`wmaker-wl --check`): a problem is
+#      reported in session.log, the compositor starts with defaults anyway
+#   6. runs the compositor: as the systemd user unit wmaker-wl.service when it
 #      is installed and a user manager is running (then graphical-session.target
 #      works, and the compositor log is in `journalctl --user -u wmaker-wl`),
 #      otherwise directly, under dbus-run-session if there is no session bus.
 #
+# When the compositor stops with an error or a signal (a crash ends the whole
+# session) the exit status and, under systemd, the last journal lines are
+# written to session.log, and a short message goes to the terminal that
+# started the session.
+#
 # Overrides: WMAKER_WL=/path/to/wmaker-wl   WMAKER_NO_SYSTEMD=1
+# Looked at, not changed: XDG_SESSION_ID, XDG_VTNR, LIBSEAT_BACKEND (the
+# first two are filled in when the login manager did not set them).
 
 name=wmaker-wl-session
 
@@ -46,9 +55,26 @@ if [ ! -t 2 ] && [ -n "${HOME:-}" ] && mkdir -p "$state" 2>/dev/null; then
     if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 1048576 ]; then
         mv -f "$log" "$log.old"
     fi
+    exec 3>&2 # the terminal, for the message after a crash
     exec >>"$log" 2>&1
     echo "== $(date '+%F %T') $name (pid $$)"
 fi
+
+# Where the session runs: logind sets these; from a plain TTY they may be
+# missing. Only filled in, never overwritten.
+if [ -z "${XDG_VTNR:-}" ]; then
+    case $(tty 2>/dev/null) in
+    /dev/tty[0-9]*) XDG_VTNR=$(tty | sed 's|/dev/tty||') && export XDG_VTNR ;;
+    esac
+fi
+if [ -z "${XDG_SESSION_ID:-}" ] && command -v loginctl >/dev/null 2>&1; then
+    sid=$(loginctl show-user "$(id -u)" -p Display --value 2>/dev/null)
+    if [ -n "$sid" ]; then
+        XDG_SESSION_ID=$sid
+        export XDG_SESSION_ID
+    fi
+fi
+echo "$name: session ${XDG_SESSION_ID:-?} vt ${XDG_VTNR:-?} seat ${XDG_SEAT:-?} libseat ${LIBSEAT_BACKEND:-auto}"
 
 cfg=${XDG_CONFIG_HOME:-${HOME:-}/.config}/wmaker-wl
 if [ -r "$cfg/env" ]; then
@@ -73,11 +99,58 @@ fi
 
 command -v "$wm" >/dev/null 2>&1 || die "cannot find the compositor ($wm); set WMAKER_WL"
 
+# A broken config is reported here, in the log, before the compositor starts
+# (it starts with the defaults for what it cannot read). Of our arguments only
+# --config FILE and --config-dir DIR matter for the check.
+run_check() {
+    n=$#
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        a=$1
+        shift
+        i=$((i + 1))
+        case $a in
+        --config | --config-dir)
+            if [ "$i" -lt "$n" ]; then
+                set -- "$@" "$a" "$1"
+                shift
+                i=$((i + 1))
+            fi
+            ;;
+        esac
+    done
+    "$wm" --check "$@"
+}
+
 use_systemd() {
     [ -z "${WMAKER_NO_SYSTEMD:-}" ] && [ -z "${WMAKER_WL:-}" ] || return 1
     command -v systemctl >/dev/null 2>&1 || return 1
     systemctl --user cat wmaker-wl.service >/dev/null 2>&1
 }
+
+# After the compositor stopped with status $1: a normal end says nothing; an
+# error or a signal (128 + n) goes to the log, and to the terminal if there is one.
+after_exit() {
+    rc=$1
+    [ "$rc" -eq 0 ] && return 0
+    if [ "$rc" -gt 128 ]; then
+        what="was stopped by signal $((rc - 128))"
+    else
+        what="exited with status $rc"
+    fi
+    echo "$name: the compositor $what at $(date '+%F %T')"
+    if use_systemd; then
+        journalctl --user -u wmaker-wl.service -n 30 --no-pager 2>/dev/null
+    fi
+    if [ -n "${log:-}" ]; then
+        echo "wmaker-wl: the compositor $what; see $log" >&3 2>/dev/null
+    fi
+    return 0
+}
+
+if ! run_check "$@"; then
+    echo "$name: --check found problems (see above); starting anyway"
+fi
 
 if use_systemd; then
     if systemctl --user is-active --quiet wmaker-wl.service; then
@@ -93,6 +166,7 @@ if use_systemd; then
     echo "$name: starting wmaker-wl.service"
     systemctl --user --wait start wmaker-wl.service
     rc=$?
+    after_exit "$rc"
     # Stop everything that was bound to graphical-session.target.
     systemctl --user start --job-mode=replace-irreversibly wmaker-wl-shutdown.target
     systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY NOTIFY_SOCKET \
@@ -102,6 +176,10 @@ fi
 
 echo "$name: starting $wm"
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
-    exec dbus-run-session -- "$wm" "$@"
+    dbus-run-session -- "$wm" "$@"
+else
+    "$wm" "$@"
 fi
-exec "$wm" "$@"
+rc=$?
+after_exit "$rc"
+exit "$rc"

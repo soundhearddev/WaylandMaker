@@ -29,6 +29,7 @@ pub const icons = @import("icons.zig");
 pub const binds = @import("binds.zig");
 pub const check = @import("check.zig");
 pub const themes = @import("themes.zig");
+pub const tmpdir = @import("tmpdir.zig");
 
 pub const version_string = "0.2.1";
 

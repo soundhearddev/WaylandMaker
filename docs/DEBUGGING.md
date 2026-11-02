@@ -81,16 +81,50 @@ test names appear once in the output.
 
 ## Benchmark (`src/bench.zig`)
 
-Synthetic models with 10, 100 and 1000 windows, no compositor. Each call is timed for: `layout.compute`
-(columns and stacks, with and without `follow`), placing all windows, moving all of them to another
-workspace, the invariant check, monitor order and primary with 16 monitors, and rule and profile lookup.
-p50, p95 and p99 come from a log2 histogram (microseconds) and are rounded up to the bucket's upper bound,
-so they are **not** exact. Mean and maximum are exact.
+`zig build bench -Doptimize=ReleaseSafe` (or `ReleaseFast`; a Debug run is only printed, never checked).
+
+**Scope.** This is a *model* benchmark: synthetic models with 1, 10, 50, 100, 500 and 1000 windows, no
+compositor, no clients, no rendering. It times `layout.compute` (columns and stacks, with and without
+`follow`, and the same windows spread over four outputs), placing all windows, moving all of them to
+another workspace, the invariant check, monitor order and primary with 16 monitors, and rule and profile
+lookup. It says "the model is not the problem" or "the model became quadratic". It says nothing about frame
+times, missed deadlines or what real clients cost; for those see the probes above (`perf`, `SIGUSR1`).
+
+**How a number is made.**
+
+- Each case is warmed up (untimed; `--warmup N`, default a tenth of the repetitions, 3 to 100) and then
+  timed call by call. Calls shorter than 2 µs are timed in batches (the `batch` field in `--json`/`--csv`)
+  so that the clock read does not dominate. The cost of a clock read is measured and printed. A case whose
+  median is within ten clock reads and that was not batched is marked `*`: take it as an upper bound.
+- At least 1000 timed repetitions for the cheap cases; placing and moving every window take fewer with
+  500 and 1000 windows (300 and 100), because one repetition takes milliseconds. `--quick` divides by ten.
+- The whole set is run `--repeat N` times (default 3, `--quick` 1). The table pools all samples; `spread%`
+  is how far apart the per-run means were. A large spread means a noisy machine.
+- p50, p95 and p99 are exact (nearest rank over all samples, not a histogram) and are only printed when
+  there are enough samples: 10, 20 and 100. Otherwise `-`. The maximum is always printed; `!` marks a maximum
+  over ten times the p99, which is one bad sample (a page fault, the scheduler), not the cost to expect.
+- `allocs` and `bytes` are what one call allocates, counted by an allocator under the model. A hot path that
+  starts allocating shows up there before it shows up in time. (Today `move all windows` and `place all windows`
+  allocate once per window; layout, the invariant check and the monitor lookups do not allocate.)
+
+**Machine readable and regressions.**
+
+```sh
+zig build bench -Doptimize=ReleaseSafe -- --json --out dump/base.json    # dump/ is in .gitignore
+# ... change something ...
+zig build bench -Doptimize=ReleaseSafe -- --baseline dump/base.json      # exit 1 on a regression
+```
+
+`--baseline FILE` compares the means with an earlier `--json` result and fails when a case is more than
+`--threshold PCT` percent slower (default 50) *and* more than a microsecond slower. Compare runs from the
+same machine and build mode; absolute numbers from different hardware mean little. `--csv` prints the same
+table as CSV. The header of a run (and `meta` in the JSON) records build mode, Zig version, OS, architecture
+and CPU, so a result can say where it was measured.
 
 The budgets in `--check` are deliberately loose (roughly ten times what a current laptop needs). They are
 meant to catch "layout became quadratic", not a bad day, and they only apply to optimized builds.
 
-A run is checked in as `dump/bench_*.txt`. In that Debug build, with 1000 windows, a layout takes about
-0.1 ms, the invariant check about 0.07 ms, and moving all windows to another workspace about 10 ms. The
-model scales roughly linearly, so stutter is more likely to come from clients, rendering or the config
-than from the model. I have not measured with real clients yet.
+Reference, ReleaseSafe on one 2025 server core, 1000 windows: layout about 20 µs, the invariant check about
+16 µs, moving all windows about 30 µs (one allocation per window). The model scales roughly linearly,
+so stutter is more likely to come from clients, rendering or the config than from the model. These numbers are
+from a container, not from fixed reference hardware, and I have not measured with real clients yet.

@@ -1,20 +1,9 @@
 # Development shell for wmaker-wl.
-#
-#   nix-shell        this file, with <nixpkgs>
-#   nix develop      flake.nix, which uses this file (so the lists below exist once)
-#
-# Then: `zig build` (wmaker-wl + wlprefs), `zig build test`, `zig build run`.
-# The Lua of config.lua is built from source by the `zlua` dependency, so
-# there is no Lua package here; Zig compiles that C itself.
 { pkgs ? import <nixpkgs> { } }:
 
 let
-  # build.zig.zon needs Zig 0.16.0: take a 0.16 package when nixpkgs has one.
   zig = pkgs.zig_0_16 or pkgs.zig;
-
-  # wmaker-wl needs wlroots 0.20.
   wlroots = pkgs.wlroots_0_20 or pkgs.wlroots;
-
 
   libs = with pkgs; [
     wlroots
@@ -28,14 +17,13 @@ let
   ];
 in
 pkgs.mkShell {
-  packages = [ zig ] ++ libs ++ (with pkgs; [
+  packages = [ zig pkgs.stdenv.cc ] ++ libs ++ (with pkgs; [
     pkg-config
     wayland-scanner
     wayland-protocols
   ]);
 
-  # Zig does not go through Nix's compiler wrapper: let the freshly built
-  # wmaker-wl and wlprefs find the shared libraries anyway.
+  NIX_CFLAGS_COMPILE = "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libs;
 
   shellHook = ''
@@ -44,7 +32,7 @@ pkgs.mkShell {
       echo "warning: build.zig.zon needs Zig 0.16.0 or newer" >&2
     fi
     echo "  zig build          build wmaker-wl and wlprefs"
-    echo "  zig build test     run the tests (test-wlprefs: wlprefs only)"
+    echo "  zig build test     run the tests"
     echo "  zig build run      start nested in the current session"
     echo "  ./zig-out/bin/wmaker-wl   from a TTY"
   '';

@@ -1360,6 +1360,75 @@ test "move_to_output_next takes the focused window along, tiled or floating" {
     try std.testing.expectEqual(@as(i32, 300), fl.float_rect.w);
 }
 
+test "focus_output_left/right go by position and do not wrap" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f); // to the right of the first
+    defer destroySecondOutput(second);
+
+    const a = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), a);
+    workspace.activate(a);
+    f.wm.active_output = f.out;
+
+    // Nothing to the left of the leftmost monitor, nor above or below.
+    action_mod.run(&f.wm, .focus_output_left);
+    action_mod.run(&f.wm, .focus_output_up);
+    action_mod.run(&f.wm, .focus_output_down);
+    try std.testing.expect(f.wm.active_output == f.out);
+    try std.testing.expect(f.wm.focus_request == null);
+
+    action_mod.run(&f.wm, .focus_output_right);
+    try std.testing.expect(f.wm.active_output == second);
+    // Nothing further right: stays.
+    action_mod.run(&f.wm, .focus_output_right);
+    try std.testing.expect(f.wm.active_output == second);
+
+    action_mod.run(&f.wm, .focus_output_left);
+    try std.testing.expect(f.wm.active_output == f.out);
+    try std.testing.expect(f.wm.focus_request == a);
+}
+
+test "move_to_output_right/left take the focused window to the neighbour" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const second = try addSecondOutput(f);
+    defer destroySecondOutput(second);
+
+    const t = try f.newWindow();
+    try workspace.placeTiled(&f.wm, f.cur(), t);
+    workspace.activate(t);
+    f.wm.active_output = f.out;
+
+    // No monitor to the left: the window stays.
+    action_mod.run(&f.wm, .move_to_output_left);
+    try std.testing.expect(t.workspace == f.cur());
+
+    action_mod.run(&f.wm, .move_to_output_right);
+    try std.testing.expect(t.workspace == second.ws());
+    try std.testing.expect(f.wm.active_output == second);
+    try std.testing.expect(f.wm.focus_request == t);
+
+    action_mod.run(&f.wm, .move_to_output_left);
+    try std.testing.expect(t.workspace == f.out.ws());
+    try std.testing.expect(f.wm.active_output == f.out);
+}
+
+test "the directional output commands parse from their names" {
+    var cfg: config.Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    const a = std.testing.allocator;
+    const dirs = [_][]const u8{ "left", "right", "up", "down" };
+    inline for (.{ "focus_output_", "move_to_output_" }) |prefix| {
+        for (dirs) |d| {
+            var buf: [40]u8 = undefined;
+            const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, d });
+            const cmd = try action_mod.parse(a, &cfg, name);
+            try std.testing.expectEqualStrings(name, @tagName(cmd));
+        }
+    }
+}
+
 test "with one output the output commands do nothing" {
     const f = try Fixture.init();
     defer f.deinit();

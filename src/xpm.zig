@@ -338,6 +338,7 @@ fn pack(code: []const u8) u32 {
 // ----------------------------------------------------------------------------
 
 const fileutil = @import("fileutil.zig");
+const tmpdir = @import("tmpdir.zig");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -512,14 +513,14 @@ test "load: missing, directory and valid files" {
     try testing.expect(load(gpa, "/nonexistent/wmaker-wl/icon.xpm") == null);
     try testing.expect(load(gpa, "/tmp") == null); // a directory
 
-    var tmpl = "/tmp/wmaker-xpm-XXXXXX".*;
-    const dir = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
+    var tmpl: [tmpdir.buf_len]u8 = undefined;
+    const dir = try tmpdir.make(&tmpl, "wmaker-xpm");
     defer {
-        var cmd: [96]u8 = undefined;
-        if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{std.mem.span(dir)})) |z| _ = c.system(z.ptr) else |_| {}
+        var cmd: [tmpdir.buf_len + 16]u8 = undefined;
+        if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{dir})) |z| _ = c.system(z.ptr) else |_| {}
     }
-    var path_buf: [96]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.xpm", .{std.mem.span(dir)});
+    var path_buf: [tmpdir.buf_len + 16]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/icon.xpm", .{dir});
     const f = c.fopen(path.ptr, "wb") orelse return error.Open;
     _ = c.fwrite(sample.ptr, 1, sample.len, f);
     _ = c.fclose(f);

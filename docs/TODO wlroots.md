@@ -68,12 +68,13 @@ Known gaps (the list above was longer; DockApps, animations, client move/resize 
 - [x] `WMWindowAttributes` per `app_id` applied on first placement (and when app_id changes later)
 - [x] Animations driven directly: `src/motion.zig` (shared model code), one pass per displayed frame (`Monitor.onFrame`), nothing when idle
 - [x] Layer-shell server (`wlr-layer-shell`, `layer.zig`): panels, exclusive zones, work area, keyboard interactivity  (not run)
-- [ ] Multi-monitor: hotplug, rules, profiles, `focus/move to output`
+- [x] `focus/move to output`: next / previous and left / right / up / down (model, tested)
+- [ ] Multi-monitor with the wlroots outputs: hotplug, rules, profiles applied to the real outputs
 
 Performance notes (the priority): a pass places only what changed (`View.last` skips unchanged windows);
 animations cost one pass per displayed frame and nothing afterwards; the cursor sets its image only on change;
 linux-dmabuf is connected to the scene, so a fullscreen client can be scanned out directly.
-Still open: monitor rules/profiles and focus/move to output with the wlroots outputs. (The layer-shell XML is vendored in `protocol/`.)
+Still open: applying monitor rules/profiles to the wlroots outputs (the commands to focus / move to an output exist). (The layer-shell XML is vendored in `protocol/`.)
 
 ## 4. Shell parts (milestone C: Window Maker feel)
 
@@ -103,8 +104,6 @@ Still open: monitor rules/profiles and focus/move to output with the wlroots out
 
 ## 6. Switch-over
 
-- [ ] Run as a real session from a TTY for a full week (the session itself: [SESSION.md](SESSION.md), [TODO.md](TODO.md))
-- [ ] Run it at all with wlroots 0.20: nothing in this file has been seen on a screen
 - [x] `zig build run` starts the compositor
 - [x] README, `docs/ARCHITECTURE.md` and the other docs describe the wlroots build
 - [x] `protocol/river-*.xml` and the river backend removed
@@ -118,7 +117,6 @@ Still open: monitor rules/profiles and focus/move to output with the wlroots out
 - Own compositor means own crash handling: a crash kills the whole session
 - Security-sensitive parts (lock screen, screencopy permissions) need care
 - `wp_color_manager_v1` needs wayland-protocols >= 1.44 (`-Dcolor-manager-version`): that version choice is a build option nobody should have to know; probe it, or drop the protocol until something uses it
-- The build is not reproducible offline: the dependencies come from codeberg and github; vendor them or give `zig fetch` hashes a mirror
 
 ## 7. Hardening and missing basics (found in review)
 

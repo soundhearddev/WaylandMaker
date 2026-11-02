@@ -113,6 +113,10 @@ pub fn buildWlprefs(
     mod.addAnonymousImport("default_config.lua", .{
         .root_source_file = b.path("src/share/default_config.lua"),
     });
+    // icons.zig checks docs/WLPREFS-ICONS.md against its icon table.
+    mod.addAnonymousImport("WLPREFS-ICONS.md", .{
+        .root_source_file = b.path("docs/WLPREFS-ICONS.md"),
+    });
 
     linkGraphics(mod, projectPath(b, "src"));
 
@@ -397,6 +401,10 @@ pub fn build(b: *std.Build) void {
     );
 
     linkCairo(b, test_module);
+    // cli.zig compares the options in README.md with `--help`.
+    test_module.addAnonymousImport("README.md", .{
+        .root_source_file = b.path("README.md"),
+    });
     test_module.addImport("wlprefs_settings", wlprefs.settings);
     test_module.addImport("wlprefs_actions", wlprefs.actions);
 

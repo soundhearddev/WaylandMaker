@@ -312,3 +312,73 @@ test "command line: the session options" {
     try std.testing.expect(parseTest(&.{"--dry-run"}) == .needs_session);
     try std.testing.expect(parseTest(&.{ "--install-session", "--prefix" }) == .needs_value);
 }
+
+// ---- the README and --help say the same --------------------------------------------------
+
+/// Every `--option` word in `text`, once each, in order of appearance.
+fn optionWords(gpa: std.mem.Allocator, text: []const u8) !std.ArrayList([]const u8) {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, "--")) |at| {
+        var end = at + 2;
+        while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '-')) end += 1;
+        i = end;
+        // `--` alone, or the `--` of a longer dash run, is not an option.
+        if (end - at < 3 or !std.ascii.isAlphanumeric(text[at + 2]) or (at > 0 and text[at - 1] == '-')) continue;
+        const word = text[at..end];
+        var seen = false;
+        for (out.items) |w| {
+            if (std.mem.eql(u8, w, word)) seen = true;
+        }
+        if (!seen) try out.append(gpa, word);
+    }
+    return out;
+}
+
+test "the command-line block of README.md and --help name the same options" {
+    const gpa = std.testing.allocator;
+    const readme = @embedFile("README.md");
+
+    // The block that starts with the `wmaker-wl [OPTION]` line, up to its fence.
+    const start = std.mem.indexOf(u8, readme, "wmaker-wl [OPTION]") orelse return error.NoCommandLineBlock;
+    const stop = std.mem.indexOfPos(u8, readme, start, "```") orelse return error.NoCommandLineBlock;
+    const block = readme[start..stop];
+
+    var in_readme = try optionWords(gpa, block);
+    defer in_readme.deinit(gpa);
+    var in_help = try optionWords(gpa, usage);
+    defer in_help.deinit(gpa);
+
+    for (in_help.items) |w| {
+        var found = false;
+        for (in_readme.items) |r| {
+            if (std.mem.eql(u8, r, w)) found = true;
+        }
+        if (!found) {
+            std.debug.print("`{s}` is in --help but not in README.md's command line block\n", .{w});
+            return error.ReadmeMissesOption;
+        }
+    }
+    for (in_readme.items) |r| {
+        var found = false;
+        for (in_help.items) |w| {
+            if (std.mem.eql(u8, r, w)) found = true;
+        }
+        if (!found) {
+            std.debug.print("`{s}` is in README.md's command line block but not in --help\n", .{r});
+            return error.HelpMissesOption;
+        }
+    }
+    try std.testing.expect(in_help.items.len >= 10);
+}
+
+test "optionWords: options once each, no bare dashes" {
+    const gpa = std.testing.allocator;
+    var w = try optionWords(gpa, "-h, --help  --config FILE -- x --help --a-b ---c");
+    defer w.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 3), w.items.len);
+    try std.testing.expectEqualStrings("--help", w.items[0]);
+    try std.testing.expectEqualStrings("--config", w.items[1]);
+    try std.testing.expectEqualStrings("--a-b", w.items[2]);
+}

@@ -1,18 +1,20 @@
 {
-  description = "wmaker-wl: a Wayland compositor on wlroots, scrollable tiling with a Window Maker feel (development shell)";
+  description = "wmaker-wl development environment";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
-
-      forAllSystems = f:
-        nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      devShells = forAllSystems (pkgs: {
-        default = import ./default.nix { inherit pkgs; };
-      });
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = import ./default.nix { inherit pkgs; };
+        });
     };
 }

@@ -114,12 +114,13 @@ fn scanDir(gpa: std.mem.Allocator, list: *List, defaults: *const settings.Settin
 // ----------------------------------------------------------------------------
 
 const testing = std.testing;
+const tmpdir = @import("tmpdir.zig");
 
 test "scan: user themes hide system ones of the same name, odd names and non-themes are skipped, sorted" {
     const gpa = testing.allocator;
-    var tmpl = "/tmp/wlprefs-themes-XXXXXX".*;
-    const made = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
-    const root = std.mem.span(made);
+    var tmpl: [tmpdir.buf_len]u8 = undefined;
+    const made = try tmpdir.make(&tmpl, "wlprefs-themes");
+    const root: []const u8 = made;
     defer {
         var cmd: [128:0]u8 = undefined;
         if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{root})) |z| _ = c.system(z.ptr) else |_| {}

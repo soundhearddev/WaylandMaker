@@ -21,6 +21,7 @@
 const std = @import("std");
 const gfx = @import("gfx.zig");
 const xpm = @import("xpm.zig");
+const tmpdir = @import("tmpdir.zig");
 const svg = @import("svg.zig");
 
 /// A name that is safe to put into a file name: letters, digits and . - _ +,
@@ -40,6 +41,10 @@ pub const Dirs = struct {
     /// (and the `<theme>/<context>/<size>/` layout of older themes).
     icons: []const u8 = "/usr/share/icons",
     pixmaps: []const u8 = "/usr/share/pixmaps",
+    /// The user's own icon roots (`~/.local/share/icons`, `~/.icons`), same
+    /// layout as `icons`. Searched before the system's, so a user's icon
+    /// replaces the system's one of the same name.
+    user_icons: []const []const u8 = &.{},
     /// Directories of `<app_id>.desktop`, after the user's own one (see Cache.get).
     desktop: []const []const u8 = &.{
         "/usr/local/share/applications",
@@ -143,6 +148,27 @@ fn inScalable(gpa: std.mem.Allocator, dirs: Dirs, present: []const []const u8, n
 /// librsvg is there), else a small PNG, else an XPM, else /usr/share/pixmaps.
 fn findIcon(gpa: std.mem.Allocator, dirs: Dirs, name: []const u8, contexts: []const []const u8) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
+    for (dirs.user_icons) |root| {
+        var user = dirs;
+        user.icons = root;
+        if (findInRoot(gpa, user, name, contexts)) |ic| return ic;
+    }
+    if (findInRoot(gpa, dirs, name, contexts)) |ic| return ic;
+
+    const have_svg = svg.available();
+    inline for (.{ ".png", ".svg", ".xpm" }) |ext| {
+        if (!std.mem.eql(u8, ext, ".svg") or have_svg) {
+            if (std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dirs.pixmaps, name })) |p| {
+                if (loadFile(gpa, p)) |ic| return ic;
+            } else |_| {}
+        }
+    }
+    return null;
+}
+
+/// The themes below ONE icon root (`dirs.icons`): a PNG of a usable size,
+/// else an SVG, else a small PNG, else an XPM.
+fn findInRoot(gpa: std.mem.Allocator, dirs: Dirs, name: []const u8, contexts: []const []const u8) ?gfx.Icon {
     var present_buf: [themes.len][]const u8 = undefined;
     const present = presentThemes(dirs, &present_buf);
 
@@ -154,14 +180,6 @@ fn findIcon(gpa: std.mem.Allocator, dirs: Dirs, name: []const u8, contexts: []co
     }
     if (inSizes(gpa, dirs, present, name, contexts, &small_sizes, ".png")) |ic| return ic;
     if (inSizes(gpa, dirs, present, name, contexts, &sizes, ".xpm")) |ic| return ic;
-
-    inline for (.{ ".png", ".svg", ".xpm" }) |ext| {
-        if (!std.mem.eql(u8, ext, ".svg") or have_svg) {
-            if (std.fmt.bufPrintZ(&buf, "{s}/{s}" ++ ext, .{ dirs.pixmaps, name })) |p| {
-                if (loadFile(gpa, p)) |ic| return ic;
-            } else |_| {}
-        }
-    }
     return null;
 }
 
@@ -255,21 +273,48 @@ pub fn load(gpa: std.mem.Allocator, s: Search, app_id: ?[]const u8) ?gfx.Icon {
     return findPlaceholder(gpa, s.dirs);
 }
 
-/// `load` with the system's default places and the user's own
-/// `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`).
-pub fn loadOwned(gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    var s: Search = .{};
+/// `$XDG_DATA_HOME` if it is an absolute path, else `$HOME/.local/share`.
+fn userDataHome(buf: []u8) ?[]const u8 {
     if (std.c.getenv("XDG_DATA_HOME")) |x| {
         const v = std.mem.span(x);
-        if (v.len > 0 and v[0] == '/') s.user_desktop = std.fmt.bufPrint(&buf, "{s}/applications", .{v}) catch null;
+        if (v.len > 0 and v[0] == '/') return std.fmt.bufPrint(buf, "{s}", .{v}) catch null;
     }
-    if (s.user_desktop == null) {
-        if (std.c.getenv("HOME")) |h| {
-            const v = std.mem.span(h);
-            if (v.len > 0) s.user_desktop = std.fmt.bufPrint(&buf, "{s}/.local/share/applications", .{v}) catch null;
+    if (std.c.getenv("HOME")) |h| {
+        const v = std.mem.span(h);
+        if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/.local/share", .{v}) catch null;
+    }
+    return null;
+}
+
+/// `load` with the system's default places and the user's own: desktop
+/// files in `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`),
+/// icon themes in `$XDG_DATA_HOME/icons` (else `~/.local/share/icons`) and the
+/// older `~/.icons`.
+pub fn loadOwned(gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
+    var data_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var apps_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var icons_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var roots: [2][]const u8 = undefined;
+    var n_roots: usize = 0;
+    var s: Search = .{};
+    if (userDataHome(&data_buf)) |data| {
+        s.user_desktop = std.fmt.bufPrint(&apps_buf, "{s}/applications", .{data}) catch null;
+        if (std.fmt.bufPrint(&icons_buf, "{s}/icons", .{data})) |p| {
+            roots[n_roots] = p;
+            n_roots += 1;
+        } else |_| {}
+    }
+    if (std.c.getenv("HOME")) |h| {
+        const v = std.mem.span(h);
+        if (v.len > 0) {
+            if (std.fmt.bufPrint(&old_buf, "{s}/.icons", .{v})) |p| {
+                roots[n_roots] = p;
+                n_roots += 1;
+            } else |_| {}
         }
     }
+    s.dirs.user_icons = roots[0..n_roots];
     return load(gpa, s, app_id);
 }
 
@@ -391,6 +436,76 @@ test "load: app icon by name, by .desktop Icon=, then the theme's placeholder" {
     try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "nothing-like-it"));
     try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, null));
     try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "../../etc/passwd"));
+}
+
+test "load: the user's icon roots come before the system's, and are searched at all" {
+    const gpa = std.testing.allocator;
+    var tmp_buf: [tmpdir.buf_len]u8 = undefined;
+    const root = try tmpdir.make(&tmp_buf, "wmaker-appicon-user");
+
+    // <root>/sys/icons/hicolor/48x48/apps/{foo,only-sys}.png (system),
+    // <root>/home/.icons/hicolor/48x48/apps/foo.png and <root>/home/data/icons/... (user)
+    const made = [_][]const u8{
+        "/sys",                            "/sys/icons",                     "/sys/icons/hicolor",
+        "/sys/icons/hicolor/48x48",        "/sys/icons/hicolor/48x48/apps",  "/home",
+        "/home/.icons",                    "/home/.icons/hicolor",           "/home/.icons/hicolor/48x48",
+        "/home/.icons/hicolor/48x48/apps", "/home/data",                     "/home/data/icons",
+        "/home/data/icons/hicolor",        "/home/data/icons/hicolor/48x48", "/home/data/icons/hicolor/48x48/apps",
+    };
+    const files = [_]struct { path: []const u8, side: c_int }{
+        .{ .path = "/sys/icons/hicolor/48x48/apps/foo.png", .side = 4 },
+        .{ .path = "/sys/icons/hicolor/48x48/apps/only-sys.png", .side = 5 },
+        .{ .path = "/home/.icons/hicolor/48x48/apps/foo.png", .side = 6 },
+        .{ .path = "/home/.icons/hicolor/48x48/apps/only-old.png", .side = 7 },
+        .{ .path = "/home/data/icons/hicolor/48x48/apps/foo.png", .side = 8 },
+    };
+    var pbuf: [tmpdir.buf_len + 128:0]u8 = undefined;
+    for (made) |d| {
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, d });
+        _ = std.c.mkdir(p.ptr, 0o755);
+    }
+    for (files) |f| {
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path });
+        try testPng(p, f.side);
+    }
+    defer {
+        for (files) |f| {
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, f.path }) catch continue;
+            _ = std.c.unlink(p.ptr);
+        }
+        var i = made.len;
+        while (i > 0) : (i -= 1) {
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, made[i - 1] }) catch continue;
+            _ = std.c.rmdir(p.ptr);
+        }
+        _ = std.c.rmdir(root.ptr);
+    }
+
+    var sys_icons: [tmpdir.buf_len + 32]u8 = undefined;
+    var sys_pix: [tmpdir.buf_len + 32]u8 = undefined;
+    var user_a: [tmpdir.buf_len + 32]u8 = undefined;
+    var user_b: [tmpdir.buf_len + 32]u8 = undefined;
+    const user = [_][]const u8{
+        try std.fmt.bufPrint(&user_a, "{s}/home/data/icons", .{root}),
+        try std.fmt.bufPrint(&user_b, "{s}/home/.icons", .{root}),
+    };
+    const s: Search = .{ .dirs = .{
+        .icons = try std.fmt.bufPrint(&sys_icons, "{s}/sys/icons", .{root}),
+        .pixmaps = try std.fmt.bufPrint(&sys_pix, "{s}/sys/pixmaps", .{root}),
+        .user_icons = &user,
+        .desktop = &.{},
+    } };
+
+    // foo exists in all three: the first user root (XDG data home) wins.
+    try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "foo"));
+    // Only in ~/.icons, and only in the system's.
+    try std.testing.expectEqual(@as(i32, 7), widthOf(gpa, s, "only-old"));
+    try std.testing.expectEqual(@as(i32, 5), widthOf(gpa, s, "only-sys"));
+    // Without user roots the system's icon is used.
+    var plain = s;
+    plain.dirs.user_icons = &.{};
+    try std.testing.expectEqual(@as(i32, 4), widthOf(gpa, plain, "foo"));
+    try std.testing.expectEqual(@as(i32, 0), widthOf(gpa, plain, "only-old"));
 }
 
 test "load: no icon theme at all gives null, never a made-up icon" {

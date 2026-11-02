@@ -48,6 +48,7 @@ test {
     _ = @import("session.zig");
     _ = @import("style.zig");
     _ = @import("sysmap.zig");
+    _ = @import("tmpdir.zig");
     _ = @import("svg.zig");
     _ = @import("trace.zig");
     _ = @import("wm_attr.zig");

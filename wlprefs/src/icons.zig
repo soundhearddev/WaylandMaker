@@ -272,22 +272,24 @@ test "the fallback paints something visible and marks the caption" {
     try std.testing.expect(distinct);
 }
 
+const tmpdir = @import("tmpdir.zig");
+
 test "a user-supplied icon in $WLPREFS_ICON_DIR wins over the fallback" {
     // Write a real 48x48 PNG with cairo, point the variable at its directory.
-    var tmpl = "/tmp/wlprefs-icons-XXXXXX".*;
-    const dir = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
-    const dirs = std.mem.span(dir);
+    var tmpl: [tmpdir.buf_len]u8 = undefined;
+    const dir = try tmpdir.make(&tmpl, "wlprefs-icons");
+    const dirs: []const u8 = dir;
 
-    var path_buf: [128]u8 = undefined;
+    var path_buf: [tmpdir.buf_len + 64]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dirs, spec(.dock_right).file });
     const surf = gfx.c.cairo_image_surface_create(gfx.c.CAIRO_FORMAT_ARGB32, 48, 48) orelse return error.Cairo;
     defer gfx.c.cairo_surface_destroy(surf);
     try std.testing.expectEqual(@as(c_uint, gfx.c.CAIRO_STATUS_SUCCESS), gfx.c.cairo_surface_write_to_png(surf, path.ptr));
 
-    _ = c.setenv("WLPREFS_ICON_DIR", dir, 1);
+    _ = c.setenv("WLPREFS_ICON_DIR", dir.ptr, 1);
     defer {
         _ = c.unsetenv("WLPREFS_ICON_DIR");
-        var cmd: [160]u8 = undefined;
+        var cmd: [tmpdir.buf_len + 32]u8 = undefined;
         if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{dirs})) |z| _ = c.system(z.ptr) else |_| {}
     }
 
@@ -301,10 +303,10 @@ test "a user-supplied icon in $WLPREFS_ICON_DIR wins over the fallback" {
 }
 
 test "a broken or oversized file is ignored, not trusted" {
-    var tmpl = "/tmp/wlprefs-icons-XXXXXX".*;
-    const dir = c.mkdtemp(&tmpl) orelse return error.MkdTemp;
-    const dirs = std.mem.span(dir);
-    var path_buf: [128]u8 = undefined;
+    var tmpl: [tmpdir.buf_len]u8 = undefined;
+    const dir = try tmpdir.make(&tmpl, "wlprefs-icons");
+    const dirs: []const u8 = dir;
+    var path_buf: [tmpdir.buf_len + 64]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dirs, spec(.dock_left).file });
 
     // Not a PNG.
@@ -312,10 +314,10 @@ test "a broken or oversized file is ignored, not trusted" {
     _ = std.c.fwrite("not a png", 1, 9, f);
     _ = std.c.fclose(f);
 
-    _ = c.setenv("WLPREFS_ICON_DIR", dir, 1);
+    _ = c.setenv("WLPREFS_ICON_DIR", dir.ptr, 1);
     defer {
         _ = c.unsetenv("WLPREFS_ICON_DIR");
-        var cmd: [160]u8 = undefined;
+        var cmd: [tmpdir.buf_len + 32]u8 = undefined;
         if (std.fmt.bufPrintZ(&cmd, "rm -rf '{s}'", .{dirs})) |z| _ = c.system(z.ptr) else |_| {}
     }
     try std.testing.expect(find(.dock_left) == null);
@@ -325,4 +327,23 @@ test "Set counts what is still a fallback" {
     var s: Set = .{};
     try std.testing.expectEqual(Id.all.len, s.missing());
     s.deinit();
+}
+
+test "docs/WLPREFS-ICONS.md lists every icon with its file, caption and place" {
+    const doc = @embedFile("WLPREFS-ICONS.md");
+    var line_buf: [512]u8 = undefined;
+    for (Id.all) |id| {
+        const sp = spec(id);
+        // | `file` | `caption` | label | where |
+        const label = try std.mem.replaceOwned(u8, std.testing.allocator, sp.label, "\n", " ");
+        defer std.testing.allocator.free(label);
+        const row = try std.fmt.bufPrint(&line_buf, "| `{s}` | `{s}` | {s} | {s} |", .{ sp.file, sp.caption, label, sp.where });
+        if (std.mem.indexOf(u8, doc, row) == null) {
+            std.debug.print("docs/WLPREFS-ICONS.md has no row: {s}\n", .{row});
+            return error.DocOutOfStep;
+        }
+        try std.testing.expectEqual(@as(i32, 48), sp.w);
+        try std.testing.expectEqual(@as(i32, 48), sp.h);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, doc, "48 × 48") != null);
 }
