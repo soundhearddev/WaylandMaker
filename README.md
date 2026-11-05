@@ -1,33 +1,24 @@
 # WaylandMaker
 
 A Wayland window manager that tries to feel like [Window Maker](https://www.windowmaker.org/).
-It is a Wayland compositor of its own, built on [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)
-0.20: it does compositing, input, layout and focus. The root menu, the Dock and the Clip are being ported
-to it (see [docs/TODO wlroots.md](docs/TODO%20wlroots.md); the old drawing code is kept in `attic/`).
+It's a Wayland compositor built on [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)
 
-Windows are laid out in a horizontally scrolling strip of columns (the niri / PaperWM idea), in a
+Windows are laid out in a horizontally scrolling strip of columns, in a
 NeXTSTEP-style look. The parts of Window Maker I care about most are kept as they were: the root menu,
 Dock, Clip and DockApps, and the `WMRootMenu`, `WMWindowAttributes` and `WMState` files.
-
 
 ## Build
 
 Needs Zig **0.16.0**, **wlroots 0.20** and the development files for wayland, wayland-protocols,
 xkbcommon and pixman (on Debian: `libwlroots-0.20-dev libwayland-dev wayland-protocols libxkbcommon-dev
 libpixman-1-dev`; wayland-protocols older than 1.44 needs `-Dcolor-manager-version=1`). wlprefs also
-needs cairo, pango and glib. Lua 5.4 is built from source as a Zig dependency, so no system Lua is needed.
+needs cairo, pango and glib.
 
 ```sh
-zig build                                # wmaker-wl and wlprefs into zig-out/bin (ReleaseSafe by default)
-zig build test                           # unit tests, no compositor needed
-zig build probe                          # can wlroots be used on this machine at all?
-zig build run                            # nested in the current session (WLR_BACKENDS=wayland)
-./zig-out/bin/wmaker-wl                  # from a TTY: DRM + libinput, no other session needed
+zig build                                # wmaker-wl and wlprefs into zig-out/bin
+zig build test                           # unit tests
+zig build run                            # nested in the current session
 ```
-
-`zig build` makes an optimised **ReleaseSafe** build by default (it used to be Debug, which is
-an order of magnitude slower and not meant for a compositor you sit in front of). For debugging use
-`-Doptimize=Debug`, to drop the safety checks as well `-Doptimize=ReleaseFast`.
 
 ## Install
 
@@ -87,8 +78,6 @@ wmaker-wl [OPTION]       without an option: start the session
                          with --prefix DIR, --destdir DIR, --user, --dry-run), see docs/SESSION.md
       --log SPEC         log filter, e.g. info,anim=debug (same as WMAKER_LOG)
 ```
-
-An unknown option is an error and does not start a session.
 
 ## Documentation
 

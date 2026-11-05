@@ -1,6 +1,6 @@
 .{
     .name = .wmaker_wl,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .fingerprint = 0xa5a98cf56f86884e,
     .minimum_zig_version = "0.16.0",
 
