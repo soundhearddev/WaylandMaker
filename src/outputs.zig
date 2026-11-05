@@ -3,6 +3,10 @@
 // Monitors on the model: what happens to windows when a monitor goes away or
 // comes back, and the `monitor()` rules and profiles of the config.
 //
+// Model side of the monitors. Its neighbours: monitors.zig (the data: identity,
+// rules, profiles) and output.zig (the compositor side: one wlroots output per
+// `Monitor`, which carries out the mode, scale and place of a rule).
+//
 // No wlroots in here. The compositor only reports monitors (manage.createOutput,
 // setOutputRect, setOutputInfo, removeOutput); everything that follows from
 // that is decided here, in the manage pass, and tested without a display.
@@ -11,7 +15,9 @@
 //     goes away move to another one, with a note where they lived. They go
 //     back when that monitor returns.
 //   * `applyRule`: the `monitor()` rule that matches a monitor (on/off, primary,
-//     workspace count, first workspace, hooks).
+//     workspace count, first workspace, hooks). What of the rule lives in the
+//     real output (mode, scale, place, power) is done by `Monitor.applyRule`
+//     in output.zig, which reads `out.disabled` and the rule after this.
 //   * `settle`: once the monitors have been quiet for `monitor_settle_ms`,
 //     apply the rules and pick the `monitor_profile` for what is connected.
 

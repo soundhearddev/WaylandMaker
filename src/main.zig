@@ -45,6 +45,34 @@ fn usageError(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(2);
 }
 
+/// Exit statuses of a start that failed, so that the session script (and
+/// whoever reads `session.log`) can name the stage: 2 is a usage error, 1 a
+/// file that could not be read. Documented in SESSION.md; the script maps
+/// them in `after_exit`.
+pub const exit_config: u8 = 10; // config.lua could not be loaded
+pub const exit_model: u8 = 11; // binds, menu, Dock ... could not be set up
+pub const exit_compositor: u8 = 12; // backend, renderer or allocator did not come up
+pub const exit_socket: u8 = 13; // no Wayland socket
+pub const exit_run: u8 = 14; // the compositor stopped with an error
+
+/// Log why the start failed and leave with the status of that stage. A
+/// failed start leaves the session without a screen, so the reason goes to
+/// the log and the terminal (stderr) before it ends.
+fn fatal(code: u8, comptime fmt: []const u8, args: anytype) noreturn {
+    log.err(fmt, args);
+    std.process.exit(code);
+}
+
+/// The usual causes of a compositor that cannot start, in the words of the
+/// error it ended with.
+fn compositorHint(err: anyerror) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "out of memory",
+        error.FileNotFound, error.AccessDenied => "no access to the graphics or input devices (no seat: is seatd or logind running, is the user in the `seat`/`video`/`input` group?)",
+        else => "no usable backend: from a TTY it needs a seat session and a GPU; inside another Wayland or X11 session set WLR_BACKENDS=wayland (or x11); see `WLR_DRM_DEVICES` and `WLR_RENDERER` for a machine with several GPUs",
+    };
+}
+
 /// `wmaker-wl --paths`
 fn showPaths(io: std.Io, gpa: std.mem.Allocator) !void {
     var cfg = try config.load(io, gpa);
@@ -175,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
     wm.* = .{
         .gpa = gpa,
         .io = io,
-        .cfg = try config.load(io, gpa),
+        .cfg = config.load(io, gpa) catch |err| fatal(exit_config, "cannot load the config: {t} (check it with `wmaker-wl --check`)", .{err}),
         .obj = undefined,
         .outputs = undefined,
         .windows = undefined,
@@ -193,8 +221,7 @@ pub fn main(init: std.process.Init) !void {
     // everything derived from the config. Without this no key bind does
     // anything (`wm.commands` stays empty).
     _ = boot.loadModel(wm) catch |err| {
-        log.err("cannot set up the model from {s}: {t}", .{ wm.cfg.config_file, err });
-        return error.ConfigLoadFailed;
+        fatal(exit_model, "cannot set up the model from {s}: {t}", .{ wm.cfg.config_file, err });
     };
     log.info("config {s}: {d} binds, {d} programs at start", .{ wm.cfg.config_file, wm.cfg.binds.len, wm.cfg.spawn_at_startup.len });
 
@@ -204,10 +231,12 @@ pub fn main(init: std.process.Init) !void {
     boot.applyEnvironment(wm.cfg.environment);
 
     // ---- the compositor ----------------------------------------------------------
-    const server = try Server.create(gpa, wm);
+    const server = Server.create(gpa, wm) catch |err|
+        fatal(exit_compositor, "cannot start the compositor: {t}: {s}", .{ err, compositorHint(err) });
     defer server.destroy();
 
-    const socket = try server.listen();
+    const socket = server.listen() catch |err|
+        fatal(exit_socket, "cannot open a Wayland socket: {t} (is XDG_RUNTIME_DIR set and writable?)", .{err});
     defer gpa.free(socket);
     log.info("running on WAYLAND_DISPLAY={s} (config: {s})", .{ socket, wm.cfg.config_file });
 
@@ -218,5 +247,5 @@ pub fn main(init: std.process.Init) !void {
     // Clients that connect before the loop runs wait in the socket's queue.
     defer session.notify("STOPPING=1");
 
-    try server.run();
+    server.run() catch |err| fatal(exit_run, "the compositor stopped: {t}", .{err});
 }

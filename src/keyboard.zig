@@ -167,6 +167,9 @@ pub const Keyboard = struct {
         const kb: *Keyboard = @fieldParentPtr("key", listener);
         const server = kb.server;
         const wlr_kb = kb.device.toKeyboard();
+        server.protocols.notifyActivity();
+        // Typing hides the pointer until it moves again.
+        if (event.state == .pressed) server.cursor.hide();
 
         const handled = switch (event.state) {
             .pressed => kb.press(wlr_kb, event.keycode),
@@ -203,6 +206,9 @@ pub const Keyboard = struct {
             }
             return kb.consume(evdev);
         }
+
+        // Locked: no bind acts (not even one that would unlock by a command).
+        if (server.lock.locked) return false;
 
         const mods: u32 = @bitCast(wlr_kb.getModifiers());
         const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse {

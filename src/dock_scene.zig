@@ -68,6 +68,13 @@ const btn_middle = 0x112;
 /// buffers it still shows alive on its own).
 const max_cached_buffers = 256;
 
+/// Icons looked for and loaded per pass (`DockUi.update`). Finding one means
+/// searching the theme directories and perhaps rasterising an SVG, a few
+/// milliseconds; a Dock with twenty apps would hold the first pass for a
+/// tenth of a second. The tiles of the rest show without a picture for a turn
+/// or two of the event loop and get it in the next passes.
+const icons_per_pass = 3;
+
 // ============================================================================
 // The scene backend (what dock_sync.Sync needs)
 // ============================================================================
@@ -82,6 +89,11 @@ const Scene = struct {
     buffers: std.AutoHashMap(u64, *wlr.Buffer),
     /// icon_key -> the picture (null: looked for, none found).
     icons: std.AutoHashMap(u64, ?gfx.Icon),
+    /// Icons that may still be loaded in this pass; and whether a tile was
+    /// drawn without its icon because that was used up (`DockUi.update` then
+    /// comes back for it).
+    icon_budget: u8 = icons_per_pass,
+    deferred: bool = false,
 
     pub const Group = *wlr.SceneTree;
     pub const Node = *wlr.SceneBuffer;
@@ -147,26 +159,42 @@ const Scene = struct {
     fn show(s: *Scene, node: Node, t: dock_view.Tile, c: dock_sync.Content) void {
         node.node.setPosition(t.x, t.y);
         node.setDestSize(t.look.size, t.look.size);
-        if (s.bufferFor(t.look, c)) |buf| node.setBuffer(buf);
+        if (s.bufferFor(t.look, c)) |drawn| {
+            node.setBuffer(drawn.buf);
+            // A tile drawn without its icon is not kept: the scene holds it
+            // now and lets it go with the next picture.
+            if (drawn.temporary) drawn.buf.drop();
+        }
         if (t.floating) node.node.raiseToTop();
     }
 
     // ---- pixels -------------------------------------------------------------
 
     /// The rendered tile for `look`: from the cache, else drawn now.
-    fn bufferFor(s: *Scene, look: dock_view.Look, c: dock_sync.Content) ?*wlr.Buffer {
+    const Drawn = struct { buf: *wlr.Buffer, temporary: bool = false };
+
+    fn bufferFor(s: *Scene, look: dock_view.Look, c: dock_sync.Content) ?Drawn {
         const key = look.key() ^ (@as(u64, @intCast(s.scale)) *% 0x9e3779b97f4a7c15);
-        if (s.buffers.get(key)) |b| return b;
+        if (s.buffers.get(key)) |b| return .{ .buf = b };
+
+        // The icon first: it may have to wait for a later pass.
+        const was_deferred = s.deferred;
+        s.deferred = false;
+        const icon = s.iconFor(look, c);
+        const temporary = s.deferred;
+        s.deferred = was_deferred or temporary;
 
         const side: usize = @intCast(dock_draw.deviceSide(look, s.scale));
         const bytes = s.gpa.alloc(u8, dock_draw.byteLen(look, s.scale)) catch return null;
         defer s.gpa.free(bytes);
 
-        dock_draw.render(bytes, look, .{ .icon = s.iconFor(look, c), .name = c.name }, s.scale) catch |err| {
+        dock_draw.render(bytes, look, .{ .icon = icon, .name = c.name }, s.scale) catch |err| {
             log.warn("cannot draw a tile: {t}", .{err});
             return null;
         };
         const buf = wm_pixbuf_create(@intCast(side), @intCast(side), bytes.ptr, side * 4) orelse return null;
+
+        if (temporary) return .{ .buf = buf, .temporary = true };
 
         if (s.buffers.count() >= max_cached_buffers) s.forgetBuffers();
         s.buffers.put(key, buf) catch {
@@ -175,7 +203,7 @@ const Scene = struct {
             owner.drop();
             return null;
         };
-        return buf;
+        return .{ .buf = buf };
     }
 
     /// The icon of an app tile, loaded the first time it is needed. Only
@@ -185,6 +213,11 @@ const Scene = struct {
         const key = look.icon_key +% @intFromBool(look.mini);
         if (s.icons.get(key)) |hit| return hit;
         const slot = c.slot orelse return null;
+        if (s.icon_budget == 0) {
+            s.deferred = true;
+            return null;
+        }
+        s.icon_budget -= 1;
         const loaded = dock_icons.resolve(s.gpa, slot.app);
         s.icons.put(key, loaded) catch {
             if (loaded) |ic| {
@@ -271,6 +304,8 @@ pub const DockUi = struct {
         }
         ui.input.settings.single_click = cfg.dock_single_click;
 
+        ui.scene.icon_budget = icons_per_pass;
+        ui.scene.deferred = false;
         const shown = ui.sync.update(m, &ui.input, .{
             .origin = ui.origin,
             .dock_visible = cfg.dock_enabled,
@@ -280,6 +315,12 @@ pub const DockUi = struct {
         });
         ui.setShown(shown and cfg.dock_enabled);
         ui.armTimer();
+        // Tiles still without their icon: show them all again in the next
+        // pass (the buffers made so far are cached, so that costs little).
+        if (ui.scene.deferred) {
+            ui.sync.invalidate();
+            ui.server.scheduleManage();
+        }
     }
 
     fn hideAll(ui: *DockUi) void {

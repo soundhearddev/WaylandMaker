@@ -833,7 +833,7 @@ fn bindFunction(ctx: *Ctx, combo: []const u8) i32 {
 
 // ---- monitor(), monitor_profile() ---------------------------------------------
 
-const monitor_keys = [_][]const u8{ "enabled", "primary", "workspaces", "start_workspace", "restore_windows", "on_connect", "on_disconnect" };
+const monitor_keys = [_][]const u8{ "enabled", "primary", "workspaces", "start_workspace", "restore_windows", "on_connect", "on_disconnect", "mode", "scale", "x", "y" };
 const profile_keys = [_][]const u8{ "name", "needs", "exact", "run" };
 
 /// Warn about keys of the table at `idx` that are not in `known` (a typo in
@@ -857,6 +857,16 @@ fn optBool(L: *lua.State, idx: i32, key: []const u8) error{Invalid}!?bool {
     defer lua.pop(L, 1);
     if (lua.typeOf(L, -1) == lua.T_NIL) return null;
     return lua.toBool(L, -1) orelse error.Invalid;
+}
+
+/// A whole number in field `key` (any sign, within a sane range).
+fn optInt(L: *lua.State, idx: i32, key: []const u8) error{Invalid}!?i32 {
+    lua.rawGetString(L, idx, key);
+    defer lua.pop(L, 1);
+    if (lua.typeOf(L, -1) == lua.T_NIL) return null;
+    const v = lua.toInteger(L, -1) orelse return error.Invalid;
+    if (v < -100_000 or v > 100_000) return error.Invalid;
+    return @intCast(v);
 }
 
 /// A whole number from 1 to `max`, as the 0-based index.
@@ -913,6 +923,25 @@ fn cMonitor(L: *lua.State) i32 {
         if (e == error.OutOfMemory) ctx.oom = true else _ = bad(ctx, "on_disconnect");
         return 0;
     };
+    lua.rawGetString(L, 2, "mode");
+    if (lua.typeOf(L, -1) != lua.T_NIL) {
+        const m = if (lua.toSlice(L, -1)) |t| monitors.parseMode(t) else null;
+        lua.pop(L, 1);
+        rule.mode = m orelse return bad(ctx, "mode (\"1920x1080\" or \"1920x1080@60\")");
+    } else lua.pop(L, 1);
+    lua.rawGetString(L, 2, "scale");
+    if (lua.typeOf(L, -1) != lua.T_NIL) {
+        const v = lua.toNumber(L, -1);
+        lua.pop(L, 1);
+        const f = v orelse return bad(ctx, "scale");
+        if (!(f >= 0.25 and f <= 8)) return bad(ctx, "scale (0.25 to 8)");
+        rule.scale = @floatCast(f);
+    } else lua.pop(L, 1);
+    // The place on the desk: x and y come together.
+    const px = optInt(L, 2, "x") catch return bad(ctx, "x");
+    const py = optInt(L, 2, "y") catch return bad(ctx, "y");
+    if ((px == null) != (py == null)) return bad(ctx, "x/y (both are needed)");
+    if (px) |x| rule.position = .{ .x = x, .y = py.? };
     if (ctx.cfg.monitor_rules.items.len >= monitors.max_rules) {
         ctx.warnAt("monitor(): at most {d} rules", .{monitors.max_rules});
         return 0;
@@ -2981,10 +3010,16 @@ test "monitor() and monitor_profile() fill the rule and profile lists" {
     try parseText(arena.allocator(), &cfg,
         \\monitor("DP-1", { primary = true, workspaces = 6, start_workspace = 2 })
         \\monitor("eDP-1", { enabled = false, restore_windows = false, on_connect = "notify-send hi", on_disconnect = {"a", "b"} })
+        \\monitor("DP-2", { mode = "2560x1440@144", scale = 1.5, x = -1920, y = 0 })
         \\monitor_profile{ name = "docked", needs = {"eDP-1", "DP-1"}, exact = true, run = "kanshictl switch docked" }
     );
     try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
-    try std.testing.expectEqual(@as(usize, 2), cfg.monitor_rules.items.len);
+    try std.testing.expectEqual(@as(usize, 3), cfg.monitor_rules.items.len);
+    const r2 = cfg.monitor_rules.items[2];
+    try std.testing.expectEqual(@as(i32, 2560), r2.mode.?.w);
+    try std.testing.expectEqual(@as(i32, 144000), r2.mode.?.refresh_mhz);
+    try std.testing.expectEqual(@as(f32, 1.5), r2.scale.?);
+    try std.testing.expectEqual(@as(i32, -1920), r2.position.?.x);
     const r0 = cfg.monitor_rules.items[0];
     try std.testing.expectEqualStrings("DP-1", r0.match);
     try std.testing.expect(r0.primary and r0.enabled);

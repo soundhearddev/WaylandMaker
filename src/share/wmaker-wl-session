@@ -137,6 +137,13 @@ after_exit() {
         what="was stopped by signal $((rc - 128))"
     else
         what="exited with status $rc"
+        case "$rc" in
+            10) what="$what (config.lua could not be loaded)" ;;
+            11) what="$what (the binds, menu or Dock could not be set up)" ;;
+            12) what="$what (no backend, renderer or GPU: seat, devices, WLR_BACKENDS)" ;;
+            13) what="$what (no Wayland socket: XDG_RUNTIME_DIR)" ;;
+            14) what="$what (stopped with an error while running)" ;;
+        esac
     fi
     echo "$name: the compositor $what at $(date '+%F %T')"
     if use_systemd; then

@@ -33,6 +33,8 @@ const DockUi = @import("dock_scene.zig").DockUi;
 const layer = @import("layer.zig");
 const LayerSurface = layer.LayerSurface;
 const libinput = @import("libinput.zig");
+const Protocols = @import("protocols.zig").Protocols;
+const Lock = @import("lock.zig").Lock;
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
@@ -57,6 +59,10 @@ pub const Server = struct {
     dock_below: *wlr.SceneTree,
     dock_above: *wlr.SceneTree,
     dock_ui: *DockUi = undefined,
+    /// Fractional scale, idle, activation, capture ... (protocols.zig).
+    protocols: *Protocols = undefined,
+    /// The screen locker (ext-session-lock).
+    lock: *Lock = undefined,
 
     /// wlr-layer-shell: one scene tree per layer (background, bottom, top,
     /// overlay). Background and bottom lie under the windows, top over the
@@ -81,6 +87,9 @@ pub const Server = struct {
     /// the compositor last set it).
     focused: ?*View = null,
     manage_idle: ?*wl.EventSource = null,
+    /// A pass the pointer wants during a move/resize: it runs at the next
+    /// frame, once for all the motion events since the last one.
+    manage_on_frame: bool = false,
     /// `wm.config_gen` as last applied to the devices (see `applyConfig`).
     applied_config_gen: u32 = 0,
     /// Wakes the loop when monitor changes have been quiet long enough to
@@ -99,6 +108,8 @@ pub const Server = struct {
     new_decoration: wl.Listener(*wlr.XdgToplevelDecorationV1) = .init(onNewDecoration),
     new_layer_surface: wl.Listener(*wlr.LayerSurfaceV1) = .init(onNewLayerSurface),
     layout_change: wl.Listener(*wlr.OutputLayout) = .init(onLayoutChange),
+    /// The session became active or inactive (VT switch, suspend).
+    session_active: wl.Listener(void) = .init(onSessionActive),
     request_set_cursor: wl.Listener(*wlr.Seat.event.RequestSetCursor) = .init(onRequestSetCursor),
     request_set_selection: wl.Listener(*wlr.Seat.event.RequestSetSelection) = .init(onRequestSetSelection),
     request_set_primary: wl.Listener(*wlr.Seat.event.RequestSetPrimarySelection) = .init(onRequestSetPrimary),
@@ -179,6 +190,10 @@ pub const Server = struct {
         _ = try wlr.SinglePixelBufferManagerV1.create(wl_server);
         _ = try wlr.XdgOutputManagerV1.create(wl_server, output_layout);
 
+        server.protocols = try Protocols.create(server);
+        errdefer server.protocols.destroy();
+        server.lock = try Lock.create(server);
+        errdefer server.lock.destroy();
         try server.cursor.init(server);
         // Created last in the scene, so raised into its place: above the
         // floating windows, below the fullscreen ones.
@@ -191,6 +206,7 @@ pub const Server = struct {
         wlr_backend.events.new_output.add(&server.new_output);
         wlr_backend.events.new_input.add(&server.new_input);
         output_layout.events.change.add(&server.layout_change);
+        if (session) |s| s.events.active.add(&server.session_active);
         server.layer_shell.events.new_surface.add(&server.new_layer_surface);
         server.xdg_shell.events.new_toplevel.add(&server.new_toplevel);
         server.xdg_shell.events.new_popup.add(&server.new_popup);
@@ -223,6 +239,7 @@ pub const Server = struct {
         server.new_output.link.remove();
         server.new_input.link.remove();
         server.layout_change.link.remove();
+        if (server.session != null) server.session_active.link.remove();
         server.new_toplevel.link.remove();
         server.new_popup.link.remove();
         server.new_decoration.link.remove();
@@ -233,6 +250,8 @@ pub const Server = struct {
         server.cursor.deinit();
 
         server.dock_ui.destroy();
+        server.lock.destroy();
+        server.protocols.destroy();
         server.scene.tree.node.destroy();
         server.backend.destroy();
 
@@ -349,6 +368,28 @@ pub const Server = struct {
         };
     }
 
+    /// A move or resize follows the pointer, which reports up to 1000 times a
+    /// second while the screen shows 60 to 240 pictures: the pass (layout of
+    /// every output, the Dock) runs once per frame instead of once per event.
+    pub fn manageOnFrame(server: *Server) void {
+        if (server.manage_on_frame) return;
+        server.manage_on_frame = true;
+        server.requestFrames();
+    }
+
+    /// First thing in `Monitor.onFrame`: the pass the pointer asked for runs
+    /// now, so that this frame already shows it. One monitor does it; the
+    /// others see the flag down.
+    pub fn runPendingManage(server: *Server) void {
+        if (!server.manage_on_frame) return;
+        server.manage_on_frame = false;
+        if (server.manage_idle) |idle| {
+            idle.remove();
+            server.manage_idle = null;
+        }
+        server.runManage();
+    }
+
     fn runManage(server: *Server) void {
         server.manage_idle = null;
         // The whole pass, what the user waits for: the model (layout and
@@ -358,6 +399,9 @@ pub const Server = struct {
         defer _ = perf.stop(server.wm.io, span);
         manage.run(server.wm, server.sink(), server.nowMs());
         server.applyConfig();
+        // The `monitor()` rules on the real outputs (mode, scale, place, on/off).
+        var mit = server.monitors.iterator(.forward);
+        while (mit.next()) |m| m.applyRule();
         // The Dock shows what the pass decided (tiles, workspace, config).
         server.dock_ui.update();
         // Something still moves: ask for the next frame. The pass after it is
@@ -398,7 +442,7 @@ pub const Server = struct {
         return 0;
     }
 
-    fn requestFrames(server: *Server) void {
+    pub fn requestFrames(server: *Server) void {
         var it = server.monitors.iterator(.forward);
         while (it.next()) |m| m.wlr_output.scheduleFrame();
     }
@@ -478,7 +522,7 @@ pub const Server = struct {
         if (server.layer_focus != null) return;
 
         const v = view orelse {
-            server.seat.keyboardNotifyClearFocus();
+            server.clearKeyboardFocus();
             return;
         };
         const toplevel = v.toplevel orelse return;
@@ -499,13 +543,32 @@ pub const Server = struct {
             return;
         }
         const v = server.focused orelse {
-            server.seat.keyboardNotifyClearFocus();
+            server.clearKeyboardFocus();
             return;
         };
         const toplevel = v.toplevel orelse {
-            server.seat.keyboardNotifyClearFocus();
+            server.clearKeyboardFocus();
             return;
         };
+        _ = toplevel.setActivated(true);
+        server.enterKeyboard(toplevel.base.surface);
+    }
+
+    /// Nobody has the keyboard (not while locked: the locker keeps it).
+    fn clearKeyboardFocus(server: *Server) void {
+        if (server.lock.locked) return;
+        server.seat.keyboardNotifyClearFocus();
+    }
+
+    /// After an unlock: the keyboard goes back to a layer surface that held
+    /// it, else to the focused window.
+    pub fn restoreKeyboardFocus(server: *Server) void {
+        if (server.layer_focus) |l| {
+            server.enterKeyboard(l.surface.surface);
+            return;
+        }
+        const v = server.focused orelse return server.clearKeyboardFocus();
+        const toplevel = v.toplevel orelse return server.clearKeyboardFocus();
         _ = toplevel.setActivated(true);
         server.enterKeyboard(toplevel.base.surface);
     }
@@ -521,6 +584,11 @@ pub const Server = struct {
     /// Hand the keyboard to `surface` (also when a keyboard appears after the
     /// focus was decided).
     pub fn enterKeyboard(server: *Server, surface: *wlr.Surface) void {
+        // Locked: the locker has the keyboard, whoever asks.
+        if (server.lock.locked) {
+            server.lock.focus();
+            return;
+        }
         const kb = server.seat.getKeyboard() orelse return;
         server.seat.keyboardNotifyEnter(surface, kb.keycodes[0..kb.num_keycodes], &kb.modifiers);
     }
@@ -538,6 +606,21 @@ pub const Server = struct {
     fn onLayoutChange(listener: *wl.Listener(*wlr.OutputLayout), _: *wlr.OutputLayout) void {
         const server: *Server = @fieldParentPtr("layout_change", listener);
         server.syncOutputRects();
+        server.lock.layoutChanged();
+    }
+
+    /// After Ctrl+Alt+F<N> and back, or a resume from sleep: wlroots brings
+    /// the outputs and input devices back by itself; what is left is to draw
+    /// again and to run a pass, so nothing stale is on the screen.
+    fn onSessionActive(listener: *wl.Listener(void)) void {
+        const server: *Server = @fieldParentPtr("session_active", listener);
+        const active = if (server.session) |s| s.active else true;
+        log.info("session {s}", .{if (active) "active" else "inactive"});
+        if (!active) return;
+        server.requestFrames();
+        server.cursor.refresh();
+        server.protocols.notifyActivity();
+        server.scheduleManage();
     }
 
     pub fn syncOutputRects(server: *Server) void {
@@ -559,11 +642,16 @@ pub const Server = struct {
                 server.cursor.attach(device);
                 libinput.configure(&server.wm.cfg, device);
             },
+            .touch => {
+                server.cursor.attach(device);
+                server.cursor.has_touch = true;
+            },
             else => return,
         }
         server.seat.setCapabilities(.{
             .pointer = true,
             .keyboard = server.keyboards.length() > 0,
+            .touch = server.cursor.has_touch,
         });
     }
 

@@ -2,20 +2,31 @@
 //
 // External-monitor management: the part that needs no Wayland.
 //
-// What the compositor knows about an output is little: a position, a
-// size and the global name of the matching `wl_output`. Everything that makes
-// a monitor *recognisable* (connector name, make, model) comes from that
-// `wl_output` (output.zig binds it). This file turns that into decisions:
+// Three files deal with monitors; this is the first of the model:
+//
+//   monitors.zig   (here)  the data and the policy: who a monitor is, rules,
+//                          profiles, settle time. Plain values, no wlroots.
+//   outputs.zig            the model side of a monitor coming or going: moves
+//                          windows, applies a rule's on/off, primary and
+//                          workspaces in the manage pass. No wlroots.
+//   output.zig             the compositor side: one `Monitor` per wlroots
+//                          output; reports it to the model and carries out
+//                          what a rule says about the real output (mode, scale,
+//                          place on the desk, on/off).
+//
+// What the compositor reports of an output is little: a position, a size, and
+// connector, make and model (`manage.setOutputInfo`, from the wlroots output).
+// This file turns that into decisions:
 //
 //   * `Info`      who a monitor is (fixed buffers, no allocation, copyable).
 //   * `Rule`      what the user wants for the monitors that match a pattern
 //                 (`monitor("DP-1", { ... })` in config.lua): on/off, primary,
-//                 workspace count, first workspace, commands on connect.
+//                 workspace count, first workspace, commands on connect, and
+//                 what output.zig sets on the real output: mode, scale, place.
 //   * `Profile`   what to run when a certain SET of monitors is connected
 //                 (`monitor_profile{ ... }`): the hook for tools that really
-//                 configure outputs (kanshi, wlr-randr). wmaker-wl does not set modes yet: a
-//                 window manager change modes or positions, so this is how
-//                 "plug it in and it is set up" is reached.
+//                 configure outputs (kanshi, wlr-randr), for what a rule's mode,
+//                 scale and place cannot say.
 //   * `Settle`    hot-plugging announces monitors one after the other; a
 //                 change only counts once nothing happened for a while.
 //   * `Home`      a window remembers the monitor it was taken from when that
@@ -171,6 +182,36 @@ pub fn matchScore(pattern: []const u8, info: *const Info) u8 {
 
 /// What the user wants for the monitors a pattern matches. Optional fields
 /// that are null leave the global setting alone.
+/// A video mode asked for by a rule: `"1920x1080"` or `"2560x1440@143.97"`.
+pub const Mode = struct {
+    w: i32,
+    h: i32,
+    /// In mHz, as wlroots counts; 0: any (the highest of that size).
+    refresh_mhz: i32 = 0,
+};
+
+/// `"WxH"` or `"WxH@R"` (R in Hz, may have decimals). null when malformed
+/// or out of a sane range.
+pub fn parseMode(text: []const u8) ?Mode {
+    const x = std.mem.indexOfScalar(u8, text, 'x') orelse return null;
+    const at = std.mem.indexOfScalar(u8, text, '@');
+    const size_end = at orelse text.len;
+    if (size_end < x) return null;
+    const w = std.fmt.parseInt(i32, text[0..x], 10) catch return null;
+    const h = std.fmt.parseInt(i32, text[x + 1 .. size_end], 10) catch return null;
+    if (w < 1 or h < 1 or w > 32768 or h > 32768) return null;
+    var mhz: i32 = 0;
+    if (at) |a| {
+        const hz = std.fmt.parseFloat(f64, text[a + 1 ..]) catch return null;
+        if (!(hz > 0 and hz < 1000)) return null;
+        mhz = @intFromFloat(@round(hz * 1000));
+    }
+    return .{ .w = w, .h = h, .refresh_mhz = mhz };
+}
+
+/// Where a monitor's top-left corner lies on the desk.
+pub const Position = struct { x: i32, y: i32 };
+
 pub const Rule = struct {
     match: []const u8,
     /// false: the monitor is ignored (no windows, no layout), like a screen
@@ -188,6 +229,12 @@ pub const Rule = struct {
     /// Started when the monitor appears / goes away (argv, run detached).
     on_connect: []const []const u8 = &.{},
     on_disconnect: []const []const u8 = &.{},
+    /// What the compositor sets on the real output (output.zig): video mode,
+    /// scale and place on the desk. null: leave it as it is (the preferred
+    /// mode, scale 1, placed next to the others).
+    mode: ?Mode = null,
+    scale: ?f32 = null,
+    position: ?Position = null,
 };
 
 /// The rule for `info`: the most specific pattern wins, among equals the one
@@ -795,4 +842,21 @@ test "Manager.primaryIndex: the first enabled primary, null without one" {
     const infos = [_]Info{ mk("eDP-1", "", ""), mk("DP-2", "", ""), mk("DP-1", "", "") };
     try tt.expectEqual(@as(?usize, 2), m.primaryIndex(&infos));
     try tt.expect(m.primaryIndex(infos[0..1]) == null);
+}
+
+test "parseMode: size, size with refresh, and what is not a mode" {
+    const a = parseMode("1920x1080").?;
+    try tt.expectEqual(@as(i32, 1920), a.w);
+    try tt.expectEqual(@as(i32, 1080), a.h);
+    try tt.expectEqual(@as(i32, 0), a.refresh_mhz);
+    try tt.expectEqual(@as(i32, 143970), parseMode("2560x1440@143.97").?.refresh_mhz);
+    try tt.expectEqual(@as(i32, 60000), parseMode("1920x1080@60").?.refresh_mhz);
+    try tt.expect(parseMode("") == null);
+    try tt.expect(parseMode("1920") == null);
+    try tt.expect(parseMode("1920x") == null);
+    try tt.expect(parseMode("x1080") == null);
+    try tt.expect(parseMode("0x1080") == null);
+    try tt.expect(parseMode("1920x1080@") == null);
+    try tt.expect(parseMode("1920x1080@-5") == null);
+    try tt.expect(parseMode("@60x1080") == null);
 }

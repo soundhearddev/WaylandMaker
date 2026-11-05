@@ -62,6 +62,8 @@ pub const View = struct {
     /// is not asked to draw twice for the same thing. Consumed by `configure`.
     first_size: ?manage.InitialSize = null,
     first_tiled: bool = false,
+    /// The entry of this window in the toplevel list for taskbars (while mapped).
+    foreign: ?*wlr.ExtForeignToplevelHandleV1 = null,
 
     commit: wl.Listener(*wlr.Surface) = .init(onCommit),
     map: wl.Listener(void) = .init(onMap),
@@ -293,6 +295,7 @@ pub const View = struct {
         manage.setString(wm, &win.app_id, if (toplevel.app_id) |s| std.mem.span(s) else null);
         manage.setString(wm, &win.title, if (toplevel.title) |s| std.mem.span(s) else null);
         view.syncParent();
+        view.foreignCreate();
         const geo = toplevel.base.geometry;
         manage.setActualSize(win, geo.width, geo.height);
         const cur = toplevel.current;
@@ -311,6 +314,7 @@ pub const View = struct {
     fn closeModelWindow(view: *View) void {
         const win = view.win orelse return;
         view.win = null;
+        view.foreignDestroy();
         view.tree.node.setEnabled(false);
         if (view.server.focused == view) view.server.focused = null;
         manage.closeWindowObject(view.server.wm, win);
@@ -385,6 +389,7 @@ pub const View = struct {
         const win = view.win orelse return;
         const toplevel = view.toplevel orelse return;
         manage.setString(view.server.wm, &win.title, if (toplevel.title) |s| std.mem.span(s) else null);
+        view.foreignUpdate();
     }
 
     fn onSetAppId(listener: *wl.Listener(void)) void {
@@ -393,6 +398,38 @@ pub const View = struct {
         const toplevel = view.toplevel orelse return;
         manage.setString(view.server.wm, &win.app_id, if (toplevel.app_id) |s| std.mem.span(s) else null);
         manage.appIdChanged(view.server.wm, win);
+        view.foreignUpdate();
+    }
+
+    // ---- toplevel list (taskbars, switchers) ----------------------------------------------
+
+    fn foreignState(toplevel: *wlr.XdgToplevel) wlr.ExtForeignToplevelHandleV1.State {
+        return .{ .title = toplevel.title, .app_id = toplevel.app_id };
+    }
+
+    /// Announce the mapped window to taskbars. Failing to is no reason to
+    /// refuse the window: it is only missing from them.
+    fn foreignCreate(view: *View) void {
+        const toplevel = view.toplevel orelse return;
+        if (view.foreign != null) return;
+        const state = foreignState(toplevel);
+        view.foreign = wlr.ExtForeignToplevelHandleV1.create(view.server.protocols.foreign_list, &state) catch |err| {
+            log.warn("cannot add a window to the toplevel list: {t}", .{err});
+            return;
+        };
+    }
+
+    fn foreignUpdate(view: *View) void {
+        const handle = view.foreign orelse return;
+        const toplevel = view.toplevel orelse return;
+        const state = foreignState(toplevel);
+        handle.updateState(&state);
+    }
+
+    fn foreignDestroy(view: *View) void {
+        const handle = view.foreign orelse return;
+        view.foreign = null;
+        handle.destroy();
     }
 
     fn onSetParent(listener: *wl.Listener(void)) void {

@@ -260,6 +260,16 @@ pub fn build(b: *std.Build) void {
     scanner.addSystemProtocol("stable/linux-dmabuf/linux-dmabuf-v1.xml");
     scanner.addSystemProtocol("stable/viewporter/viewporter.xml");
     scanner.addSystemProtocol("staging/single-pixel-buffer/single-pixel-buffer-v1.xml");
+    // protocols.zig: only the ones whose Zig types the zig-wlroots bindings
+    // name (content type, xdg-foreign, ext-image-copy-capture). The others
+    // (fractional scale, idle, activation, ...) are served by wlroots in C and
+    // need no generated types; zig-wayland's scanner also cannot parse
+    // presentation-time.xml of wayland-protocols 1.47 (BadDescription).
+    scanner.addSystemProtocol("staging/content-type/content-type-v1.xml");
+    scanner.addSystemProtocol("unstable/xdg-foreign/xdg-foreign-unstable-v2.xml");
+    scanner.addSystemProtocol("staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml");
+    scanner.addSystemProtocol("unstable/pointer-constraints/pointer-constraints-unstable-v1.xml");
+    scanner.addSystemProtocol("staging/ext-session-lock/ext-session-lock-v1.xml");
     // Not in wayland-protocols: panels, launchers, wallpapers and notification
     // daemons (waybar, fuzzel, wofi, tofi, swaybg, mako, ...) are layer-shell
     // clients. Vendored from wlr-protocols.
@@ -280,6 +290,12 @@ pub fn build(b: *std.Build) void {
     scanner.generate("wp_single_pixel_buffer_manager_v1", 1);
     scanner.generate("zwlr_layer_shell_v1", 4);
     scanner.generate("zwp_tablet_manager_v2", 1);
+    scanner.generate("wp_content_type_manager_v1", 1);
+    scanner.generate("zxdg_exporter_v2", 1);
+    scanner.generate("zxdg_importer_v2", 1);
+    scanner.generate("ext_image_copy_capture_manager_v1", 1);
+    scanner.generate("zwp_pointer_constraints_v1", 1);
+    scanner.generate("ext_session_lock_manager_v1", 1);
 
     scanner.generate(
         "wp_color_manager_v1",

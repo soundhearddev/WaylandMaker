@@ -50,12 +50,12 @@ Files: `main` (entry) `cli` `boot` (config/env, no wlroots) `server` (globals, l
 - [x] VT switching (`XF86Switch_VT_n`), session via `Backend.autocreate`, libinput devices (keyboard, pointer)
 - [ ] Run it: nested, then from a TTY (open until someone has wlroots 0.20)
 - [x] libinput settings (tap, natural scroll): `tap_to_click`, `natural_scroll` in config.lua (`libinput.zig`)
-- [ ] Only keyboard and pointer are used; touch, tablet, switches are ignored
+- [ ] Touch is forwarded to clients (`cursor.zig`: down/up/motion/cancel/frame, up to 10 fingers, a finger keeps reporting to the surface it began on; no gestures, not run). Still ignored: tablets, switches
 
 Also done beyond the list: window placement, tiling, borders, fullscreen requests and multi-output migration
 already work through the model (`manage.zig`), so milestone B starts from a working base.
 Known gaps (the list above was longer; DockApps, animations, client move/resize and layer-shell are done now):
-`monitor()` rules/profiles are decided in the model (`outputs.zig`) but not yet applied to the wlroots outputs (on/off, mode, scale, position).
+`monitor()` rules are decided in the model (`outputs.zig`) and applied to the wlroots outputs in `output.zig` (on/off, mode, scale, position; not run).
 
 ## 3. Tiling parity (milestone B: daily layout)
 
@@ -68,12 +68,13 @@ Known gaps (the list above was longer; DockApps, animations, client move/resize 
 - [x] Animations driven directly: `src/motion.zig` (shared model code), one pass per displayed frame (`Monitor.onFrame`), nothing when idle
 - [x] Layer-shell server (`wlr-layer-shell`, `layer.zig`): panels, exclusive zones, work area, keyboard interactivity  (not run)
 - [x] `focus/move to output`: next / previous and left / right / up / down (model, tested)
-- [ ] Multi-monitor with the wlroots outputs: hotplug, rules, profiles applied to the real outputs
+- [x] Rules applied to the real outputs: on/off (a switched-off output leaves the desk), `mode`, `scale`, `x`/`y` (`Monitor.applyRule` in `output.zig`, not run)
+- [ ] Multi-monitor on real hardware: hotplug order of the wlroots events, profiles
 
 Performance notes (the priority): a pass places only what changed (`View.last` skips unchanged windows);
 animations cost one pass per displayed frame and nothing afterwards; the cursor sets its image only on change;
 linux-dmabuf is connected to the scene, so a fullscreen client can be scanned out directly.
-Still open: applying monitor rules/profiles to the wlroots outputs (the commands to focus / move to an output exist). (The layer-shell XML is vendored in `protocol/`.)
+Still open: running it on real monitors. (The layer-shell XML is vendored in `protocol/`.)
 
 ## 4. Shell parts (milestone C: Window Maker feel)
 
@@ -90,12 +91,12 @@ Still open: applying monitor rules/profiles to the wlroots outputs (the commands
 
 - [x] Clipboard and primary selection (`wl_data_device_manager`, `primary-selection`)
 - [ ] A clipboard that survives the source client (needs a manager such as `wl-clip-persist`, or our own)
-- [ ] xdg-activation, idle-notify, idle-inhibit
-- [ ] ext-session-lock (screen locker)
+- [x] xdg-activation (only requests backed by a user action take the focus), idle-notify, idle-inhibit (`protocols.zig`; not run)
+- [x] ext-session-lock (screen locker): `lock.zig`; one black cover bigger than any desk, lock surfaces above everything, binds/Dock/mouse binds/other keyboard focus shut off while locked, the lock holds when the locker dies (not run). Open: cancel a running move/resize when the lock starts
 - [ ] wlr-output-management (kanshi, wlr-randr)
-- [ ] Screencopy / ext-image-copy-capture (grim, screen sharing via portal)
-- [ ] foreign-toplevel (taskbars), gamma control  (xdg-output done)
-- [ ] Pointer constraints, relative pointer (games)
+- [ ] Screencopy / ext-image-copy-capture (grim, screen sharing via portal): `ext-image-copy-capture` with output sources is served (`protocols.zig`, not run); `wlr-screencopy` and export-dmabuf wait for the wlr-protocols dependency (section 8)
+- [ ] foreign-toplevel (taskbars), gamma control  (xdg-output done). `ext-foreign-toplevel-list` is served (title and app_id, `view.zig`, not run); activate/close/minimize from a taskbar need `wlr-foreign-toplevel-management` (wlr-protocols XML, section 8), gamma control too
+- [x] Pointer constraints (lock, confine, cursor hint) and relative pointer (games, Blender): `cursor.zig`, a constraint holds only for the surface under the pointer that has the keyboard focus (not run). Open: a constraint does not follow a window that moves under a locked pointer until the next motion/`refresh`
 - [ ] Tablet, text-input / input-method (only if needed)
 - [ ] XWayland (optional, decide later)
 - [x] Portal config: `wmaker-wl-portals.conf` (GTK backend), installed with the session
@@ -121,16 +122,16 @@ Still open: applying monitor rules/profiles to the wlroots outputs (the commands
 
 Not in any list above, and the first things real programs and real hardware will hit:
 
-- [ ] **Fractional scale** (`wp_fractional_scale_v1`) and `wp_presentation`: not created in `server.zig`. HiDPI clients render blurry or at the wrong size, and video players lose frame timing. `scale.zig` has the model side
-- [ ] **VT switch, suspend and resume**: outputs and input must come back after `Ctrl+Alt+F<N>` and after sleep (libseat session active/inactive; no handler in `server.zig`)
+- [x] **Fractional scale** (`wp_fractional_scale_v1`) and `wp_presentation`: created in `protocols.zig` (not run). The scene tells each surface its output's scale. `scale.zig` has the model side
+- [ ] **VT switch, suspend and resume**: outputs and input must come back after `Ctrl+Alt+F<N>` and after sleep. `server.zig` now listens to the session's active signal (redraw, manage pass, idle reset); wlroots restores the devices itself. Still to test on a TTY and after suspend
 - [ ] **GPU**: multi-GPU, a GPU that disappears, `WLR_RENDERER`/`WLR_DRM_DEVICES` documented
 - [ ] **Output power and DPMS**: blank the screen on idle, wake on input (needs idle-notify first)
-- [ ] `xdg-dialog`, `xdg-toplevel-icon`, `xdg-foreign`, `content-type`, `tearing-control` (games), `alpha-modifier`, `ext-data-control` (clipboard managers): none served; check which real programs need them
-- [ ] `security-context` and who may use which protocol: screencopy, input injection and the layer-shell keyboard grab must not be open to every client
+- [ ] `xdg-dialog`, `xdg-toplevel-icon`, `tearing-control` (games): not served; check which real programs need them. Served now (`protocols.zig`, not run): `xdg-foreign`, `content-type`, `alpha-modifier`, `ext-data-control`
+- [ ] `security-context` and who may use which protocol: the manager and a global filter are in `protocols.zig` (sandboxed clients do not see capture, data-control, idle-notify, layer-shell, security-context). Open: input injection, and the wlr-protocols ones once they exist; not run
 - [ ] **Client misbehaviour**: a client that does not answer a configure, ignores `ack`, or floods requests must not stall the manage pass (timeouts, per-client limits)
-- [ ] **Frame pacing**: the 16 ms animation timer should follow the output's refresh (`wlr_output` presentation time), not a constant
-- [ ] **Cursor**: hide while typing, theme and size from `XCURSOR_*`/config, per-output scale
-- [ ] **Error paths**: `Server.create` and `Monitor.create` failures leave the session without a screen; log the reason on the TTY and exit with a code the session script can name
+- [x] **Frame pacing**: there is no constant timer: an animation advances once per displayed frame (`Monitor.onFrame`), so it follows the refresh of the output
+- [x] **Cursor**: hides while typing, size from `XCURSOR_SIZE` (theme from `XCURSOR_THEME` via wlroots), image loaded per output scale (not run). Still open: theme and size from config.lua
+- [x] **Error paths**: a failed start logs the reason and exits with a status that names the stage (10 config, 11 model, 12 compositor/backend, 13 socket, 14 run); the session script prints the name (`main.zig`, `SESSION.md`; not run). Open: `Monitor.create` failing for one output only logs it
 - [ ] A **headless test** (`WLR_BACKENDS=headless`) that opens an output and a client: the compositor half of the code has no test at all, only the model does
 
 ## 8. Protocol files: no copies in the tree
@@ -157,4 +158,3 @@ mismatch shows up at runtime. Options, best first:
       protocol version to keep in step.
 - [ ] Not recommended: dropping the scanner and importing the wlroots C headers directly (translate-c). It removes the
       generated layer but replaces it with C types and manual wrappers everywhere.
-

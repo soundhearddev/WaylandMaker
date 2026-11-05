@@ -236,6 +236,13 @@ pub fn setOutputInfo(wm: *WindowManager, out: *Output, name: []const u8, make: ?
     wm.monitors.changed(now);
 }
 
+/// The scale of the output changed (a `monitor()` rule set it).
+pub fn setOutputScale(wm: *WindowManager, out: *Output, scale: i32) void {
+    if (out.mon.scale == scale) return;
+    out.mon.scale = scale;
+    backend.manageDirty(wm.obj);
+}
+
 /// The monitor is gone. Its windows move on in the next pass.
 pub fn removeOutput(wm: *WindowManager, out: *Output, now: u64) void {
     out.removed = true;

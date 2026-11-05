@@ -27,9 +27,10 @@ monitor_settle_ms = 400          -- a change of the monitors counts after this m
 --   monitor("eDP-1", { enabled = false })              -- ignore the laptop screen
 --   monitor("*", { on_connect = "notify-send 'monitor connected'" })
 -- Windows taken off a monitor that went away return when it comes back
--- (restore_windows = false turns that off). wmaker-wl does not set modes or positions
--- yet: a profile runs the tool that does
--- (kanshi, wlr-randr) when exactly this set of monitors is connected:
+-- (restore_windows = false turns that off). A rule can also set the video mode,
+-- the scale and the place on the desk:
+--   monitor("DP-2", { mode = "2560x1440@144", scale = 1.5, x = 0, y = 0 })
+-- A profile runs a tool (kanshi, wlr-randr) when exactly this set of monitors is connected:
 --   monitor_profile{ name = "docked", needs = { "eDP-1", "DP-1" },
 --                    run = "kanshictl switch docked" }
 

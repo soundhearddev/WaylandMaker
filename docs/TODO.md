@@ -26,7 +26,7 @@ See [MONITORS.md](MONITORS.md).
 
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
 - [ ] Workspace names per monitor.
-- [ ] Configure modes, scale and position directly through `wlr-output-management`, instead of only running
+- [ ] `wlr-output-management` (kanshi, wlr-randr). Done without it: `monitor()` rules set `mode`, `scale`, `x`/`y` and on/off directly (`output.zig`, not run). Still to do: the protocol, instead of only running
       an external command (kanshi, wlr-randr) from `monitor_profile`.
 - [ ] Test hotplug against real plugging and unplugging. The model side is tested
       (debouncing, rules, windows returning). What needs checking is the order of the wlroots events.
@@ -43,7 +43,7 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Make `Ui.sync` redraw only changed content. Check whether the menu, dock, and clip are redrawn on every manage sequence, even when nothing changes. If so, add per-panel dirty flags and row-/tile-level damage tracking instead of full redraws.
 - [ ] Optimize the animation path so only changed windows receive requests. While `anim_active` is set, a frame runs every 16 ms, but stationary windows must not receive `set_position` or `propose_dimensions` requests. Check whether the 16 ms timer drifts relative to the actual refresh rate.
 - [ ] Reduce idle costs to zero. When nothing is happening, `poll` should sleep without a timeout. Count wakeups per second with `strace -c` or `perf`. Autocollapse, monitor-settle, and animation timers must stop when no longer needed.
-- [ ] Eliminate file I/O from the Manage/Render paths. Icon searches (themes and `.desktop` files), SVG loading, and `WMState` writes must never block a sequence. Cache results or defer work until outside the frame path.
+- [ ] Eliminate file I/O from the Manage/Render paths. Dock icons are now loaded at most 3 per pass (`dock_scene.zig`, `icons_per_pass`): the other tiles show without a picture for a few turns of the loop and get it in the next passes, so a Dock with many apps no longer holds the first pass; the first load of each icon still reads files inside a pass. Still open: SVG loading, `WMState` writes, the menu. Icon searches (themes and `.desktop` files), SVG loading, and `WMState` writes must never block a sequence. Cache results or defer work until outside the frame path.
 - [ ] Investigate benchmark outliers. In the checked-in benchmark, `layout columns` with 100 windows reaches 2721 µs maximum against a 20 µs average, while `layout stacks of 4` reaches 360 µs against an 8 µs average. Allocator overhead or page faults may be responsible, but this needs verification.
 - [ ] Run long-duration memory soak tests. Open and close windows, connect and disconnect monitors, and reload with `SIGHUP` for several hours while monitoring RSS. Check for leaks with Valgrind or the debug allocator.
 
@@ -52,7 +52,9 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Count allocations in hot paths. Add an allocation counter to the benchmark and move Manage, Layout, and Render allocations to arenas or fixed-size buffers where appropriate.
 - [ ] Cache Cairo/Pango resources. Reuse text measurements, layouts, and font maps instead of rebuilding them on every draw. Rebuild menu rows only when their contents change.
 - [ ] Measure logging overhead. Ensure filtered log messages are never formatted in the first place. Measure the flight recorder and `info` logging separately in hot paths.
-- [ ] Throttle pointer operations. Super + mouse move/resize should perform work once per frame rather than once per motion event.
+- [x] Throttle pointer operations: a Super + mouse move/resize asks for its pass with `Server.manageOnFrame`, and the pass runs at the start of the next `Monitor.onFrame`, once per frame instead of once per motion event (not run, not measured).
+- [x] Idle-notify activity is passed on at most every 100 ms (`Protocols.notifyActivity`): wlroots re-arms a timer per listener per call, and a mouse reports ~1000 times a second. The first activity after a pause still goes through at once.
+- [x] `Monitor.applyRule` matches the `monitor()` rules only after a reload or a change of on/off, not on every pass (an animation runs a pass per frame).
 - [ ] Benchmark multiple monitors: test 3–4 outputs with animations and rapid hotplug sequences, including repeated connect/disconnect cycles within a second.
 - [ ] Stress-test many clients. Open and close 100–200 terminals simultaneously. Measure time to first frame, frame time, and `move all windows`. The Debug benchmark currently shows around 10 ms for the latter with 1000 windows.
 - [ ] Measure startup time until the WM is ready, including Lua configuration, icon directories, `WMState`, and autostart. Introduce lazy loading if necessary.
@@ -89,7 +91,7 @@ Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the 
 - [ ] `ext-session-lock` (screen locker), idle notify and inhibit, `xdg-activation`
 - [ ] Screen capture (`ext-image-copy-capture`, screencopy) for `grim` and screen sharing, and the
       matching portal; until then `wmaker-wl-portals.conf` only knows the GTK backend
-- [ ] `wlr-output-management`, foreign-toplevel, gamma control, pointer constraints
+- [ ] `wlr-output-management`, `wlr-foreign-toplevel-management`, gamma control (pointer constraints and relative pointer are in `cursor.zig`, not run)
 - [ ] Touch, tablet, switches (only keyboard and pointer are used)
 - [ ] XWayland (decide whether at all)
 - [ ] Notifications, a wallpaper, a screenshot key and a lock key in the default config, once the
