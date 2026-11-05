@@ -44,6 +44,7 @@ const Touch = struct { id: i32 = 0, active: bool = false, ox: f64 = 0, oy: f64 =
 /// the region is a `wlr_pointer_constraint_v1.region`.
 extern fn pixman_region32_contains_point(region: *const anyopaque, x: c_int, y: c_int, box: ?*anyopaque) c_int;
 const btn_left = 0x110;
+const btn_middle: u32 = 0x112;
 const btn_right = 0x111;
 
 pub const Cursor = struct {
@@ -388,8 +389,8 @@ pub const Cursor = struct {
             }
         }
 
-        // The Dock (tiles, Clip, Drawers) has the pointer before any window.
-        if (!server.lock.locked and server.dock_ui.motion(c.wlr_cursor.x, c.wlr_cursor.y)) {
+        // An open menu has the pointer wherever it is.
+        if (server.menu_ui.motion(c.wlr_cursor.x, c.wlr_cursor.y)) {
             if (!c.image_default) {
                 c.wlr_cursor.setXcursor(c.xcursor, "default");
                 c.image_default = true;
@@ -400,7 +401,29 @@ pub const Cursor = struct {
             return;
         }
 
-        const hit = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y) orelse {
+        // The Dock (tiles, Clip, Drawers) has the pointer, unless a window
+        // lies over it here (a Dock below windows, `dock_on_top = false`, and
+        // a floating window moved onto it): the window then takes it, as the
+        // eye sees it. A press the Dock holds keeps the pointer.
+        const hit_or_none = c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y);
+        if (!server.lock.locked) {
+            if (hit_or_none == null or server.dock_ui.pressing()) {
+                if (server.dock_ui.motion(c.wlr_cursor.x, c.wlr_cursor.y)) {
+                    if (!c.image_default) {
+                        c.wlr_cursor.setXcursor(c.xcursor, "default");
+                        c.image_default = true;
+                    }
+                    server.seat.pointerNotifyClearFocus();
+                    c.deactivate();
+                    if (seat) |s| s.hovered = null;
+                    return;
+                }
+            } else {
+                server.dock_ui.pointerLeft();
+            }
+        }
+
+        const hit = hit_or_none orelse {
             if (!c.image_default) {
                 c.wlr_cursor.setXcursor(c.xcursor, "default");
                 c.image_default = true;
@@ -431,6 +454,15 @@ pub const Cursor = struct {
         c.processMotion(@truncate(c.server.nowMs()));
     }
 
+    /// Does the Dock get a press or the wheel here? Not while locked, and not
+    /// where a window or layer surface lies over it: a Dock below windows must
+    /// not take clicks through them. A press it holds keeps it until released.
+    fn dockHasPointer(c: *Cursor) bool {
+        if (c.server.lock.locked) return false;
+        if (c.server.dock_ui.pressing()) return true;
+        return c.hitAt(c.wlr_cursor.x, c.wlr_cursor.y) == null;
+    }
+
     /// Modifiers held on the seat's keyboard.
     fn heldMods(c: *Cursor) u32 {
         const kb = c.server.seat.getKeyboard() orelse return 0;
@@ -447,7 +479,13 @@ pub const Cursor = struct {
         // The Dock takes presses on its tiles, and the release of a press it
         // took, wherever the pointer is by then. Clients never see either.
         const pressed = event.state == .pressed;
-        if (!server.lock.locked and server.dock_ui.button(c.wlr_cursor.x, c.wlr_cursor.y, event.button, pressed)) {
+        // An open menu takes every button: a click on a row acts, one away
+        // from it closes the menu and goes no further.
+        if (server.menu_ui.button(c.wlr_cursor.x, c.wlr_cursor.y, event.button, pressed)) {
+            if (!pressed) c.buttons_down -|= 1 else c.buttons_down += 1;
+            return;
+        }
+        if (c.dockHasPointer() and server.dock_ui.button(c.wlr_cursor.x, c.wlr_cursor.y, event.button, pressed)) {
             if (!pressed) c.buttons_down -|= 1 else c.buttons_down += 1;
             return;
         }
@@ -479,6 +517,13 @@ pub const Cursor = struct {
                 c.beginOp(s, op.?, win, event.button);
                 return;
             };
+        }
+
+        // Right and middle click on the empty desktop: the root menu and the
+        // window list, as in Window Maker.
+        if (!server.lock.locked and hit == null and (event.button == btn_right or event.button == btn_middle)) {
+            server.menu_ui.openAtPointer(if (event.button == btn_right) .root else .windows);
+            if (server.menu_ui.isOpen()) return;
         }
 
         _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
@@ -519,8 +564,9 @@ pub const Cursor = struct {
     fn onAxis(listener: *wl.Listener(*wlr.Pointer.event.Axis), event: *wlr.Pointer.event.Axis) void {
         const c: *Cursor = @fieldParentPtr("axis", listener);
         c.server.protocols.notifyActivity();
+        if (c.server.menu_ui.axis(c.wlr_cursor.x, c.wlr_cursor.y, event.delta)) return;
         // The wheel over the Clip changes the workspace.
-        if (!c.server.lock.locked and event.orientation == .vertical_scroll and
+        if (event.orientation == .vertical_scroll and c.dockHasPointer() and
             c.server.dock_ui.axis(c.wlr_cursor.x, c.wlr_cursor.y, event.delta)) return;
         c.server.seat.pointerNotifyAxis(
             event.time_msec,

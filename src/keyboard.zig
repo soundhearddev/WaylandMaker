@@ -210,6 +210,10 @@ pub const Keyboard = struct {
         // Locked: no bind acts (not even one that would unlock by a command).
         if (server.lock.locked) return false;
 
+        // An open menu takes every key (and eats it, so the release is not
+        // passed on either).
+        if (server.menu_ui.key(syms.slice())) return kb.consume(evdev);
+
         const mods: u32 = @bitCast(wlr_kb.getModifiers());
         const index = keys.find(server.wm.cfg.binds, mods, syms.slice()) orelse {
             // `WMAKER_LOG=info,keyboard=debug` shows what a press that does

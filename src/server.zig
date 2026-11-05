@@ -35,6 +35,7 @@ const LayerSurface = layer.LayerSurface;
 const libinput = @import("libinput.zig");
 const Protocols = @import("protocols.zig").Protocols;
 const Lock = @import("lock.zig").Lock;
+const MenuUi = @import("menu_scene.zig").MenuUi;
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
@@ -63,6 +64,8 @@ pub const Server = struct {
     protocols: *Protocols = undefined,
     /// The screen locker (ext-session-lock).
     lock: *Lock = undefined,
+    /// The root menu and the window list (menu_scene.zig).
+    menu_ui: *MenuUi = undefined,
 
     /// wlr-layer-shell: one scene tree per layer (background, bottom, top,
     /// overlay). Background and bottom lie under the windows, top over the
@@ -202,6 +205,10 @@ pub const Server = struct {
         // a fullscreen window; the overlay layer and the popups stay on top.
         server.layer_trees[2].node.placeAbove(&server.dock_above.node);
         server.dock_ui = try DockUi.create(server);
+        errdefer server.dock_ui.destroy();
+        // Created last in the scene: above everything except a screen lock.
+        server.menu_ui = try MenuUi.create(server);
+        errdefer server.menu_ui.destroy();
 
         wlr_backend.events.new_output.add(&server.new_output);
         wlr_backend.events.new_input.add(&server.new_input);
@@ -250,6 +257,7 @@ pub const Server = struct {
         server.cursor.deinit();
 
         server.dock_ui.destroy();
+        server.menu_ui.destroy();
         server.lock.destroy();
         server.protocols.destroy();
         server.scene.tree.node.destroy();
@@ -399,6 +407,11 @@ pub const Server = struct {
         defer _ = perf.stop(server.wm.io, span);
         manage.run(server.wm, server.sink(), server.nowMs());
         server.applyConfig();
+        // A bind asked for a menu (`menu_root`, `menu_windows`).
+        if (server.wm.menu_request) |req| {
+            server.wm.menu_request = null;
+            server.menu_ui.openAtPointer(req);
+        }
         // The `monitor()` rules on the real outputs (mode, scale, place, on/off).
         var mit = server.monitors.iterator(.forward);
         while (mit.next()) |m| m.applyRule();

@@ -249,17 +249,19 @@ fn computeFloating(ws: *Workspace, cfg: *const config.Config) void {
     var it = ws.floating.first();
     while (it) |win| : (it = types.nextFloating(win)) {
         if (!win.has_float_rect) initFloatRect(win, out, cfg);
-        // Output-local work area: the part of the window you grab must not
-        // end up under the Dock either.
-        const work = out.workArea();
+        // A floating window moves freely, over the Dock as well (the Dock
+        // only keeps tiled windows out of its strip). What must stay on
+        // screen is a strip to grab it by, and where the Dock is drawn over
+        // windows (`dock_on_top`) that strip stays out of the Dock's column,
+        // or the window could be dragged where it cannot be reached again.
+        const area = if (cfg.dock_on_top) out.workArea() else out.areaUnderDock();
         const local: Rect = .{
-            .x = work.x - out.rect.x,
-            .y = work.y - out.rect.y,
-            .w = work.w,
-            .h = work.h,
+            .x = area.x - out.rect.x,
+            .y = area.y - out.rect.y,
+            .w = area.w,
+            .h = area.h,
         };
         keepReachable(&win.float_rect, local);
-        keepOutOfReserved(&win.float_rect, local, out.reserved);
         win.target = .{
             .x = out.rect.x + win.float_rect.x,
             .y = out.rect.y + win.float_rect.y,
@@ -296,22 +298,8 @@ pub fn initFloatRect(win: *Window, out: *const Output, cfg: *const config.Config
 }
 
 /// Keep at least a grabbable strip of the window on screen so a floating
-/// window can never be lost off the edge. Output-local coordinates.
-/// On a side where the Dock reserved space, a floating window stays entirely
-/// inside the work area (it is moved, not resized; one too big for the area
-/// sticks to the near edge). Sides nothing was reserved on keep their
-/// freedom.
-pub fn keepOutOfReserved(r: *Rect, local: Rect, res: Output.Insets) void {
-    if (res.left > 0 or res.right > 0) {
-        const max_x = local.x + local.w - r.w;
-        r.x = if (max_x < local.x) local.x else std.math.clamp(r.x, local.x, max_x);
-    }
-    if (res.top > 0 or res.bottom > 0) {
-        const max_y = local.y + local.h - r.h;
-        r.y = if (max_y < local.y) local.y else std.math.clamp(r.y, local.y, max_y);
-    }
-}
-
+/// window can never be lost off the edge. Output-local coordinates. The rest
+/// of the window may lie anywhere, over the Dock too.
 pub fn keepReachable(r: *Rect, bounds: Rect) void {
     const grab: i32 = 48;
     const min_x = bounds.x + grab - r.w;
@@ -342,23 +330,6 @@ test "stackHeights single window uses everything" {
     const a = stackHeights(1, 500, 8);
     try std.testing.expectEqual(@as(i32, 500), a.base);
     try std.testing.expectEqual(@as(usize, 0), a.extra);
-}
-
-test "keepOutOfReserved: a floating window never covers the Dock's strip" {
-    const local: Rect = .{ .x = 0, .y = 0, .w = 1856, .h = 1080 };
-    var a: Rect = .{ .x = 1700, .y = 50, .w = 400, .h = 300 };
-    keepOutOfReserved(&a, local, .{ .right = 64 });
-    try std.testing.expectEqual(@as(i32, 1856 - 400), a.x);
-    try std.testing.expectEqual(@as(i32, 50), a.y);
-    var b: Rect = .{ .x = 10, .y = 50, .w = 400, .h = 300 };
-    keepOutOfReserved(&b, .{ .x = 64, .y = 0, .w = 1856, .h = 1080 }, .{ .left = 64 });
-    try std.testing.expectEqual(@as(i32, 64), b.x);
-    var c: Rect = .{ .x = -300, .y = 50, .w = 400, .h = 300 };
-    keepOutOfReserved(&c, local, .{});
-    try std.testing.expectEqual(@as(i32, -300), c.x);
-    var d: Rect = .{ .x = 500, .y = 0, .w = 3000, .h = 300 };
-    keepOutOfReserved(&d, local, .{ .right = 64 });
-    try std.testing.expectEqual(@as(i32, 0), d.x);
 }
 
 test "keepReachable keeps the grab zone out of a reserved strip" {

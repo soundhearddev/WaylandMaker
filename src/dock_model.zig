@@ -1257,6 +1257,21 @@ test "Output.workArea subtracts what the Dock reserves, on top of layer-shell" {
     try std.testing.expect(o.workArea().w >= 1);
 }
 
+test "Output.areaUnderDock: the Dock's strip is free for floating windows, bars and struts are not" {
+    var o: types.Output = undefined;
+    o.rect = .{ .x = 0, .y = 0, .w = 1000, .h = 800 };
+    o.usable = null;
+    o.reserved = .{ .right = 64 };
+    o.struts = .{};
+    try std.testing.expectEqual(o.rect, o.areaUnderDock());
+    try std.testing.expectEqual(@as(i32, 936), o.workArea().w);
+
+    // A bar at the top (layer-shell) and a strut still count.
+    o.usable = .{ .x = 0, .y = 30, .w = 1000, .h = 770 };
+    o.struts = .{ .left = 10 };
+    try std.testing.expectEqual(types.Rect{ .x = 10, .y = 30, .w = 990, .h = 770 }, o.areaUnderDock());
+}
+
 test "Model.layout: the Clip's tiles change sides with the Clip, the first layout only adopts the corner" {
     const apps = [_]dockapp.DockApp{
         // Saved while the Clip sat in the bottom right corner: tiles point

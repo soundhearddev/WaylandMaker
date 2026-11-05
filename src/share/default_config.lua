@@ -294,6 +294,8 @@ bind("Super+F10", [[shell wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle || pactl se
 bind("Super+q", "close")
 bind("Super+Shift+e", "exit")
 bind("Super+Shift+r", "reload_config")   -- re-read config.lua (same as pkill -HUP wmaker-wl)
+bind("Menu", "menu_root")                      -- the root menu at the pointer (right click on the desktop)
+bind("Super+Menu", "menu_windows")              -- the window list (middle click on the desktop)
 bind("Super+t", "toggle_floating")
 bind("Super+f", "toggle_fullscreen")
 bind("Super+d", "maximize_column")   -- fills the work area, others are pushed aside

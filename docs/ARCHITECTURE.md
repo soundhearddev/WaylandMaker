@@ -17,11 +17,11 @@ display. **Compositor** files talk to wlroots.
 | `action.zig` | parses and runs commands (key bindings, menu entries) | model |
 | `motion.zig` | where a window is *drawn*: movement spring, opening animation, clip box | model |
 | `animation.zig` | spring and easing curves, parsing `anim_window_*` | model |
-| `monitors.zig` | monitor identification, rules, profiles, hotplug decisions | model |
+| `monitors.zig` | monitor identification, `monitor()` rules (on/off, primary, workspaces, mode, scale, place), profiles, settle time | model |
 | `dock_model.zig` | Dock, Clip and Drawers: tiles, slots, grid, temporary tiles, geometry, hit testing | model |
 | `dock_view.zig` | what each Dock tile looks like (`Look`, cached by key) and what changed between two plans (`diff`); the contract for drawing, see `DOCK.md` | model |
 | `dockhost.zig` | DockApps (`dockapp:<name>`): adoption, tiles that follow the programs, the room the Dock reserves, where each DockApp goes | model |
-| `outputs.zig` | what follows from a monitor coming or going: windows move away and come back (`home`), `monitor()` rules, profile after the settle time | model |
+| `outputs.zig` | what follows from a monitor coming or going: windows move away and come back (`home`), a rule's on/off, primary and workspaces, profile after the settle time | model |
 | `config.zig`, `lua.zig`, `share/default_config.lua` | Lua config and its defaults | model |
 | `style.zig` | the look (palette and fonts) taken from the config once per load; read by the drawing code, see [THEMES.md](THEMES.md) | model |
 | `plist.zig`, `wm_menu.zig`, `wm_attr.zig`, `wm_files.zig` | Window Maker files: property lists, root menu, `WMWindowAttributes`, where files live | model |
@@ -37,7 +37,12 @@ display. **Compositor** files talk to wlroots.
 | `cli.zig` | the command line | model |
 | `main.zig` | startup, `--check`, `--paths`, `--print-config` | compositor |
 | `server.zig` | wlroots objects, protocol globals, event loop, signals; implements the `Sink` | compositor |
-| `output.zig` | one monitor: wlroots output, scene output, its model `Output` | compositor |
+| `output.zig` | one monitor: wlroots output, scene output, output layout, its model `Output`; reports it to the model and carries out a rule's mode, scale, place and on/off (`Monitor.applyRule`) | compositor |
+| `protocols.zig` | protocol globals that need little more than creating: fractional scale, presentation, idle, xdg-activation, xdg-foreign, data-control, capture, security-context and its global filter | compositor |
+| `lock.zig` | screen locker (ext-session-lock): cover, lock surfaces, the lock holds when the locker dies | compositor |
+| `menu_model.zig` | the open menu: levels, geometry, hover, keys, what a click asks for (`Effect`); window list and workspace levels | model |
+| `fsmenu.zig` | `OPEN_MENU`: a menu from a file, a directory or a command | model |
+| `menu_scene.zig` | the root menu and window list on the screen: scene buffers drawn with cairo, pointer and keys while open, runs what a row asks for | compositor |
 | `view.zig` | an xdg toplevel (and its popups) and its scene nodes | compositor |
 | `keyboard.zig`, `cursor.zig` | input devices, bind dispatch, hit testing, click and hover focus | compositor |
 | `probe.zig` | `zig build probe`: can wlroots be used here at all | compositor |

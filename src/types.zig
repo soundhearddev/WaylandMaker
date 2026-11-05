@@ -382,6 +382,20 @@ pub const Output = struct {
         };
     }
 
+    /// Like `workArea`, but the Dock's reserved strip counts as free: what a
+    /// floating window may be moved over. Layer-shell bars and the user's
+    /// struts still keep their room.
+    pub fn areaUnderDock(o: *const Output) Rect {
+        const base = o.usable orelse o.rect;
+        const st = o.struts;
+        return .{
+            .x = base.x + st.left,
+            .y = base.y + st.top,
+            .w = @max(1, base.w - st.left - st.right),
+            .h = @max(1, base.h - st.top - st.bottom),
+        };
+    }
+
     pub const Insets = struct {
         left: i32 = 0,
         right: i32 = 0,
@@ -395,6 +409,9 @@ pub const Output = struct {
 // ============================================================================
 
 pub const PointerOp = enum { none, move, resize };
+
+/// Which menu a bind asked for.
+pub const MenuRequest = enum { root, windows };
 
 /// Where the interactive pointer operation is (pointer_op.zig).
 ///
@@ -528,6 +545,9 @@ pub const WindowManager = struct {
     /// reload destroys and re-creates the key bindings, which is only legal
     /// there, and must not run while the action queue is being worked off.
     reload_pending: bool = false,
+    /// A bind asked for a menu (`menu_root`, `menu_windows`); the compositor
+    /// opens it after the pass and clears this.
+    menu_request: ?MenuRequest = null,
     /// Bumped by every (re)load of the configuration (boot.loadModel). The
     /// compositor compares it with the one it last applied to its devices
     /// (keyboard repeat) and applies the config again when it differs.
@@ -615,6 +635,11 @@ pub const Command = union(enum) {
 
     /// Re-read config.lua now (what `pkill -HUP wmaker-wl` does).
     reload_config,
+
+    /// Open the root menu / the window list at the pointer (Window Maker's
+    /// right and middle click on the desktop, as a key).
+    menu_root,
+    menu_windows,
 
     /// Window Maker's miniaturize / hide. See workspace.minimize.
     minimize,

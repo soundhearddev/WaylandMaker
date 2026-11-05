@@ -118,6 +118,7 @@ pub const Lock = struct {
         l.tree.node.setEnabled(true);
         l.tree.node.raiseToTop();
         // Nothing below keeps the keyboard or the pointer.
+        l.server.menu_ui.closeMenu();
         l.server.seat.keyboardNotifyClearFocus();
         l.server.seat.pointerNotifyClearFocus();
         l.server.cursor.refresh();

@@ -58,6 +58,13 @@ consequences the scene layer builds on:
   nothing else is affected.
 - Layers: Dock below DockApps below drawer popups; whether the whole Dock sits above or below normal windows is the
   existing `dock_on_top` / auto-raise level (`dock_model.levelFor`).
+- Space and floating windows: with `dock_reserve_space` the Dock's strip is taken out of the area that *tiled* windows
+  use (`Output.workArea`). Floating windows are not kept out of it: they can be moved and placed over the Dock
+  (`Output.areaUnderDock`; a new floating window is still centred in the free area). What stays reachable is a
+  48 px strip to grab the window by: where the Dock is drawn above windows (`dock_on_top`), that strip stays in the
+  free area, otherwise the window may lie anywhere on the output. Whichever is topmost at a point gets the pointer:
+  a window lying over a Dock that is below windows takes clicks and the wheel (`Cursor.dockHasPointer`), and a press
+  the Dock already holds (a tile drag) keeps the pointer until it is released.
 
 ## 3. Input
 

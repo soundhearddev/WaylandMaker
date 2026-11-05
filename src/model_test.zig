@@ -1738,6 +1738,23 @@ test "the reload_config command only asks for a reload (the manage pass does it)
     try std.testing.expect(f.wm.reload_pending);
 }
 
+test "menu_root and menu_windows only record a request (the compositor opens the menu)" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var cfg = try config.load(std.testing.io, std.testing.allocator);
+    defer cfg.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try action_mod.parse(arena.allocator(), &cfg, "menu_root")) == .menu_root);
+    try std.testing.expect((try action_mod.parse(arena.allocator(), &cfg, "menu_windows")) == .menu_windows);
+
+    try std.testing.expect(f.wm.menu_request == null);
+    action_mod.run(&f.wm, .menu_root);
+    try std.testing.expectEqual(types.MenuRequest.root, f.wm.menu_request.?);
+    action_mod.run(&f.wm, .menu_windows);
+    try std.testing.expectEqual(types.MenuRequest.windows, f.wm.menu_request.?);
+}
+
 test "set_column_width sets the active column and ends maximize" {
     const f = try Fixture.init();
     defer f.deinit();

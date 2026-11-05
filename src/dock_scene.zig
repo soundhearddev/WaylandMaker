@@ -58,7 +58,7 @@ const wm_files = @import("wm_files.zig");
 
 const Server = @import("server.zig").Server;
 
-extern "c" fn wm_pixbuf_create(width: c_int, height: c_int, argb: [*]const u8, stride: usize) ?*wlr.Buffer;
+pub extern "c" fn wm_pixbuf_create(width: c_int, height: c_int, argb: [*]const u8, stride: usize) ?*wlr.Buffer;
 
 const btn_left = 0x110;
 const btn_right = 0x111;
@@ -407,6 +407,11 @@ pub const DockUi = struct {
         const out = ui.input.scroll(m, p[0], p[1], delta);
         ui.finish(out);
         return out.consumed;
+    }
+
+    /// A press on the Dock is held (a drag may be under way).
+    pub fn pressing(ui: *const DockUi) bool {
+        return ui.input.pressing();
     }
 
     /// The pointer is not on the Dock's output any more.

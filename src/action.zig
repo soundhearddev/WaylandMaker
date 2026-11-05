@@ -452,6 +452,8 @@ pub fn run(wm: *WindowManager, cmd: Command) void {
             wm.follow_request = true;
         },
         .reload_config => wm.reload_pending = true,
+        .menu_root => wm.menu_request = .root,
+        .menu_windows => wm.menu_request = .windows,
         // `workspace_wrap = false`: stop at the last / first workspace.
         .workspace_next => if (stepWorkspace(cfg, out, true)) |t| switchWorkspace(wm, out, t),
         .workspace_prev => if (stepWorkspace(cfg, out, false)) |t| switchWorkspace(wm, out, t),
