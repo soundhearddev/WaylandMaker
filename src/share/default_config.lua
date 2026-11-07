@@ -233,6 +233,7 @@ clip_on_top = true
 clip_collapsed = false           -- only the workspace tile, without its launchers
 clip_auto_collapse = false       -- fold up when the pointer leaves, unfold when it returns
 clip_auto_raise = false          -- with clip_on_top = false: up while the pointer is on it
+iconify_style = "twist"          -- minimize / restore: an outline flies between the window and its Dock tile: "zoom", "twist", "flip", "random" or "none" (Window Maker's IconificationStyle)
 mini_dock = true                 -- every minimized window gets a tile in the Dock (a click brings it back)
 -- Names shown in the Clip and in the workspace menu, one per workspace, in
 -- order. An empty entry means "no name". Without this line the names stored

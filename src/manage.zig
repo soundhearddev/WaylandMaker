@@ -32,6 +32,8 @@ const outputs = @import("outputs.zig");
 const dockhost = @import("dockhost.zig");
 const diag = @import("diag.zig");
 const motion = model.motion;
+const miniaturize = @import("miniaturize.zig");
+const dock_model = @import("dock_model.zig");
 const backend = @import("backend.zig");
 
 const Window = types.Window;
@@ -393,9 +395,12 @@ pub fn run(wm: *WindowManager, sink: Sink, now_ms: u64) void {
     // 8. What the compositor has to do about it.
     var it = wm.windows.first();
     while (it) |w| : (it = types.nextWindow(w, wm)) {
+        miniaturizeBegin(wm, w);
         applyManage(wm, sink, w);
         applyRender(wm, sink, w, w == focus_target);
+        miniaturizeEnd(wm, w);
     }
+    miniaturizeTick(wm);
 
     // 8b. Where the DockApps go.
     dockhost.apply(wm, dock_host, sink);
@@ -845,7 +850,7 @@ fn applyManage(wm: *WindowManager, sink: Sink, win: *Window) void {
 fn applyRender(wm: *WindowManager, sink: Sink, win: *Window, focused: bool) void {
     const cfg = &wm.cfg;
 
-    if (!isVisible(win)) {
+    if (!isVisible(win) or heldBack(wm, win)) {
         motion.stopAnimations(win);
         if (win.visible != false) {
             log.debug("window `{s}` hidden", .{win.app_id orelse "?"});
@@ -904,6 +909,152 @@ fn applyRender(wm: *WindowManager, sink: Sink, win: *Window, focused: bool) void
         .clip = motion.visibleBox(rect, bw, work, vis.reveal),
         .maximized = if (win.column) |c| c.isMaximized() else false,
     });
+}
+
+// ---- miniaturize animation ------------------------------------------------------
+
+// Window Maker's miniaturize / deminiaturize animation (miniaturize.zig): an
+// outline that flies from the window to its Dock tile when it is minimized,
+// and back when it is restored. The pass only decides WHAT flies WHERE and
+// WHEN (`wm.mini_runs`); mini_scene.zig draws it.
+
+fn boxOf(r: types.Rect) miniaturize.Box {
+    return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+}
+
+/// `iconify_style` as a style of the plan; null: no animation. `random`
+/// picks one of the three for every window, by the time of the pass.
+fn styleOf(wm: *const WindowManager) ?miniaturize.Style {
+    return switch (wm.cfg.iconify_style) {
+        .zoom => .zoom,
+        .twist => .twist,
+        .flip => .flip,
+        .none => null,
+        .random => switch ((wm.clock.last_seen orelse 0) % 3) {
+            0 => .zoom,
+            1 => .twist,
+            else => .flip,
+        },
+    };
+}
+
+/// The Dock tile of a minimized window, in global coordinates: the box the
+/// outline flies to. Without a tile of its own (`mini_dock` off, the Dock is
+/// full) the Dock's first tile; without a Dock a tile-sized box at the
+/// bottom middle of the primary output.
+fn miniTarget(wm: *WindowManager, win: *const Window) ?types.Rect {
+    const out = types.primaryOutput(wm) orelse return null;
+    const side = dock_model.tile;
+    if (wm.dock_shown) if (wm.dock) |m| {
+        if (m.miniSlotFor(win.min_order)) |idx| {
+            const gi = m.slots.items[idx].gi;
+            return .{ .x = out.rect.x + gi.x_pos, .y = out.rect.y + gi.y_pos, .w = side, .h = side };
+        }
+        if (m.scr.dock) |d| if (d.icons[0]) |first| {
+            return .{ .x = out.rect.x + first.x_pos, .y = out.rect.y + first.y_pos, .w = side, .h = side };
+        };
+    };
+    return .{
+        .x = out.rect.x + @divTrunc(out.rect.w - side, 2),
+        .y = out.rect.y + out.rect.h - side,
+        .w = side,
+        .h = side,
+    };
+}
+
+/// Where the window is on screen with its border, as of this pass.
+fn frameOf(wm: *WindowManager, win: *const Window) types.Rect {
+    if (win.mode == .fullscreen) {
+        if (win.workspace) |ws| return ws.output.rect;
+    }
+    const bw = win.borderWidth(&wm.cfg);
+    return .{ .x = win.shown_x - bw, .y = win.shown_y - bw, .w = win.target.w + 2 * bw, .h = win.target.h + 2 * bw };
+}
+
+/// Start the outline from `from` to `to`. The clock time at which it ends,
+/// null when there is nothing to show (animations off, no box).
+fn startMiniRun(wm: *WindowManager, from: types.Rect, to: types.Rect) ?f64 {
+    if (!wm.cfg.animations) return null;
+    const style = styleOf(wm) orelse return null;
+    if (from.w <= 0 or from.h <= 0 or to.w <= 0 or to.h <= 0) return null;
+    const now = wm.clock.now();
+    const p = miniaturize.plan(style, boxOf(from), boxOf(to));
+    if (p.n == 0) return null;
+    // A free place, else one whose animation has finished, else the oldest.
+    var slot: usize = 0;
+    var oldest: f64 = std.math.inf(f64);
+    for (&wm.mini_runs, 0..) |*r, i| {
+        const cur = r.* orelse {
+            slot = i;
+            oldest = -std.math.inf(f64);
+            break;
+        };
+        if (cur.frameAt(now) == null) {
+            slot = i;
+            oldest = -std.math.inf(f64);
+            break;
+        }
+        if (cur.start < oldest) {
+            oldest = cur.start;
+            slot = i;
+        }
+    }
+    wm.mini_runs[slot] = .{ .plan = p, .start = now };
+    log.debug("miniaturize animation: {d} frames, {d} ms each", .{ p.n, p.delay_ms });
+    return now + @as(f64, @floatFromInt(p.n)) * @as(f64, @floatFromInt(p.delay_ms));
+}
+
+/// Before the window is placed: did it get minimized or restored since the
+/// last pass? `anim_min` / `anim_rect` still hold the state of that pass.
+fn miniaturizeBegin(wm: *WindowManager, win: *Window) void {
+    if (win.closed) return;
+    if (win.minimized) {
+        // The tile is only there while the window is minimized: remember
+        // where it is, the restore flies out of it.
+        if (miniTarget(wm, win)) |t| win.anim_tile = t;
+    }
+    if (win.minimized == win.anim_min) return;
+    if (win.minimized) {
+        // Minimized: the window flies to its tile (only a window that was
+        // on screen has anything to fly from).
+        _ = startMiniRun(wm, win.anim_rect, win.anim_tile);
+    } else if (win.workspace != null and isVisible(win)) {
+        // Restored: out of the tile, into the place it gets. Not placed this
+        // pass yet, so its frame is what the layout decided.
+        const bw = win.borderWidth(&wm.cfg);
+        const to: types.Rect = if (win.mode == .fullscreen)
+            win.workspace.?.output.rect
+        else
+            .{ .x = win.target.x - bw, .y = win.target.y - bw, .w = win.target.w + 2 * bw, .h = win.target.h + 2 * bw };
+        // The window itself stays hidden until the outline has arrived.
+        if (startMiniRun(wm, win.anim_tile, to)) |end| win.mini_hold_until = end;
+    }
+}
+
+/// A restored window waits for the outline that brings it out of its tile.
+fn heldBack(wm: *const WindowManager, win: *const Window) bool {
+    return wm.clock.now() < win.mini_hold_until;
+}
+
+/// After the window is placed: remember what the next pass compares with.
+fn miniaturizeEnd(wm: *WindowManager, win: *Window) void {
+    win.anim_min = win.minimized;
+    win.anim_rect = if (win.visible == true and win.workspace != null and !win.minimized) frameOf(wm, win) else .{};
+    if (!win.minimized) win.anim_tile = .{};
+}
+
+/// End of the pass: drop what has finished, and keep the frames coming while
+/// something still flies.
+fn miniaturizeTick(wm: *WindowManager) void {
+    const now = wm.clock.now();
+    for (&wm.mini_runs) |*r| {
+        const cur = r.* orelse continue;
+        if (cur.frameAt(now) == null) {
+            r.* = null;
+        } else {
+            wm.anim_active = true;
+        }
+    }
 }
 
 /// The overlap of two rectangles, null when they do not touch.
@@ -1788,6 +1939,54 @@ test "a minimized window gets a Dock tile through the pass, and loses it when re
     try workspace.restore(&f.wm, a, f.out.ws());
     f.pass();
     try testing.expect(m.miniSlotFor(order) == null);
+}
+
+test "minimizing and restoring start the miniaturize animation, which ends by itself" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.wm.cfg.anim_window_open = .off;
+    f.wm.cfg.iconify_style = .zoom;
+
+    const a = try f.open("foot");
+    _ = try f.open("firefox");
+    f.pass();
+    f.pass();
+    try testing.expect(f.wm.mini_runs[0] == null);
+    try testing.expect(a.anim_rect.w > 0); // it was on screen: something to fly from
+
+    // Minimize: an outline flies from the window towards its tile; the
+    // window itself is gone at once.
+    requestMinimize(&f.wm, a);
+    f.pass();
+    try testing.expect(f.wm.mini_runs[0] != null);
+    try testing.expect(f.wm.anim_active);
+    try testing.expect(a.anim_tile.w > 0);
+    try testing.expect(a.visible != true);
+
+    // It runs for its 170 ms (zoom) and then is gone; nothing asks for frames.
+    var guard: usize = 0;
+    while (f.wm.anim_active and guard < 100) : (guard += 1) f.pass();
+    try testing.expect(f.wm.mini_runs[0] == null);
+    try testing.expect(!f.wm.anim_active);
+
+    // Restore: the outline flies back out of the tile, and the window shows
+    // up when it has arrived.
+    try workspace.restore(&f.wm, a, f.out.ws());
+    f.pass();
+    try testing.expect(f.wm.mini_runs[0] != null);
+    try testing.expect(a.visible != true);
+    guard = 0;
+    while (f.wm.anim_active and guard < 100) : (guard += 1) f.pass();
+    f.pass();
+    try testing.expect(f.wm.mini_runs[0] == null);
+    try testing.expect(a.visible == true);
+
+    // `none` and `animations = false` turn it off: the window just goes.
+    f.wm.cfg.iconify_style = .none;
+    requestMinimize(&f.wm, a);
+    f.pass();
+    try testing.expect(f.wm.mini_runs[0] == null);
 }
 
 test "hovering or clicking a DockApp neither focuses it nor scrolls the view" {

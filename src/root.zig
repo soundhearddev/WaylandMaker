@@ -30,6 +30,7 @@ test {
     _ = @import("lua.zig");
     _ = @import("manage.zig");
     _ = @import("menu_model.zig");
+    _ = @import("miniaturize.zig");
     _ = @import("fsmenu.zig");
     _ = @import("model_test.zig");
     _ = @import("monitors.zig");

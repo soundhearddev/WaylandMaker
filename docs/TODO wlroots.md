@@ -83,7 +83,8 @@ Still open: running it on real monitors. (The layer-shell XML is vendored in `pr
 - [ ] Window list menu, window menus
 - [x] Dock and Clip surfaces, hit testing, drag (`dock_scene.zig`, `dock_input.zig`, `dock_sync.zig`; not run)
 - [x] DockApps: adopted and placed in their tile by the model (`dockhost.zig`); the Dock around them is drawn by `dock_scene.zig`
-- [ ] Miniaturize animation with real window snapshots
+- [x] Miniaturize animation: Window Maker's zoom / twist / flip outline between the window and its Dock tile (`miniaturize.zig`, `mini_scene.zig`, config `iconify_animation`; not run)
+- [ ] Miniaturize animation with real window snapshots (instead of the outline)
 - [ ] Title bars (own drawing) and the `No*` attributes; xdg-decoration (SSD vs CSD)
 - [ ] Dock/Clip on every output; several seats
 

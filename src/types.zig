@@ -40,6 +40,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 const config = @import("config.zig");
 const animation = @import("animation.zig");
+const miniaturize = @import("miniaturize.zig");
 const wm_attr = @import("wm_attr.zig");
 const wm_menu = @import("wm_menu.zig");
 const dockapp = @import("dockapp.zig");
@@ -148,6 +149,14 @@ pub const Window = struct {
     /// it was not shown).
     anim_min: bool = false,
     anim_rect: Rect = .{},
+    /// Where its Dock tile was in the last pass while it is minimized (the
+    /// tile is gone by the time the window is restored, and the
+    /// deminiaturize animation starts there). w == 0: none.
+    anim_tile: Rect = .{},
+    /// A restored window stays hidden until the animation that brings it out
+    /// of its tile is over (Window Maker shows the window when the outline
+    /// has arrived): the clock time (ms) until then.
+    mini_hold_until: f64 = 0,
 
     /// Content rect (borders excluded) currently *wanted* on screen in
     /// global coordinates. Computed by layout every pass.
@@ -537,6 +546,9 @@ pub const WindowManager = struct {
     /// Something is still moving: the event loop asks for a new manage
     /// sequence every frame until nothing is.
     anim_active: bool = false,
+    /// Miniaturize / deminiaturize animations that are running (see
+    /// miniaturize.zig); the compositor draws them (mini_scene.zig).
+    mini_runs: [miniaturize.max_runs]?miniaturize.Run = @splat(null),
     /// Real time (ms) at which the next frame may be requested.
     anim_frame_at: u64 = 0,
 

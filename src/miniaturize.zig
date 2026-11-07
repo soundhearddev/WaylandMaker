@@ -10,9 +10,7 @@
 // here, so this module only does the part that is pure arithmetic: the same
 // loops, in `float` like the C code (the same sums, the same truncation to
 // the 16 bit `XPoint` / `int` coordinates), but they write the frames into a
-// `Plan` instead of drawing them. ui.zig shows frame `k` for `delay_ms`
-// milliseconds on a transparent surface, which is Window Maker's
-// "draw, sleep, erase" without the sleeping.
+// `Plan` instead of drawing them.
 //
 //   style   frames                    delay per frame
 //   zoom    steps + 1 = 17  (7 boxes)  10 ms
@@ -22,10 +20,14 @@
 // Called with the window's frame and the icon's box to iconify and the other
 // way round to deiconify (actions.c: wIconifyWindow / wDeiconifyWindow).
 //
+// The compositor shows frame `k` for `delay_ms` milliseconds as an outline
+// (mini_scene.zig draws it into the scene), which is Window Maker's "draw,
+// sleep, erase" without the sleeping: `Run` keeps the plan and the moment it
+// started, `Run.frameAt` says which frame the clock is at.
+//
 // No Wayland types in here: unit-testable without a compositor.
 
 const std = @import("std");
-const gfx = @import("gfx.zig");
 
 pub const Style = enum { zoom, twist, flip };
 
@@ -291,40 +293,35 @@ pub fn plan(style: Style, from: Box, to: Box) Plan {
     return p;
 }
 
-// ---- drawing ----------------------------------------------------------------------
-
-// Window Maker's `frame_gc` is an XOR/invert line that shows on any
-// background. There is no XOR on a Wayland surface: a dark line inside a
-// light one is visible on every background too.
-const col_halo: gfx.Color = .{ .r = 1, .g = 1, .b = 1, .a = 0.85 };
-const col_line: gfx.Color = .{ .r = 0, .g = 0, .b = 0, .a = 0.95 };
-
-fn outline(cv: *gfx.Canvas, pts: []const [2]f64) void {
-    cv.strokePath(pts, true, 3, col_halo);
-    cv.strokePath(pts, true, 1, col_line);
-}
-
-/// Draw one frame on `cv`, whose top left is the global point (ox, oy).
-pub fn draw(cv: *gfx.Canvas, f: Frame, ox: i32, oy: i32) void {
-    const fox: f64 = @floatFromInt(ox);
-    const foy: f64 = @floatFromInt(oy);
+/// The smallest box that holds frame `f`, with room for the line.
+pub fn frameBox(f: Frame) Box {
+    var b: Box = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    var first = true;
     switch (f) {
-        .poly => |pts| {
-            // The fifth point is the first one again: the path is closed.
-            var q: [4][2]f64 = undefined;
-            for (0..4) |i| q[i] = .{ @as(f64, @floatFromInt(pts[i][0])) - fox + 0.5, @as(f64, @floatFromInt(pts[i][1])) - foy + 0.5 };
-            outline(cv, &q);
-        },
-        .boxes => |bs| for (bs) |b| {
-            // XDrawRectangle(x, y, w, h) covers x .. x + w inclusive.
-            const x0: f64 = @as(f64, @floatFromInt(b[0])) - fox + 0.5;
-            const y0: f64 = @as(f64, @floatFromInt(b[1])) - foy + 0.5;
-            const x1: f64 = x0 + @as(f64, @floatFromInt(b[2]));
-            const y1: f64 = y0 + @as(f64, @floatFromInt(b[3]));
-            outline(cv, &.{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 } });
-        },
+        .poly => |pts| for (pts) |pt| grow(&b, pt[0], pt[1], pt[0], pt[1], &first),
+        .boxes => |bs| for (bs) |bx| grow(&b, bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3], &first),
     }
+    return .{ .x = b.x - margin, .y = b.y - margin, .w = b.w + 2 * margin, .h = b.h + 2 * margin };
 }
+
+/// A running animation: the plan, and the clock time (ms, the model's
+/// `wm.clock`, which already includes `anim_slowdown`) it started at.
+pub const Run = struct {
+    plan: Plan,
+    start: f64,
+
+    /// The frame to show at clock time `now`; null once the last one has been
+    /// shown for its `delay_ms` (or when there is nothing to show).
+    pub fn frameAt(r: *const Run, now: f64) ?usize {
+        if (r.plan.n == 0) return null;
+        const t = @max(0.0, now - r.start);
+        const k: usize = @intFromFloat(@floor(t / @as(f64, @floatFromInt(r.plan.delay_ms))));
+        return if (k >= r.plan.n) null else k;
+    }
+};
+
+/// How many animations may run at the same time (hide others, show all).
+pub const max_runs = 4;
 
 // ----------------------------------------------------------------------------
 // Tests
@@ -470,4 +467,33 @@ test "frame() clamps to the last picture" {
     const p = plan(.twist, b, b);
     try std.testing.expectEqual(p.frames[p.n - 1].poly, p.frame(1000).poly);
     try std.testing.expectEqual(p.frames[0].poly, p.frame(0).poly);
+}
+
+test "Run.frameAt: one frame per delay, then null" {
+    const from: Box = .{ .x = 100, .y = 200, .w = 640, .h = 480 };
+    const to: Box = .{ .x = 0, .y = 64, .w = 64, .h = 64 };
+    const r: Run = .{ .plan = plan(.zoom, from, to), .start = 1000 };
+    try std.testing.expectEqual(@as(?usize, 0), r.frameAt(1000));
+    try std.testing.expectEqual(@as(?usize, 0), r.frameAt(1009));
+    try std.testing.expectEqual(@as(?usize, 1), r.frameAt(1010));
+    try std.testing.expectEqual(@as(?usize, 16), r.frameAt(1169));
+    try std.testing.expectEqual(@as(?usize, null), r.frameAt(1170));
+    // A clock that is behind the start (it can step back) shows the first frame.
+    try std.testing.expectEqual(@as(?usize, 0), r.frameAt(500));
+
+    // A run without frames shows nothing.
+    const empty: Run = .{ .plan = .{ .style = .zoom, .delay_ms = 10 }, .start = 0 };
+    try std.testing.expectEqual(@as(?usize, null), empty.frameAt(0));
+}
+
+test "frameBox holds the frame with room for the line" {
+    const p = plan(.twist, .{ .x = 10, .y = 20, .w = 300, .h = 200 }, .{ .x = 900, .y = 700, .w = 64, .h = 64 });
+    for (p.frames[0..p.n]) |f| {
+        const b = frameBox(f);
+        const q = f.poly;
+        for (q) |pt| {
+            try std.testing.expect(pt[0] >= b.x and pt[0] <= b.x + b.w);
+            try std.testing.expect(pt[1] >= b.y and pt[1] <= b.y + b.h);
+        }
+    }
 }

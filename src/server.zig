@@ -36,6 +36,7 @@ const libinput = @import("libinput.zig");
 const Protocols = @import("protocols.zig").Protocols;
 const Lock = @import("lock.zig").Lock;
 const MenuUi = @import("menu_scene.zig").MenuUi;
+const MiniUi = @import("mini_scene.zig").MiniUi;
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
@@ -66,6 +67,7 @@ pub const Server = struct {
     lock: *Lock = undefined,
     /// The root menu and the window list (menu_scene.zig).
     menu_ui: *MenuUi = undefined,
+    mini_ui: *MiniUi = undefined,
 
     /// wlr-layer-shell: one scene tree per layer (background, bottom, top,
     /// overlay). Background and bottom lie under the windows, top over the
@@ -206,6 +208,10 @@ pub const Server = struct {
         server.layer_trees[2].node.placeAbove(&server.dock_above.node);
         server.dock_ui = try DockUi.create(server);
         errdefer server.dock_ui.destroy();
+        // The miniaturize outline flies over the windows and the Dock; the
+        // menus are created after it and stay above.
+        server.mini_ui = try MiniUi.create(server);
+        errdefer server.mini_ui.destroy();
         // Created last in the scene: above everything except a screen lock.
         server.menu_ui = try MenuUi.create(server);
         errdefer server.menu_ui.destroy();
@@ -257,6 +263,7 @@ pub const Server = struct {
         server.cursor.deinit();
 
         server.dock_ui.destroy();
+        server.mini_ui.destroy();
         server.menu_ui.destroy();
         server.lock.destroy();
         server.protocols.destroy();
@@ -417,6 +424,8 @@ pub const Server = struct {
         while (mit.next()) |m| m.applyRule();
         // The Dock shows what the pass decided (tiles, workspace, config).
         server.dock_ui.update();
+        // The miniaturize outline, as far as the clock has got.
+        server.mini_ui.update();
         // Something still moves: ask for the next frame. The pass after it is
         // paced by the monitor (see Monitor.onFrame), so an animation costs
         // one pass per displayed frame and nothing when it ends.

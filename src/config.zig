@@ -115,7 +115,7 @@ pub const AccelProfile = enum { default, flat, adaptive };
 pub const ClickMethod = enum { default, button_areas, clickfinger };
 
 /// Window Maker's `IconificationStyle`: what a window does on its way to the
-/// Dock when it is minimized and back when it is restored (anim.zig).
+/// Dock when it is minimized and back when it is restored (miniaturize.zig).
 /// `random` picks one of the three for every window.
 pub const IconifyStyle = enum { zoom, twist, flip, none, random };
 
@@ -415,6 +415,7 @@ pub const Config = struct {
     mini_dock: bool = true,
     /// Animation of a window going to its Dock tile and coming back
     /// (Window Maker's IconificationStyle: zoom, twist, flip, none, random).
+    /// Needs `animations`.
     iconify_style: IconifyStyle = .twist,
     /// Window Maker's "Autocollapse": the Clip folds up when the pointer
     /// leaves it and unfolds when it comes back.
@@ -1261,8 +1262,6 @@ const ParseError = error{ Invalid, UnknownKey, OutOfMemory };
 const not_options = [_][]const u8{
     "arena", "config_file",    "explicit", "monitor_rules", "monitor_profiles",
     "binds", "parse_warnings", "script",
-    // Set by the miniaturize animation once it is ported (docs/TODO wlroots.md).
-      "iconify_style",
 };
 
 /// u32 fields that hold a colour.
