@@ -117,7 +117,8 @@ enable_wmaker_compat = false
 -- ---- startup (autostart) ---------------------------------------------------
 -- `spawn_at_startup` is THE autostart: a list of programs started once when the
 -- session comes up (never again on a reload). A string is split like a command
--- line (no shell), a table is the argv. For pipes, `&&` or `~` use `sh -c`:
+-- line (no shell), a table is the argv. A leading `~/` in an argument is expanded to $HOME.
+-- For pipes or `&&` use `sh -c`:
 --
 --     spawn_at_startup = {
 --         "mako",                                   -- notifications

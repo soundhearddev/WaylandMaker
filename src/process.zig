@@ -73,7 +73,15 @@ pub fn spawnChecked(wm: *types.WindowManager, argv: []const []const u8) bool {
     const arena = arena_state.allocator();
 
     const c_argv = arena.allocSentinel(?[*:0]const u8, argv.len, null) catch return oom(argv[0]);
-    for (argv, 0..) |arg, i| c_argv[i] = (arena.dupeZ(u8, arg) catch return oom(argv[0])).ptr;
+    // No shell is involved, so a leading `~` would reach the program as a
+    // literal `~` (swaybg -i ~/wall.png then finds no file and paints black).
+    // Expand it ourselves -- except for `sh -c <text>`, where the shell does it.
+    const via_shell = argv.len == 3 and std.mem.eql(u8, argv[0], "/bin/sh") and std.mem.eql(u8, argv[1], "-c");
+    const home: ?[]const u8 = if (via_shell) null else if (std.c.getenv("HOME")) |h| std.mem.span(h) else null;
+    for (argv, 0..) |arg, i| {
+        const expanded = expandTilde(arena, home, arg) catch return oom(argv[0]);
+        c_argv[i] = (arena.dupeZ(u8, expanded) catch return oom(argv[0])).ptr;
+    }
     const file = c_argv[0].?;
 
     var attr: Attr = .{};
@@ -106,6 +114,33 @@ pub fn spawnChecked(wm: *types.WindowManager, argv: []const []const u8) bool {
     const shown = if (argv.len == 3 and std.mem.eql(u8, argv[0], "/bin/sh") and std.mem.eql(u8, argv[1], "-c")) argv[2] else argv[0];
     log.info("started `{s}` (pid {d})", .{ shown, pid });
     return true;
+}
+
+/// `~` and `~/x` become `$HOME` and `$HOME/x`; also the value part of
+/// `--opt=~/x`. Anything else (including `~user`) is returned unchanged.
+fn expandTilde(a: std.mem.Allocator, home: ?[]const u8, arg: []const u8) ![]const u8 {
+    const h = home orelse return arg;
+    if (h.len == 0) return arg;
+    if (std.mem.eql(u8, arg, "~")) return h;
+    if (std.mem.startsWith(u8, arg, "~/")) return std.fmt.allocPrint(a, "{s}{s}", .{ h, arg[1..] });
+    if (std.mem.startsWith(u8, arg, "--")) {
+        if (std.mem.indexOf(u8, arg, "=~/")) |eq| {
+            return std.fmt.allocPrint(a, "{s}{s}{s}", .{ arg[0 .. eq + 1], h, arg[eq + 2 ..] });
+        }
+    }
+    return arg;
+}
+
+test "expandTilde: ~, ~/x, --opt=~/x, and leave the rest alone" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expectEqualStrings("/home/max", try expandTilde(a, "/home/max", "~"));
+    try std.testing.expectEqualStrings("/home/max/w.png", try expandTilde(a, "/home/max", "~/w.png"));
+    try std.testing.expectEqualStrings("--img=/home/max/w.png", try expandTilde(a, "/home/max", "--img=~/w.png"));
+    try std.testing.expectEqualStrings("~bob/x", try expandTilde(a, "/home/max", "~bob/x"));
+    try std.testing.expectEqualStrings("a~/b", try expandTilde(a, "/home/max", "a~/b"));
+    try std.testing.expectEqualStrings("~/w.png", try expandTilde(a, null, "~/w.png"));
 }
 
 fn oom(name: []const u8) bool {
