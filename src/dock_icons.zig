@@ -4,29 +4,34 @@
 //
 // A tile names its icon in one of three ways, and the first that gives a
 // picture wins:
-//   1. the entry's `Icon` (WMState): a path, or a bare name looked up in
-//      `icon_dirs`; PNG, SVG (through librsvg) and Window Maker's own XPM;
+//   1. the entry's `Icon` (WMState): a path (`~/` is the home directory), or
+//      a bare name looked up in `icon_dirs` and then in the icon themes
+//      (user, Flatpak, Nix, $XDG_DATA_DIRS: appicon.zig); PNG, XPM (Window
+//      Maker's own), SVG (librsvg) and any other format gdk-pixbuf reads;
 //   2. the application's system icon, found by its app_id (the entry's, else
 //      the program's name) through the icon theme and its .desktop file
 //      (appicon.zig); a minimized window's tile uses this only;
-//   3. nothing: the tile draws its placeholder (dock_draw.drawPlaceholder).
+//   3. nothing: the tile stays empty (frame only).
 
 const std = @import("std");
 
 const appicon = @import("appicon.zig");
 const dockapp = @import("dockapp.zig");
 const gfx = @import("gfx.zig");
-const svg = @import("svg.zig");
-const xpm = @import("xpm.zig");
 
 /// Directories searched for a bare icon name, best size first.
 pub const icon_dirs = [_][]const u8{
     "/usr/share/icons/hicolor/64x64/apps",
     "/usr/share/icons/hicolor/48x48/apps",
+    "/usr/share/icons/hicolor/96x96/apps",
     "/usr/share/icons/hicolor/128x128/apps",
     "/usr/share/icons/hicolor/256x256/apps",
+    "/usr/share/icons/hicolor/scalable/apps",
     "/usr/share/icons/hicolor/32x32/apps",
+    "/usr/local/share/icons/hicolor/64x64/apps",
+    "/usr/local/share/icons/hicolor/scalable/apps",
     "/usr/share/pixmaps",
+    "/usr/local/share/pixmaps",
 };
 
 /// The app_id the system icon is looked up by: the entry's own, else the
@@ -58,9 +63,10 @@ pub fn resolve(gpa: std.mem.Allocator, app: dockapp.DockApp) ?gfx.Icon {
 
 fn fromKey(gpa: std.mem.Allocator, wanted: []const u8) ?gfx.Icon {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    // A path: the extension decides the decoder.
+    // A path: the extension decides the decoder. `~/` is the home directory
+    // (nobody else expands it: WMState is not read by a shell).
     if (std.mem.indexOfScalar(u8, wanted, '/') != null) {
-        const path = std.fmt.bufPrintZ(&buf, "{s}", .{wanted}) catch return null;
+        const path = expandHome(&buf, wanted) orelse return null;
         return loadFile(gpa, path);
     }
     const stem = stemOf(wanted);
@@ -70,17 +76,24 @@ fn fromKey(gpa: std.mem.Allocator, wanted: []const u8) ?gfx.Icon {
             if (loadFile(gpa, path)) |icon| return icon;
         }
     }
-    return null;
+    // Not in the fixed directories: a name in any icon theme, the user's own
+    // ones included (`Icon = "firefox"` is what a .desktop file says too).
+    return appicon.loadNamedOwned(gpa, stem);
+}
+
+/// `path` with a leading `~/` replaced by $HOME, NUL-terminated in `buf`.
+fn expandHome(buf: []u8, path: []const u8) ?[:0]const u8 {
+    if (std.mem.startsWith(u8, path, "~/")) {
+        const home = std.c.getenv("HOME") orelse return null;
+        const h = std.mem.span(home);
+        if (h.len == 0) return null;
+        return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ std.mem.trimEnd(u8, h, "/"), path[2..] }) catch null;
+    }
+    return std.fmt.bufPrintZ(buf, "{s}", .{path}) catch null;
 }
 
 pub fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
-    if (std.ascii.endsWithIgnoreCase(path, ".xpm")) {
-        const pm = xpm.load(gpa, path) orelse return null;
-        defer pm.deinit(gpa);
-        return gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels);
-    }
-    if (std.ascii.endsWithIgnoreCase(path, ".svg")) return svg.load(path, svg.render_size);
-    return gfx.Icon.loadPng(path);
+    return appicon.loadFile(gpa, path);
 }
 
 // ----------------------------------------------------------------------------
@@ -101,6 +114,18 @@ test "stemOf strips a known extension, case-insensitively, and nothing else" {
     try testing.expectEqualStrings("foo", stemOf("foo.SVG"));
     try testing.expectEqualStrings("foo.bar", stemOf("foo.bar"));
     try testing.expectEqualStrings("", stemOf(".xpm"));
+}
+
+test "expandHome: only a leading ~/ is the home directory" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings("/a/b.png", expandHome(&buf, "/a/b.png").?);
+    try testing.expectEqualStrings("x/~/b.png", expandHome(&buf, "x/~/b.png").?);
+    if (std.c.getenv("HOME")) |h| {
+        const home = std.mem.trimEnd(u8, std.mem.span(h), "/");
+        var want: [std.fs.max_path_bytes]u8 = undefined;
+        const w = try std.fmt.bufPrint(&want, "{s}/icons/a.png", .{home});
+        try testing.expectEqualStrings(w, expandHome(&buf, "~/icons/a.png").?);
+    }
 }
 
 test "a path in `icon` that does not exist gives no icon, and does not crash" {

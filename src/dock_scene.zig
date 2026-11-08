@@ -89,6 +89,10 @@ const Scene = struct {
     buffers: std.AutoHashMap(u64, *wlr.Buffer),
     /// icon_key -> the picture (null: looked for, none found).
     icons: std.AutoHashMap(u64, ?gfx.Icon),
+    /// The groups that are above the windows right now. The DockApps follow
+    /// them (`DockUi.update` -> `wm.dock_raised`), so a raised tile is never
+    /// drawn over the program that sits in it.
+    raised: std.AutoHashMap(*wlr.SceneTree, void),
     /// Icons that may still be loaded in this pass; and whether a tile was
     /// drawn without its icon because that was used up (`DockUi.update` then
     /// comes back for it).
@@ -99,7 +103,7 @@ const Scene = struct {
     pub const Node = *wlr.SceneBuffer;
 
     fn init(gpa: std.mem.Allocator, below: *wlr.SceneTree, above: *wlr.SceneTree) Scene {
-        return .{ .gpa = gpa, .below = below, .above = above, .buffers = .init(gpa), .icons = .init(gpa) };
+        return .{ .gpa = gpa, .below = below, .above = above, .buffers = .init(gpa), .icons = .init(gpa), .raised = .init(gpa) };
     }
 
     fn deinit(s: *Scene) void {
@@ -107,6 +111,7 @@ const Scene = struct {
         s.forgetIcons();
         s.buffers.deinit();
         s.icons.deinit();
+        s.raised.deinit();
     }
 
     fn forgetBuffers(s: *Scene) void {
@@ -127,7 +132,8 @@ const Scene = struct {
         return s.below.createSceneTree();
     }
 
-    pub fn destroyGroup(_: *Scene, g: Group) void {
+    pub fn destroyGroup(s: *Scene, g: Group) void {
+        _ = s.raised.remove(g);
         g.node.destroy();
     }
 
@@ -137,6 +143,11 @@ const Scene = struct {
 
     pub fn raiseGroup(s: *Scene, g: Group, up: bool) void {
         g.node.reparent(if (up) s.above else s.below);
+        if (up) {
+            s.raised.put(g, {}) catch {};
+        } else {
+            _ = s.raised.remove(g);
+        }
     }
 
     // ---- tiles --------------------------------------------------------------
@@ -314,6 +325,7 @@ pub const DockUi = struct {
             .clip_level = dock_model.levelFor(cfg.clip_on_top, cfg.clip_auto_raise),
         });
         ui.setShown(shown and cfg.dock_enabled);
+        ui.followLevel();
         ui.armTimer();
         // Tiles still without their icon: show them all again in the next
         // pass (the buffers made so far are cached, so that costs little).
@@ -327,6 +339,19 @@ pub const DockUi = struct {
         ui.sync.dropAll();
         ui.input.reset();
         ui.setShown(false);
+        ui.scene.raised.clearRetainingCapacity();
+        ui.followLevel();
+    }
+
+    /// The DockApps sit over the tiles at the level the tiles really have
+    /// (auto raise included): when it changes, the next manage pass puts them
+    /// into the matching scene tree.
+    fn followLevel(ui: *DockUi) void {
+        const wm = ui.server.wm;
+        const up = ui.scene.raised.count() > 0;
+        if (wm.dock_raised == up) return;
+        wm.dock_raised = up;
+        backend.manageDirty(wm.obj);
     }
 
     /// The Dock takes its column out of the work area once it is on screen

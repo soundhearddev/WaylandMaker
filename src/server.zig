@@ -60,6 +60,12 @@ pub const Server = struct {
     /// under a fullscreen window (dock_scene.zig).
     dock_below: *wlr.SceneTree,
     dock_above: *wlr.SceneTree,
+    /// Where the DockApp windows are: directly over the Dock tiles of the
+    /// same level, so a DockApp is never hidden by the tile it sits in.
+    /// `dockapp_below` is over `dock_below` and under every window,
+    /// `dockapp_above` over `dock_above` and under a fullscreen window.
+    dockapp_below: *wlr.SceneTree,
+    dockapp_above: *wlr.SceneTree,
     dock_ui: *DockUi = undefined,
     /// Fractional scale, idle, activation, capture ... (protocols.zig).
     protocols: *Protocols = undefined,
@@ -152,12 +158,14 @@ pub const Server = struct {
             .output_layout = output_layout,
             .scene_output_layout = try scene.attachOutputLayout(output_layout),
             .dock_below = try scene.tree.createSceneTree(),
+            .dockapp_below = try scene.tree.createSceneTree(),
             .layers = .{
                 try scene.tree.createSceneTree(),
                 try scene.tree.createSceneTree(),
                 try scene.tree.createSceneTree(),
             },
             .dock_above = try scene.tree.createSceneTree(),
+            .dockapp_above = try scene.tree.createSceneTree(),
             .layer_trees = .{
                 layer_background,
                 layer_bottom,
@@ -203,9 +211,10 @@ pub const Server = struct {
         // Created last in the scene, so raised into its place: above the
         // floating windows, below the fullscreen ones.
         server.dock_above.node.placeAbove(&server.layers[1].node);
+        server.dockapp_above.node.placeAbove(&server.dock_above.node);
         // The top layer (panels) is over the windows and the Dock but under
         // a fullscreen window; the overlay layer and the popups stay on top.
-        server.layer_trees[2].node.placeAbove(&server.dock_above.node);
+        server.layer_trees[2].node.placeAbove(&server.dockapp_above.node);
         server.dock_ui = try DockUi.create(server);
         errdefer server.dock_ui.destroy();
         // The miniaturize outline flies over the windows and the Dock; the

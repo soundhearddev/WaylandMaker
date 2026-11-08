@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=wl-battery
+Comment=Battery DockApp for wmaker-wl
+Exec=wl-battery
+Icon=wl-battery
+Categories=Utility;
+NoDisplay=true

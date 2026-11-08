@@ -60,6 +60,9 @@ pub const Look = struct {
     icon_key: u64 = 0,
     /// A minimized window's tile: its program's system icon, no marks.
     mini: bool = false,
+    /// A DockApp sits in this tile: only the frame is drawn (the program
+    /// paints the inside), no icon, no placeholder, no dots.
+    hosted: bool = false,
     /// Window Maker's three dots: docked, can be started, is not running.
     not_running: bool = false,
     /// The raster over the icon while the program starts.
@@ -179,10 +182,12 @@ pub fn lookOf(m: *const Model, dock: *const wdock.Dock, gi: *const wdock.Icon, s
         .kind = .app,
         .size = size,
         .hot = hot,
-        .icon_key = iconKeyOf(s.app),
+        // A hosted tile needs no picture: nothing is looked up for it.
+        .icon_key = if (s.hosted) 0 else iconKeyOf(s.app),
         .mini = mini,
+        .hosted = s.hosted,
         // Only an entry that can be started says "not running".
-        .not_running = !mini and !s.running and s.app.command.len > 0,
+        .not_running = !mini and !s.running and !s.hosted and s.app.command.len > 0,
         .launching = s.launching,
         .omnipresent = gi.omnipresent,
     };
@@ -542,6 +547,29 @@ test "diff: tiles that appear, vanish or move are reported once, unchanged ones 
     try testing.expect(r.quiet());
 }
 
+test "a tile with a DockApp in it is only a frame: no icon to look up, no dots" {
+    const apps = [_]dockapp.DockApp{ mk("a", 1), mk("b", 2) };
+    var m = try Model.init(testing.allocator, .{ .apps = &apps }, &.{}, 2);
+    defer m.deinit();
+    const d = m.scr.dock.?;
+    var b0: [maxTiles]Tile = undefined;
+    var b1: [maxTiles]Tile = undefined;
+    const before = plan(&m, d, dockCells(&m), .{}, &b0);
+    try testing.expect(before[1].look.icon_key != 0);
+    try testing.expect(before[1].look.not_running);
+
+    m.slots.items[0].hosted = true;
+    const after = plan(&m, d, dockCells(&m), .{}, &b1);
+    try testing.expect(after[1].look.hosted);
+    try testing.expectEqual(@as(u64, 0), after[1].look.icon_key);
+    try testing.expect(!after[1].look.not_running);
+    // Only that tile changed.
+    const r = changes(before, after);
+    try testing.expectEqual(@as(usize, 1), r.restyled);
+    // The other tile is as it was.
+    try testing.expect(before[2].look.eql(after[2].look));
+}
+
 test "every field of a Look changes its key" {
     const base: Look = .{ .kind = .app, .size = 64 };
     const variants = [_]Look{
@@ -558,6 +586,7 @@ test "every field of a Look changes its key" {
         .{ .kind = .app, .size = 64, .arrow = .next },
         .{ .kind = .app, .size = 64, .chevron_left = true },
         .{ .kind = .app, .size = 64, .faded = true },
+        .{ .kind = .app, .size = 64, .hosted = true },
     };
     for (variants, 0..) |v, i| {
         try testing.expect(v.key() != base.key());

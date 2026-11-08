@@ -42,6 +42,19 @@ What the compositor then decides, all in `dockhost.apply`:
 | *Kill* in the tile menu | ends the program (the only way to do it from the compositor) |
 | Click on the tile | does not start a second instance while the DockApp runs |
 
+**Layering.** A DockApp window is not in the layer of the floating windows. It lives in its own scene
+tree (`Server.dockapp_below` / `dockapp_above`) directly over the Dock tiles of the same level, so a raised
+Dock (`dock_on_top`, auto raise) never covers the program in its tile. The compositor follows the real level
+of the tiles (`wm.dock_raised`). A tile with a DockApp in it (`Slot.hosted`) draws only its frame: no icon, no
+placeholder and no "not running" dots behind the program.
+
+**Icons.** The tile of a program that is not running shows its icon: the entry's `Icon` (a path, `~/` allowed,
+or a name), else the icon of its `app_id` / program name from the icon themes and `.desktop` files
+(`$XDG_DATA_HOME`, `~/.icons`, Flatpak, Nix, `$XDG_DATA_DIRS`, `/usr/share`). One reader (`appicon.loadFile`)
+decides: PNG and XPM are built in, SVG goes through librsvg, and every other format (JPEG, GIF, BMP, ICO, TIFF,
+WebP, PNM ...) through gdk-pixbuf, if installed (both loaded at run time). With no icon the tile stays an empty
+frame: the Dock draws no placeholder picture of its own.
+
 If two DockApps have the same `app_id`, only the oldest is shown in the tile; the second stays invisible
 until the first ends.
 

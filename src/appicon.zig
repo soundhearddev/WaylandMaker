@@ -9,9 +9,10 @@
 //   3. a PLACEHOLDER of the icon theme ("application-x-executable", ...)
 //
 // PNG and XPM are read directly (gfx.Icon, xpm.zig), SVG through librsvg when
-// it is installed (svg.zig). If nothing is found, not even the theme's
-// placeholder, `load` returns null and the Dock draws a placeholder of its own
-// (dock.drawPlaceholder), never a letter.
+// it is installed (svg.zig), every other format through gdk-pixbuf when it is
+// installed (pixbuf.zig); see `loadFile`. If nothing is found, not even the
+// theme's placeholder, `load` returns null and the tile stays empty: the
+// Dock draws no picture of its own.
 //
 // The app_id comes from the client, so it only ever becomes part of a path
 // when it is a plain identifier (no '/', no leading '.', see `validName`).
@@ -23,6 +24,7 @@ const gfx = @import("gfx.zig");
 const xpm = @import("xpm.zig");
 const tmpdir = @import("tmpdir.zig");
 const svg = @import("svg.zig");
+const pixbuf = @import("pixbuf.zig");
 
 /// A name that is safe to put into a file name: letters, digits and . - _ +,
 /// not starting with '.' or '-' (same rule as dockapp.validAppId).
@@ -58,14 +60,17 @@ const themes = [_][]const u8{
     "breeze-dark", "Humanity",     "gnome",   "oxygen",       "elementary",    "Yaru",
     "Mint-Y",      "Mint-X",       "Numix",   "Numix-Circle", "Tela",          "Qogir",
     "Colloid",     "WhiteSur",     "Fluent",  "Arc",          "Moka",          "Vimix",
-    "Flat-Remix",  "la-capitaine",
+    "Flat-Remix",  "la-capitaine", "AdwaitaLegacy", "Breeze", "Breeze-Dark", "Zafiro",
+    "Obsidian",    "Bluecurve", "Tango",       "gnome-colors", "Cosmic",    "candy-icons",
+    "BeautyLine",  "Surface",   "Kora",        "Reversal",   "Fluent-dark", "ePapirus",
 };
 /// Best size for a 48 px icon first.
-const sizes = [_][]const u8{ "64", "48", "128", "256", "32", "24", "22", "16" };
+const sizes = [_][]const u8{ "64", "48", "96", "128", "72", "256", "512", "40", "32", "24", "22", "16" };
 /// A PNG of these sizes is good enough to be used before an SVG; a smaller one
-/// (blown up it looks bad) only after it.
-const big_sizes = [_][]const u8{ "64", "48", "128", "256" };
-const small_sizes = [_][]const u8{ "32", "24", "22", "16" };
+/// (blown up it looks bad) only after it. (A 512 px PNG is scaled down once
+/// and the copy is kept, see gfx.Canvas.drawIcon.)
+const big_sizes = [_][]const u8{ "64", "48", "96", "128", "72", "256", "512" };
+const small_sizes = [_][]const u8{ "40", "32", "24", "22", "16" };
 
 /// What themes call "an application, nothing more specific known".
 const placeholder_names = [_][]const u8{
@@ -77,15 +82,23 @@ const placeholder_names = [_][]const u8{
 const placeholder_contexts = [_][]const u8{ "apps", "mimetypes", "status" };
 const app_contexts = [_][]const u8{"apps"};
 
-fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
+/// THE reader of icon files, for every caller: the extension picks the
+/// quickest reader (PNG and XPM are built in, SVG goes through librsvg), and
+/// whatever fails, or has another extension (JPEG, GIF, BMP, ICO, TIFF, WebP,
+/// PNM, SVGZ ...), is handed to gdk-pixbuf when it is installed (pixbuf.zig).
+/// So a file is only "not an icon" when no reader on this machine knows it.
+pub fn loadFile(gpa: std.mem.Allocator, path: [:0]const u8) ?gfx.Icon {
     if (std.ascii.endsWithIgnoreCase(path, ".xpm")) {
-        const pm = xpm.load(gpa, path) orelse return null;
-        defer pm.deinit(gpa);
-        return gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels);
+        if (xpm.load(gpa, path)) |pm| {
+            defer pm.deinit(gpa);
+            if (gfx.Icon.fromPixels(pm.width, pm.height, pm.pixels)) |ic| return ic;
+        }
+    } else if (std.ascii.endsWithIgnoreCase(path, ".png")) {
+        if (gfx.Icon.loadPng(path)) |ic| return ic;
+    } else if (std.ascii.endsWithIgnoreCase(path, ".svg")) {
+        if (svg.load(path, svg.render_size)) |ic| return ic;
     }
-    if (std.ascii.endsWithIgnoreCase(path, ".png")) return gfx.Icon.loadPng(path);
-    if (std.ascii.endsWithIgnoreCase(path, ".svg")) return svg.load(path, svg.render_size);
-    return null;
+    return pixbuf.load(gpa, path);
 }
 
 /// The themes of `themes` that are installed under `dirs.icons` (one
@@ -253,7 +266,25 @@ fn findForApp(gpa: std.mem.Allocator, s: Search, id: []const u8) ?gfx.Icon {
         if (fromDesktopFile(gpa, s.dirs, dir, id)) |ic| return ic;
         if (differs) if (fromDesktopFile(gpa, s.dirs, dir, lower)) |ic| return ic;
     }
+
+    // A reverse-DNS app_id (`org.mozilla.firefox`, `dev.zed.Zed`): themes
+    // often have only the last part (`firefox`, `zed`) and no .desktop file
+    // under the full name.
+    if (std.mem.lastIndexOfScalar(u8, lower, '.')) |dot| {
+        const tail = lower[dot + 1 ..];
+        if (tail.len >= 2 and validName(tail)) {
+            if (findIcon(gpa, s.dirs, tail, &app_contexts)) |ic| return ic;
+        }
+    }
     return null;
+}
+
+/// The icon named `name` (a theme icon name as in an `Icon=` line), or null.
+/// Unlike `load` there is no theme placeholder at the end: the caller tries
+/// something else first. `name` must be a `validName`, without extension.
+pub fn loadNamed(gpa: std.mem.Allocator, s: Search, name: []const u8) ?gfx.Icon {
+    if (!validName(name)) return null;
+    return findIcon(gpa, s.dirs, name, &app_contexts);
 }
 
 /// The theme's placeholder icon, or null if the system has none.
@@ -286,36 +317,117 @@ fn userDataHome(buf: []u8) ?[]const u8 {
     return null;
 }
 
-/// `load` with the system's default places and the user's own: desktop
-/// files in `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`),
-/// icon themes in `$XDG_DATA_HOME/icons` (else `~/.local/share/icons`) and the
-/// older `~/.icons`.
-pub fn loadOwned(gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
-    var data_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var apps_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var icons_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var roots: [2][]const u8 = undefined;
-    var n_roots: usize = 0;
-    var s: Search = .{};
-    if (userDataHome(&data_buf)) |data| {
-        s.user_desktop = std.fmt.bufPrint(&apps_buf, "{s}/applications", .{data}) catch null;
-        if (std.fmt.bufPrint(&icons_buf, "{s}/icons", .{data})) |p| {
-            roots[n_roots] = p;
-            n_roots += 1;
-        } else |_| {}
+/// The places of THIS machine, built from the environment: where the paths
+/// live (the `Search` points into it, so it must outlive the search).
+///
+/// Icons: `$XDG_DATA_HOME/icons`, `~/.icons`, Flatpak's and Nix's per-user
+/// exports, then the `icons` of every entry of `$XDG_DATA_DIRS` (default
+/// `/usr/local/share:/usr/share`). Desktop files: the same under
+/// `applications`. A root that does not exist is left out: it would only add
+/// failed `open`s to every search.
+const Owned = struct {
+    bufs: [20][512]u8 = undefined,
+    used: usize = 0,
+    icon_roots: [10][]const u8 = undefined,
+    n_icons: usize = 0,
+    desktop: [10][]const u8 = undefined,
+    n_desktop: usize = 0,
+    user_desktop_buf: [512]u8 = undefined,
+    data_buf: [512]u8 = undefined,
+
+    fn exists(path: []const u8) bool {
+        var z: [512:0]u8 = undefined;
+        if (path.len >= z.len) return false;
+        @memcpy(z[0..path.len], path);
+        z[path.len] = 0;
+        return std.c.access(&z, 0) == 0;
     }
-    if (std.c.getenv("HOME")) |h| {
-        const v = std.mem.span(h);
-        if (v.len > 0) {
-            if (std.fmt.bufPrint(&old_buf, "{s}/.icons", .{v})) |p| {
-                roots[n_roots] = p;
-                n_roots += 1;
-            } else |_| {}
+
+    fn put(o: *Owned, comptime fmt: []const u8, args: anytype) ?[]const u8 {
+        if (o.used >= o.bufs.len) return null;
+        const p = std.fmt.bufPrint(&o.bufs[o.used], fmt, args) catch return null;
+        o.used += 1;
+        return p;
+    }
+
+    fn addIcons(o: *Owned, path: []const u8) void {
+        if (o.n_icons >= o.icon_roots.len or !exists(path)) return;
+        for (o.icon_roots[0..o.n_icons]) |have| if (std.mem.eql(u8, have, path)) return;
+        o.icon_roots[o.n_icons] = path;
+        o.n_icons += 1;
+    }
+
+    fn addDesktop(o: *Owned, path: []const u8) void {
+        if (o.n_desktop >= o.desktop.len) return;
+        for (o.desktop[0..o.n_desktop]) |have| if (std.mem.eql(u8, have, path)) return;
+        o.desktop[o.n_desktop] = path;
+        o.n_desktop += 1;
+    }
+
+    /// A data root (`<root>/icons`, `<root>/applications`).
+    fn addShare(o: *Owned, comptime fmt: []const u8, args: anytype) void {
+        const root = o.put(fmt, args) orelse return;
+        if (o.put("{s}/icons", .{root})) |p| o.addIcons(p);
+        if (o.put("{s}/applications", .{root})) |p| {
+            if (exists(p)) o.addDesktop(p);
         }
     }
-    s.dirs.user_icons = roots[0..n_roots];
-    return load(gpa, s, app_id);
+
+    fn build(o: *Owned) Search {
+        var s: Search = .{};
+        // The system's own places stay first in `desktop`, as before.
+        for (s.dirs.desktop) |d| o.addDesktop(d);
+
+        if (userDataHome(&o.data_buf)) |data| {
+            s.user_desktop = std.fmt.bufPrint(&o.user_desktop_buf, "{s}/applications", .{data}) catch null;
+            if (o.put("{s}/icons", .{data})) |p| o.addIcons(p);
+            o.addShareUnder(data);
+        }
+        if (std.c.getenv("HOME")) |h| {
+            const v = std.mem.span(h);
+            if (v.len > 0) {
+                if (o.put("{s}/.icons", .{v})) |p| o.addIcons(p);
+                o.addShare("{s}/.nix-profile/share", .{v});
+                o.addShare("{s}/.local/state/nix/profile/share", .{v});
+            }
+        }
+        o.addShare("/var/lib/flatpak/exports/share", .{});
+        o.addShare("/run/current-system/sw/share", .{});
+
+        const dirs_env: []const u8 = if (std.c.getenv("XDG_DATA_DIRS")) |x| std.mem.span(x) else "/usr/local/share:/usr/share";
+        var it = std.mem.tokenizeScalar(u8, dirs_env, ':');
+        while (it.next()) |d| {
+            if (d.len == 0 or d[0] != '/') continue;
+            // /usr/share is the main root (`Dirs.icons`), searched last anyway.
+            if (std.mem.eql(u8, d, "/usr/share") or std.mem.eql(u8, d, "/usr/share/")) continue;
+            o.addShare("{s}", .{std.mem.trimEnd(u8, d, "/")});
+        }
+
+        s.dirs.user_icons = o.icon_roots[0..o.n_icons];
+        s.dirs.desktop = o.desktop[0..o.n_desktop];
+        return s;
+    }
+
+    /// Flatpak's per-user exports live under the user's data home too.
+    fn addShareUnder(o: *Owned, data: []const u8) void {
+        o.addShare("{s}/flatpak/exports/share", .{data});
+    }
+};
+
+/// `load` with the system's default places and the user's own: desktop
+/// files in `$XDG_DATA_HOME/applications` (else `~/.local/share/applications`),
+/// icon themes in `$XDG_DATA_HOME/icons` (else `~/.local/share/icons`), the
+/// older `~/.icons`, Flatpak and Nix exports, and every `$XDG_DATA_DIRS`.
+pub fn loadOwned(gpa: std.mem.Allocator, app_id: ?[]const u8) ?gfx.Icon {
+    var owned: Owned = .{};
+    return load(gpa, owned.build(), app_id);
+}
+
+/// The theme icon called `name` (no placeholder), searched in the same places
+/// as `loadOwned`.
+pub fn loadNamedOwned(gpa: std.mem.Allocator, name: []const u8) ?gfx.Icon {
+    var owned: Owned = .{};
+    return loadNamed(gpa, owned.build(), name);
 }
 
 // ----------------------------------------------------------------------------
@@ -607,4 +719,53 @@ test "load: SVG icons are used when librsvg is there; a big PNG beats an SVG, a 
     try std.testing.expectEqual(if (have_svg) @as(i32, svg.render_size) else @as(i32, 3), widthOf(gpa, s, "small"));
     // Nothing at all: the theme's placeholder.
     try std.testing.expectEqual(@as(i32, 8), widthOf(gpa, s, "no-such-program"));
+}
+
+test "loadOwned: icons under $XDG_DATA_DIRS are found; loadNamedOwned never returns a placeholder" {
+    const gpa = std.testing.allocator;
+    const libc = @cImport(@cInclude("stdlib.h"));
+
+    var root_buf: [64:0]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/wmaker-xdg-test-{d}", .{std.c.getpid()});
+    const dirs_to_make = [_][]const u8{
+        "",
+        "/icons",
+        "/icons/hicolor",
+        "/icons/hicolor/48x48",
+        "/icons/hicolor/48x48/apps",
+    };
+    var pbuf: [256:0]u8 = undefined;
+    for (dirs_to_make) |d| {
+        const p = try std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, d });
+        _ = std.c.mkdir(p.ptr, 0o755);
+    }
+    const icon_path = try std.fmt.bufPrintZ(&pbuf, "{s}/icons/hicolor/48x48/apps/xdgprobe.png", .{root});
+    try testPng(icon_path, 5);
+    defer {
+        _ = libc.unsetenv("XDG_DATA_DIRS");
+        if (std.fmt.bufPrintZ(&pbuf, "{s}/icons/hicolor/48x48/apps/xdgprobe.png", .{root})) |p| _ = std.c.unlink(p.ptr) else |_| {}
+        var i = dirs_to_make.len;
+        while (i > 0) : (i -= 1) {
+            const p = std.fmt.bufPrintZ(&pbuf, "{s}{s}", .{ root, dirs_to_make[i - 1] }) catch continue;
+            _ = std.c.rmdir(p.ptr);
+        }
+    }
+    _ = libc.setenv("XDG_DATA_DIRS", root.ptr, 1);
+
+    var ic = loadOwned(gpa, "xdgprobe") orelse return error.NotFound;
+    try std.testing.expectEqual(@as(i32, 5), ic.w);
+    ic.deinit();
+
+    var named = loadNamedOwned(gpa, "xdgprobe") orelse return error.NotFound;
+    try std.testing.expectEqual(@as(i32, 5), named.w);
+    named.deinit();
+
+    // Unknown names, and names that are no file names at all, give nothing.
+    try std.testing.expect(loadNamedOwned(gpa, "no-such-icon-anywhere-xyz") == null);
+    try std.testing.expect(loadNamedOwned(gpa, "../etc/passwd") == null);
+
+    // A reverse-DNS app_id finds the icon of its last part.
+    var dns = loadOwned(gpa, "org.example.XdgProbe") orelse return error.NotFound;
+    try std.testing.expectEqual(@as(i32, 5), dns.w);
+    dns.deinit();
 }

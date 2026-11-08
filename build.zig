@@ -424,10 +424,19 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("wlprefs_settings", wlprefs.settings);
     test_module.addImport("wlprefs_actions", wlprefs.actions);
 
+    // `zig build test -Dtest-filter=colours`: only the tests whose name contains
+    // the text (to find the one that hangs or fails on a machine).
+    const test_filters: []const []const u8 = if (b.option(
+        []const u8,
+        "test-filter",
+        "Run only the unit tests whose name contains this text",
+    )) |f| b.dupeStrings(&.{f}) else &.{};
+
     const tests = b.addTest(.{
         .root_module = test_module,
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
+        .filters = test_filters,
     });
 
     const run_tests = b.addRunArtifact(tests);

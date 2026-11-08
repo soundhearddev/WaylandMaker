@@ -545,6 +545,10 @@ pub const max_include_depth = 4;
 /// needs a few thousand; this only exists so that an endless loop cannot
 /// hang the session (about a second of Lua).
 const max_script_instructions = 50_000_000;
+/// Tests only: a lower instruction limit, so the tests that run into it on
+/// purpose do not spend 50 million Lua instructions (many seconds in a Debug
+/// build) on it.
+var instruction_limit: i32 = max_script_instructions;
 
 /// Where a theme is looked for besides next to the config.
 const theme_dirs = [_][]const u8{ "/usr/local/share/wmaker-wl/Themes", "/usr/share/wmaker-wl/Themes" };
@@ -656,7 +660,7 @@ pub fn parseWith(
     const L = lua.newState() orelse return error.OutOfMemory;
     var keep_state = false; // see Config.script
     defer if (!keep_state) lua.close(L);
-    lua.limitInstructions(L, max_script_instructions);
+    lua.limitInstructions(L, instruction_limit);
 
     var ctx: Ctx = .{
         .L = L,
@@ -1936,6 +1940,25 @@ test "colours can be strings (with or without #, or 0x) or plain numbers" {
     try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
 }
 
+test "colours: upper case, a refused value changes nothing, and each refusal is one warning" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg, "border_focused = \"#AABBCC\"\n");
+    try std.testing.expectEqual(@as(u32, 0xaabbcc), cfg.border_focused);
+    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+
+    // Too big for 32 bits, empty after the prefix, and a float: all refused.
+    try parseText(arena.allocator(), &cfg,
+        \\border_focused = "#1234567890"
+        \\border_unfocused = "0x"
+        \\border_floating = 1.5
+    );
+    try std.testing.expectEqual(@as(u32, 0xaabbcc), cfg.border_focused);
+    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+}
+
 test "enable_autostart parses and defaults on" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -2338,7 +2361,21 @@ test "a script without Lua binds does not keep its state" {
     try std.testing.expect(cfg.script == null);
 }
 
+/// Run the stress tests with small limits: they only have to hit the limit,
+/// not fill the machine (see `lua.byte_limit`, `instruction_limit`).
+fn smallLimits() void {
+    instruction_limit = 2_000_000;
+    lua.byte_limit = 8 * 1024 * 1024;
+}
+
+fn normalLimits() void {
+    instruction_limit = max_script_instructions;
+    lua.byte_limit = null;
+}
+
 test "an endless loop in a bound function is stopped" {
+    smallLimits();
+    defer normalLimits();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
@@ -2362,6 +2399,8 @@ test "bind() with a bad key and a function leaves nothing behind" {
 }
 
 test "a script that asks for far too much memory fails, the rest of the config is read" {
+    smallLimits();
+    defer normalLimits();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };
@@ -2377,6 +2416,8 @@ test "a script that asks for far too much memory fails, the rest of the config i
 }
 
 test "a script that grows a table until the memory limit stops there" {
+    smallLimits();
+    defer normalLimits();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var cfg: Config = .{ .arena = .init(std.testing.allocator) };

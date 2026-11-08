@@ -52,6 +52,8 @@ pub const View = struct {
     /// The model's window while mapped.
     win: ?*types.Window = null,
     layer: ?types.Mode = null,
+    /// A DockApp: in the tree over the raised (true) or lowered (false) Dock.
+    dock_up: ?bool = null,
     /// What `place` did last. A pass places every visible window; most of
     /// them have not changed, and the scene calls are skipped for those.
     last: ?Drawn = null,
@@ -158,11 +160,20 @@ pub const View = struct {
         if (was_hidden) view.tree.node.setEnabled(true);
 
         // The layer decides what is drawn over what.
-        if (view.layer != p.mode) {
+        if (p.dockapp_up) |up| {
+            // A DockApp is an icon of the Dock: it lives right over the Dock's
+            // own tiles, whichever level they are at.
+            if (view.dock_up == null or view.dock_up.? != up) {
+                view.tree.node.reparent(if (up) view.server.dockapp_above else view.server.dockapp_below);
+                view.dock_up = up;
+                view.layer = null;
+            }
+        } else if (view.layer != p.mode or view.dock_up != null) {
             view.tree.node.reparent(view.server.layers[layerIndex(p.mode)]);
             view.layer = p.mode;
+            view.dock_up = null;
         }
-        if (p.raise) view.tree.node.raiseToTop();
+        if (p.raise or p.dockapp_up != null) view.tree.node.raiseToTop();
 
         if (view.sent_maximized != p.maximized) {
             view.sent_maximized = p.maximized;
@@ -290,6 +301,7 @@ pub const View = struct {
         };
         view.win = win;
         view.layer = null;
+        view.dock_up = null;
         view.last = null;
 
         manage.setString(wm, &win.app_id, if (toplevel.app_id) |s| std.mem.span(s) else null);

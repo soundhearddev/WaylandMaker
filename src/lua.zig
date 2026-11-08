@@ -89,9 +89,15 @@ const Limiter = struct {
 /// null: out of memory. Lua allocates from the C allocator, not from the
 /// config's arena: a whole interpreter's memory must not pile up in it. It
 /// is counted, and a script cannot take more than `max_script_bytes`.
+/// Tests only: a smaller memory limit for the scripts started after this, so
+/// the tests that run into the limit on purpose stop after a few megabytes
+/// instead of filling hundreds (which can swap a small machine to a crawl and
+/// look like a hung test). null: `max_script_bytes`.
+pub var byte_limit: ?usize = null;
+
 pub fn newState() ?*State {
     const l = std.heap.c_allocator.create(Limiter) catch return null;
-    l.* = .{ .backing = std.heap.c_allocator, .limit = max_script_bytes };
+    l.* = .{ .backing = std.heap.c_allocator, .limit = byte_limit orelse max_script_bytes };
     return zlua.Lua.init(l.allocator()) catch {
         std.heap.c_allocator.destroy(l);
         return null;

@@ -518,6 +518,10 @@ pub const WindowManager = struct {
     /// The compositor draws the Dock. Until it does the Dock reserves no room
     /// (an undrawn Dock would only leave an empty strip at the screen edge).
     dock_shown: bool = false,
+    /// A Dock, Drawer or Clip surface is above the windows right now (set by
+    /// the compositor, which knows about auto raise). The DockApps follow it,
+    /// so a raised tile never covers the program that sits in it.
+    dock_raised: bool = false,
     /// Where the Dock saves what the user changed (null: not saved). Owned
     /// by cfg's arena like `dockapps`.
     dock_state_path: ?[]const u8 = null,

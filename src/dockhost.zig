@@ -229,6 +229,18 @@ pub fn syncModel(wm: *WindowManager, m: *dock_model.Model) bool {
     // temporary one pruned) while its program is still there.
     if (!ids_complete) return changed;
     if (m.setRunning(ids.items)) changed = true;
+    // Which tiles have a DockApp in them: they draw only their frame.
+    {
+        var hosted: std.ArrayList([]const u8) = .empty;
+        defer hosted.deinit(wm.gpa);
+        var hit = wm.dock_windows.first();
+        while (hit) |w| : (hit = types.nextDockWindow(w, wm)) {
+            if (w.closed) continue;
+            const id = w.app_id orelse continue;
+            hosted.append(wm.gpa, id) catch break;
+        }
+        if (m.setHosted(hosted.items)) changed = true;
+    }
     if (m.pruneAttached()) changed = true;
     // Taken after the update, which changed flags and maybe removed tiles:
     // the next pass with nothing new then matches it.
@@ -277,6 +289,7 @@ fn runningSignature(wm: *WindowManager, m: *const dock_model.Model) u64 {
         if (s.launching) flags |= 4;
         if (s.app.attached) flags |= 8;
         if (s.app.mini_window != 0) flags |= 16;
+        if (s.hosted) flags |= 64;
         if (s.app.app_id != null) flags |= 32;
         h = fnvInt(h, flags);
         h = fnv(h, s.app.name);
@@ -500,11 +513,11 @@ pub fn apply(wm: *WindowManager, host: Host, sink: manage.Sink) void {
     var it = wm.dock_windows.first();
     while (it) |w| : (it = types.nextDockWindow(w, wm)) {
         if (w.closed) continue;
-        applyOne(w, host, sink, &used, &n_used);
+        applyOne(wm, w, host, sink, &used, &n_used);
     }
 }
 
-fn applyOne(win: *Window, host: Host, sink: manage.Sink, used: *[max_hosted]usize, n_used: *usize) void {
+fn applyOne(wm: *const WindowManager, win: *Window, host: Host, sink: manage.Sink, used: *[max_hosted]usize, n_used: *usize) void {
     const out = host.out orelse return hide(sink, win, "there is no Dock on an output (dock_enabled = false?)");
     const m = host.model orelse return hide(sink, win, "the Dock has no model");
     const id = win.app_id orelse return hide(sink, win, "no app_id");
@@ -545,6 +558,9 @@ fn applyOne(win: *Window, host: Host, sink: manage.Sink, used: *[max_hosted]usiz
         .border_width = 0,
         .mode = .floating,
         .raise = host.raised,
+        // Over the Dock's own tile, at its level (`wm.dock_raised` is what the
+        // compositor really shows, auto raise included).
+        .dockapp_up = host.raised or wm.dock_raised,
     });
 }
 

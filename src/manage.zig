@@ -71,6 +71,10 @@ pub const Placement = struct {
     clip: ?types.Rect = null,
     /// Its column fills the work area (told to the client as `maximized`).
     maximized: bool = false,
+    /// null: an ordinary window. Else a DockApp: drawn directly over the Dock
+    /// tiles that are above (true) or below (false) the windows, instead of in
+    /// the layer of its mode (view.zig).
+    dockapp_up: ?bool = null,
 };
 
 pub const Sink = struct {

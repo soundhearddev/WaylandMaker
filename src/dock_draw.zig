@@ -21,7 +21,7 @@ const style = @import("style.zig");
 
 pub const Look = dock_view.Look;
 pub const Content = struct {
-    /// App tiles: the icon found for `Look.icon_key`; null draws the placeholder.
+    /// App tiles: the icon found for `Look.icon_key`; null leaves the tile empty.
     icon: ?gfx.Icon = null,
     /// Clip tile: the workspace's name (shown under the number).
     name: ?[]const u8 = null,
@@ -146,44 +146,18 @@ fn drawOmnipresent(cv: *gfx.Canvas, m: scale_mod.Metrics) void {
     cv.fillPolygon(&.{ .{ fx - b, fy + o }, .{ fx - o, fy + o }, .{ fx - o, fy + b } }, style.palette.light);
 }
 
-/// What a tile shows when no icon can be found: a small window in the Dock's
-/// own colours. Never a letter. (x, y) is the top left of the icon area.
-pub fn drawPlaceholder(cv: *gfx.Canvas, x: i32, y: i32, size: i32) void {
-    const mg = @divTrunc(size, 8);
-    const gx = x + mg;
-    const gy = y + mg + @divTrunc(mg, 2);
-    const gw = size - 2 * mg;
-    const gh = size - 3 * mg;
-    if (gw < 12 or gh < 12) return;
-    const bar = @max(@divTrunc(gh, 4), 4);
-
-    const pal = style.palette;
-    cv.fillRect(gx + 2, gy + 2, gw, gh, pal.dark);
-    cv.fillRect(gx, gy, gw, gh, pal.tile_from);
-    cv.vGradient(gx + 1, gy + 1, gw - 2, bar, pal.logo_from, pal.logo_to);
-    cv.bevel(gx, gy, gw, gh, pal.light, pal.dark);
-
-    const gap = @max(mg, 3);
-    const full = gw - 2 * gap;
-    var ly = gy + bar + gap;
-    var i: i32 = 0;
-    while (i < 3 and ly + 2 <= gy + gh - 2) : (i += 1) {
-        const len = if (i == 2) @divTrunc(full * 2, 3) else full;
-        cv.fillRect(gx + gap, ly, len, 2, pal.tile_to);
-        ly += gap;
-    }
-}
-
 fn drawApp(cv: *gfx.Canvas, m: scale_mod.Metrics, look: Look, content: Content) void {
     frame(cv, m, look.hot, null, null);
+    // A DockApp paints the inside of its tile itself.
+    if (look.hosted) {
+        if (look.launching) drawLaunching(cv, m);
+        return;
+    }
     // The icon is 3/4 of the tile, centred.
     const icon_px = @divTrunc(m.side * 3, 4);
     const off = @divTrunc(m.side - icon_px, 2);
-    if (content.icon) |icon| {
-        cv.drawIcon(icon, off, off, icon_px);
-    } else {
-        drawPlaceholder(cv, off, off, icon_px);
-    }
+    // No icon found: the tile stays empty. Nothing is made up.
+    if (content.icon) |icon| cv.drawIcon(icon, off, off, icon_px);
     if (look.not_running) drawNotRunning(cv, m);
     if (look.omnipresent) drawOmnipresent(cv, m);
     if (look.launching) drawLaunching(cv, m);
@@ -304,15 +278,27 @@ test "hot is lighter than idle; the other marks change the pixels" {
     }
 }
 
-test "a tile without an icon shows the placeholder's dark title bar at both ends" {
+test "a tile without an icon is an empty frame: the middle is the plain gradient" {
     const t = try draw(.{ .kind = .app, .size = 64 }, .{}, 1);
     defer testing.allocator.free(t);
-    // icon area 48 px at offset 8; the placeholder's bar runs across it.
-    const icon: i32 = 48;
-    const mg = @divTrunc(icon, 8);
-    const y = 8 + mg + @divTrunc(mg, 2) + 3;
-    try testing.expect((pixelAt(t, 64, 8 + mg + 3, y) & 0xff) < 0x80);
-    try testing.expect((pixelAt(t, 64, 8 + icon - mg - 3, y) & 0xff) < 0x80);
+    // Nothing is drawn in the icon area: a diagonal gradient is brighter at
+    // the top left than at the bottom right and has no edges in between.
+    const a = pixelAt(t, 64, 20, 20) & 0xff;
+    const b = pixelAt(t, 64, 44, 44) & 0xff;
+    try testing.expect(a >= b);
+    try testing.expectEqual(pixelAt(t, 64, 20, 21) & 0xff, pixelAt(t, 64, 21, 20) & 0xff);
+}
+
+test "a hosted tile is only its frame, even if it has an icon" {
+    var pixels = [_]u32{0xffff0000} ** 16;
+    var icon = gfx.Icon.fromPixels(4, 4, &pixels).?;
+    defer icon.deinit();
+    const t = try draw(.{ .kind = .app, .size = 64, .hosted = true }, .{ .icon = icon }, 1);
+    defer testing.allocator.free(t);
+    try testing.expect(pixelAt(t, 64, 32, 32) != 0xffff0000);
+    const plain = try draw(.{ .kind = .app, .size = 64 }, .{}, 1);
+    defer testing.allocator.free(plain);
+    try testing.expectEqualSlices(u8, plain, t);
 }
 
 test "an icon is drawn into the tile instead of the placeholder" {

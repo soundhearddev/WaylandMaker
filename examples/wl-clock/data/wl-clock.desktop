@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=wl-clock
+Comment=Clock DockApp for wmaker-wl
+Exec=wl-clock
+Icon=wl-clock
+Categories=Utility;
+NoDisplay=true

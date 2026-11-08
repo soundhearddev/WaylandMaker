@@ -80,6 +80,11 @@ pub const Slot = struct {
     launching: bool = false,
     /// Value of ui.zig's sync counter when `launching` was set.
     launch_stamp: u32 = 0,
+    /// A DockApp window sits in this tile right now. The tile then draws only
+    /// its frame: the program draws the inside, and an icon or the placeholder
+    /// behind it would show wherever the DockApp is smaller than the tile or
+    /// has not drawn yet.
+    hosted: bool = false,
 };
 
 /// Where the Dock/Clip sit relative to windows (Window Maker's "Dock
@@ -399,6 +404,29 @@ pub const Model = struct {
             }
             if (run and s.launching) {
                 s.launching = false;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// Mark the tiles that have a DockApp window in them (`app_ids` are the
+    /// app_ids of the DockApps); true if that changed.
+    pub fn setHosted(m: *Model, app_ids: []const []const u8) bool {
+        var changed = false;
+        for (m.slots.items) |*s| {
+            if (!s.alive) continue;
+            var host = false;
+            if (s.app.mini_window == 0) {
+                for (app_ids) |id| {
+                    if (s.app.matches(id)) {
+                        host = true;
+                        break;
+                    }
+                }
+            }
+            if (s.hosted != host) {
+                s.hosted = host;
                 changed = true;
             }
         }
@@ -947,6 +975,25 @@ test "Model: Dock tiles keep their grid rows, gaps stay, clashes find a free row
     // screen, so nothing above the logo fits: 2, then 3.
     try std.testing.expectEqual(@as(?i32, 2), rowOf(&m, "d"));
     try std.testing.expectEqual(@as(?i32, 3), rowOf(&m, "e"));
+}
+
+test "Model.setHosted marks the tiles that have a DockApp, and only those" {
+    const apps = [_]dockapp.DockApp{ mk("a", .dock, 0, 1), mk("b", .dock, 0, 2) };
+    var m = try Model.init(std.testing.allocator, .{ .apps = &apps }, &.{}, 2);
+    defer m.deinit();
+    try std.testing.expect(!m.slots.items[0].hosted and !m.slots.items[1].hosted);
+
+    // A DockApp's app_id is `dockapp:<name>`: it belongs to the tile of that name.
+    try std.testing.expect(m.setHosted(&.{"dockapp:b"}));
+    try std.testing.expect(!m.slots.items[0].hosted);
+    try std.testing.expect(m.slots.items[1].hosted);
+    // Same input: nothing changed.
+    try std.testing.expect(!m.setHosted(&.{"dockapp:b"}));
+    // The program ended.
+    try std.testing.expect(m.setHosted(&.{}));
+    try std.testing.expect(!m.slots.items[1].hosted);
+    // An ordinary window with the same name is not hosted.
+    try std.testing.expect(!m.setHosted(&.{"x"}));
 }
 
 test "Model: an empty list is just the logo; names: config.lua wins" {

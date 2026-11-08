@@ -43,6 +43,11 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // The .desktop file names the icon `wl-battery`: put a NeXTSTEP-style icon of that name
+    // (PNG or XPM) into data/ and install it here to give the tile a picture while
+    // the DockApp is not running.
+    b.installFile("data/wl-battery.desktop", "share/applications/wl-battery.desktop");
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

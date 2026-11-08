@@ -56,6 +56,8 @@ pub const simple = [_][]const u8{
     "focus_column_or_output_left",
     "focus_column_or_output_right",
     "reload_config",
+    "menu_root",
+    "menu_windows",
     "minimize",
     "restore",
     "show_all",
