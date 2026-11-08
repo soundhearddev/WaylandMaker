@@ -1,7 +1,5 @@
 # TODO
 
-## Window manager
-
 - [ ] **Title bars.** There are none; windows only have a border. Draw them as scene
       rectangles and text. It also unlocks the `NoTitlebar`, `NoResizebar`, `NoCloseButton` and `NoMiniaturizeButton`
       attributes (see [INTEGRATION.md](INTEGRATION.md)).
@@ -20,22 +18,12 @@
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
 - [ ] **Window menus and the window list** (root menu is done): see section 4 of [TODO wlroots.md](TODO%20wlroots.md).
 
-## Monitors
-
-See [MONITORS.md](MONITORS.md).
-
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
 - [ ] Workspace names per monitor.
 - [ ] `wlr-output-management` (kanshi, wlr-randr). Done without it: `monitor()` rules set `mode`, `scale`, `x`/`y` and on/off directly (`output.zig`, not run). Still to do: the protocol, instead of only running
       an external command (kanshi, wlr-randr) from `monitor_profile`.
 - [ ] Test hotplug against real plugging and unplugging. The model side is tested
       (debouncing, rules, windows returning). What needs checking is the order of the wlroots events.
-
-## Performance
-
-`zig build bench` and the probes in the running WM exist (`src/bench.zig`, `src/perf.zig`, [DEBUGGING.md](DEBUGGING.md)). Still open:
-
-#### Must
 
 - [ ] Measure Manage + Render p50/p99 with real clients, at 1, 10, and 50 windows, with and without animations. Current benchmarks only cover model-level performance in Debug builds.
 - [ ] Add per-window probes for `applyManage` / `applyRender` and probes for `Ui.sync`, so 8 ms warnings can be traced to their source.
@@ -47,14 +35,9 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Investigate benchmark outliers. In the checked-in benchmark, `layout columns` with 100 windows reaches 2721 µs maximum against a 20 µs average, while `layout stacks of 4` reaches 360 µs against an 8 µs average. Allocator overhead or page faults may be responsible, but this needs verification.
 - [ ] Run long-duration memory soak tests. Open and close windows, connect and disconnect monitors, and reload with `SIGHUP` for several hours while monitoring RSS. Check for leaks with Valgrind or the debug allocator.
 
-#### Should
-
 - [ ] Count allocations in hot paths. Add an allocation counter to the benchmark and move Manage, Layout, and Render allocations to arenas or fixed-size buffers where appropriate.
 - [ ] Cache Cairo/Pango resources. Reuse text measurements, layouts, and font maps instead of rebuilding them on every draw. Rebuild menu rows only when their contents change.
 - [ ] Measure logging overhead. Ensure filtered log messages are never formatted in the first place. Measure the flight recorder and `info` logging separately in hot paths.
-- [x] Throttle pointer operations: a Super + mouse move/resize asks for its pass with `Server.manageOnFrame`, and the pass runs at the start of the next `Monitor.onFrame`, once per frame instead of once per motion event (not run, not measured).
-- [x] Idle-notify activity is passed on at most every 100 ms (`Protocols.notifyActivity`): wlroots re-arms a timer per listener per call, and a mouse reports ~1000 times a second. The first activity after a pause still goes through at once.
-- [x] `Monitor.applyRule` matches the `monitor()` rules only after a reload or a change of on/off, not on every pass (an animation runs a pass per frame).
 - [ ] Benchmark multiple monitors: test 3–4 outputs with animations and rapid hotplug sequences, including repeated connect/disconnect cycles within a second.
 - [ ] Stress-test many clients. Open and close 100–200 terminals simultaneously. Measure time to first frame, frame time, and `move all windows`. The Debug benchmark currently shows around 10 ms for the latter with 1000 windows.
 - [ ] Measure startup time until the WM is ready, including Lua configuration, icon directories, `WMState`, and autostart. Introduce lazy loading if necessary.
@@ -62,17 +45,11 @@ See [MONITORS.md](MONITORS.md).
 - [ ] Measure configuration reload latency from `SIGHUP` to completion using large configurations with many includes. Reloading must not block a frame.
 - [ ] Investigate `process.spawn` overhead with large address spaces. Consider `posix_spawn` or `vfork` if they offer lower fork costs.
 
-#### Nice to have
-
 - [ ] Add benchmarks with animations and multiple outputs to `src/bench.zig`.
       *Multiple outputs: done (`layout 4 outputs`). Animations: not yet.*
 - [ ] Run `bench -- --check` in CI against a stored baseline (CI runs the budgets; `--json` / `--baseline` exist, but a baseline from a hosted runner means little) to catch regressions. Current performance budgets are intentionally loose.
 - [ ] Document reference numbers for fixed, real hardware rather than a container.
 - [ ] Compare build configurations: `ReleaseSafe` vs. `ReleaseFast`, stripping, and LTO. If the performance difference is small, recommend `ReleaseSafe`.
-
-## Session and installation
-
-The session files are in place ([SESSION.md](SESSION.md)); none of it has run on a real login yet.
 
 - [ ] **Try the session for real**: from GDM, SDDM, greetd and ly, and from a TTY. With and without
       systemd (`WMAKER_NO_SYSTEMD=1`), with elogind and seatd. Check that `graphical-session.target`
@@ -83,11 +60,6 @@ The session files are in place ([SESSION.md](SESSION.md)); none of it has run on
 - [ ] **Packages**: `flake.nix` and `manifest.scm` are development shells only. Add a Nix package
       and NixOS module (`services.displayManager.sessionPackages`), a Guix package
 
-
-## Desktop integration
-
-Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the moment:
-
 - [ ] `ext-session-lock` (screen locker), idle notify and inhibit, `xdg-activation`
 - [ ] Screen capture (`ext-image-copy-capture`, screencopy) for `grim` and screen sharing, and the
       matching portal; until then `wmaker-wl-portals.conf` only knows the GTK backend
@@ -97,37 +69,22 @@ Order and details: [TODO wlroots.md](TODO%20wlroots.md), section 5. Open at the 
 - [ ] Notifications, a wallpaper, a screenshot key and a lock key in the default config, once the
       protocols above exist
 
-## Documentation
-
 - [ ] `docs/KEYBINDS.md`/`README.md`: the key table and `--help` must stay in step; a test that
       compares them would do.
       *Done for the options: a test compares the README command-line block, the manual page and `--help`. The key table is not compared.*
-
-## Tests
 
 - [ ] Nothing in `zig build test` runs a compositor. Add a nested smoke test
       (`WLR_BACKENDS=headless`): start, connect a client, open a window, exit.
 - [ ] Tests of the example DockApps run only with `test-all`.
 
-### Benchmark improvements
-
-
 - [ ] **Profile expensive operations.** Investigate outliers in `invariants`, `outputs: order+primary`, and `monitors: rules+profile` to distinguish measurement noise from actual bottlenecks.
 - [ ] **Benchmark the real compositor.** Measure manage and render paths with real Wayland clients at 1, 10, 50, and 100 windows, including p50/p95/p99 and maximum latency.
 - [ ] **Measure end-to-end frame performance.** Track frame times and missed frame deadlines separately from internal model-operation timings.
 
-## Small things
-
 - [ ] **Remove `protocol/`**: fetch `wlr-protocols` as a pinned dependency instead of keeping a copy of its XML, and prune
       the unused `scanner.generate` lines. Details: section 8 of [TODO wlroots.md](TODO%20wlroots.md).
-
-## The Rest
 
 - [ ] Better live config reload: a reload does not re-create the keymap (`XKB_DEFAULT_*`), and
       `environment` changes need a new session.
 - [ ] libinput: the options (`accel_speed`, `accel_profile`, `click_method`, `left_handed`, `disable_while_typing`) are global;
       per-device settings (by name/vendor) are still open.
-
-## wlprefs
-
-The list is in `wlprefs/TODO.md`.

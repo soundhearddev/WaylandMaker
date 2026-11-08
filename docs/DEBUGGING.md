@@ -128,3 +128,9 @@ Reference, ReleaseSafe on one 2025 server core, 1000 windows: layout about 20 µ
 16 µs, moving all windows about 30 µs (one allocation per window). The model scales roughly linearly,
 so stutter is more likely to come from clients, rendering or the config than from the model. These numbers are
 from a container, not from fixed reference hardware, and I have not measured with real clients yet.
+
+## A test that hangs
+
+`zig build test --test-timeout 60s` stops a test that runs longer than that and names it, instead of
+leaving the build frozen. `zig build test -Dtest-filter=<text>` runs only the tests whose name contains the
+text (to look at one test alone).

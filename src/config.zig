@@ -65,7 +65,19 @@
 // set_layout_override). `bind_layout = "current"` follows the active one.
 
 const std = @import("std");
-const log = std.log.scoped(.config);
+/// In the unit tests the warnings are counted (`Config.parse_warnings`, which
+/// the tests check) but not printed: the tests make hundreds of them on
+/// purpose, and together with everything else the run writes more than a pipe
+/// holds (64 KiB). A build runner that does not empty the pipe while the tests
+/// run then blocks the test that writes the line that fills it.
+const log = if (@import("builtin").is_test) quiet_log else std.log.scoped(.config);
+
+const quiet_log = struct {
+    pub fn err(comptime _: []const u8, _: anytype) void {}
+    pub fn warn(comptime _: []const u8, _: anytype) void {}
+    pub fn info(comptime _: []const u8, _: anytype) void {}
+    pub fn debug(comptime _: []const u8, _: anytype) void {}
+};
 const xkb = @import("xkbcommon");
 const animation = @import("animation.zig");
 const backend = @import("backend.zig");
@@ -1707,14 +1719,25 @@ fn editDistance(a: []const u8, b: []const u8) usize {
 
 /// A colour: `"#d8a657"`, `"d8a657"`, `"0xd8a657"` or the number `0xd8a657`.
 fn colourValue(L: *lua.State) ?u32 {
-    if (lua.toInteger(L, -1)) |n| {
-        if (n < 0 or n > 0xffff_ffff) return null;
-        const v: u32 = @intCast(n);
-        return v;
-    }
+    if (lua.toInteger(L, -1)) |n| return colourFromInteger(n);
     const s = lua.toSlice(L, -1) orelse return null;
+    return colourFromText(s);
+}
+
+/// A colour given as a number: 0 .. 0xffffffff.
+fn colourFromInteger(n: i64) ?u32 {
+    if (n < 0 or n > 0xffff_ffff) return null;
+    return @intCast(n);
+}
+
+/// A colour given as text: hex digits, with an optional `#` or `0x` in front.
+/// null for anything else (empty, a sign, a blank, a letter that is no hex
+/// digit, more than 32 bits).
+fn colourFromText(s: []const u8) ?u32 {
     var v = std.mem.trimStart(u8, s, "#");
-    if (std.mem.startsWith(u8, v, "0x")) v = v[2..];
+    if (std.mem.startsWith(u8, v, "0x") or std.mem.startsWith(u8, v, "0X")) v = v[2..];
+    // parseInt would also take a leading `+`; a colour has none.
+    if (v.len == 0 or !std.ascii.isHex(v[0])) return null;
     return std.fmt.parseInt(u32, v, 16) catch null;
 }
 
@@ -1916,47 +1939,27 @@ fn parseText(arena: std.mem.Allocator, cfg: *Config, text: []const u8) !void {
     try parse(arena, text, cfg, &binds, "<test>");
 }
 
-test "colours can be strings (with or without #, or 0x) or plain numbers" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    try parseText(arena.allocator(), &cfg,
-        \\border_focused = "#112233"
-        \\border_unfocused = "445566"
-        \\border_floating = 0x778899
-    );
-    try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused);
-    try std.testing.expectEqual(@as(u32, 0x445566), cfg.border_unfocused);
-    try std.testing.expectEqual(@as(u32, 0x778899), cfg.border_floating);
-    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
-
-    try parseText(arena.allocator(), &cfg,
-        \\border_focused = "#12345g"
-        \\border_unfocused = -1
-        \\border_floating = true
-    );
-    try std.testing.expectEqual(@as(u32, 0x112233), cfg.border_focused); // refused: unchanged
-    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+test "colours as text: with or without #, or 0x, upper case too" {
+    try std.testing.expectEqual(@as(?u32, 0x112233), colourFromText("#112233"));
+    try std.testing.expectEqual(@as(?u32, 0x445566), colourFromText("445566"));
+    try std.testing.expectEqual(@as(?u32, 0x778899), colourFromText("0x778899"));
+    try std.testing.expectEqual(@as(?u32, 0x778899), colourFromText("0X778899"));
+    try std.testing.expectEqual(@as(?u32, 0xaabbcc), colourFromText("#AABBCC"));
+    try std.testing.expectEqual(@as(?u32, 0xffffffff), colourFromText("ffffffff"));
+    try std.testing.expectEqual(@as(?u32, 0), colourFromText("0"));
 }
 
-test "colours: upper case, a refused value changes nothing, and each refusal is one warning" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
-    defer cfg.deinit();
-    try parseText(arena.allocator(), &cfg, "border_focused = \"#AABBCC\"\n");
-    try std.testing.expectEqual(@as(u32, 0xaabbcc), cfg.border_focused);
-    try std.testing.expectEqual(@as(u32, 0), cfg.parse_warnings);
+test "colours as text: anything else is refused" {
+    const bad = [_][]const u8{ "", "#", "0x", "#12345g", "#1234567890", "+123", "-1", " 12", "12 ", "red", "#_12" };
+    for (bad) |text| try std.testing.expectEqual(@as(?u32, null), colourFromText(text));
+}
 
-    // Too big for 32 bits, empty after the prefix, and a float: all refused.
-    try parseText(arena.allocator(), &cfg,
-        \\border_focused = "#1234567890"
-        \\border_unfocused = "0x"
-        \\border_floating = 1.5
-    );
-    try std.testing.expectEqual(@as(u32, 0xaabbcc), cfg.border_focused);
-    try std.testing.expectEqual(@as(u32, 3), cfg.parse_warnings);
+test "colours as numbers: 0 to 0xffffffff" {
+    try std.testing.expectEqual(@as(?u32, 0), colourFromInteger(0));
+    try std.testing.expectEqual(@as(?u32, 0x778899), colourFromInteger(0x778899));
+    try std.testing.expectEqual(@as(?u32, 0xffffffff), colourFromInteger(0xffff_ffff));
+    try std.testing.expectEqual(@as(?u32, null), colourFromInteger(-1));
+    try std.testing.expectEqual(@as(?u32, null), colourFromInteger(0x1_0000_0000));
 }
 
 test "enable_autostart parses and defaults on" {

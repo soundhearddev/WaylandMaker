@@ -432,3 +432,33 @@ test "load and call: a syntax error and a runtime error leave their message on t
     try std.testing.expect(!load(L, "\x1bLua", "=test"));
     pop(L, 1);
 }
+
+// Finds WHERE Lua stops on a machine where a config test hangs: every step is
+// announced before it runs, so the last line printed is the step that hangs.
+//   zig build test -Dtest-filter="lua probe" --test-timeout 10s
+test "lua probe: start, libraries, hook, chunk, close, one step at a time" {
+    const p = std.debug.print;
+    p("\n[lua probe] 1 newState\n", .{});
+    const L = newState() orelse return error.OutOfMemory;
+    p("[lua probe] 2 openLibs\n", .{});
+    openLibs(L);
+    p("[lua probe] 3 harden\n", .{});
+    harden(L);
+    p("[lua probe] 4 limitInstructions\n", .{});
+    limitInstructions(L, 1_000_000);
+    p("[lua probe] 5 load\n", .{});
+    try std.testing.expect(load(L, "x = 40 + 2", "=probe"));
+    p("[lua probe] 6 call\n", .{});
+    try std.testing.expect(call(L));
+    p("[lua probe] 7 read a global\n", .{});
+    _ = L.getGlobal("x");
+    try std.testing.expectEqual(@as(?i64, 42), toInteger(L, -1));
+    pop(L, 1);
+    p("[lua probe] 8 an error is caught\n", .{});
+    try std.testing.expect(load(L, "error('boom')", "=probe"));
+    try std.testing.expect(!call(L));
+    pop(L, 1);
+    p("[lua probe] 9 close\n", .{});
+    close(L);
+    p("[lua probe] 10 done\n", .{});
+}

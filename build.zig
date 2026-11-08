@@ -437,6 +437,15 @@ pub fn build(b: *std.Build) void {
         .use_llvm = use_llvm,
         .use_lld = use_llvm,
         .filters = test_filters,
+        // Zig's own runner, but started plainly (no `--listen` conversation
+        // with the build runner): on some machines that conversation stalls
+        // for no reason in the tests, while the same binary run directly
+        // passes. The run still fails the build on a failing test; the
+        // per-test progress goes to stderr.
+        .test_runner = .{
+            .path = .{ .cwd_relative = b.fmt("{s}/compiler/test_runner.zig", .{b.graph.zig_lib_directory.path orelse "."}) },
+            .mode = .simple,
+        },
     });
 
     const run_tests = b.addRunArtifact(tests);
