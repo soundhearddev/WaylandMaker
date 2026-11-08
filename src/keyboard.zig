@@ -39,6 +39,9 @@ pub const Keyboard = struct {
     repeat_timer: ?*wl.EventSource = null,
     repeat_index: usize = 0,
     repeat_key: u32 = 0,
+    /// Hash of the four `keyboard_*` options the current keymap was built
+    /// from, so a reload that did not touch them leaves the keymap alone.
+    keymap_sig: u64 = 0,
 
     modifiers: wl.Listener(*wlr.Keyboard) = .init(onModifiers),
     key: wl.Listener(*wlr.Keyboard.event.Key) = .init(onKey),
@@ -56,6 +59,7 @@ pub const Keyboard = struct {
 
         const wlr_kb = device.toKeyboard();
         if (!wlr_kb.setKeymap(keymap)) return error.SetKeymap;
+        kb.keymap_sig = keymapSig(&server.wm.cfg);
         kb.applyRepeatInfo();
         wlr_kb.events.modifiers.add(&kb.modifiers);
         wlr_kb.events.key.add(&kb.key);
@@ -145,6 +149,42 @@ pub const Keyboard = struct {
 
     fn nonEmpty(s: [:0]const u8) ?[*:0]const u8 {
         return if (s.len == 0) null else s.ptr;
+    }
+
+    fn keymapSig(cfg: *const model.config.Config) u64 {
+        var h = std.hash.Wyhash.init(0);
+        inline for (.{ cfg.keyboard_layout, cfg.keyboard_variant, cfg.keyboard_model, cfg.keyboard_options }) |name| {
+            h.update(name);
+            h.update("\x00");
+        }
+        return h.final();
+    }
+
+    /// Build the keymap again after a config reload, if one of the
+    /// `keyboard_*` options changed. A keymap that does not build leaves the
+    /// old one in place: a typo must not take the keyboard away.
+    pub fn applyKeymap(kb: *Keyboard) void {
+        const cfg = &kb.server.wm.cfg;
+        const sig = keymapSig(cfg);
+        if (sig == kb.keymap_sig) return;
+
+        const context = xkb.Context.new(.no_flags) orelse {
+            log.warn("keymap reload: no xkb context, keeping the old keymap", .{});
+            return;
+        };
+        defer context.unref();
+        const keymap = buildKeymap(context, cfg) catch |err| {
+            log.warn("keymap reload failed ({t}), keeping the old keymap", .{err});
+            return;
+        };
+        defer keymap.unref();
+
+        if (!kb.device.toKeyboard().setKeymap(keymap)) {
+            log.warn("keymap reload: the keyboard refused the new keymap, keeping the old one", .{});
+            return;
+        }
+        kb.keymap_sig = sig;
+        log.info("keyboard {?s}: keymap reloaded, {d} layout(s)", .{ kb.device.name, keymap.numLayouts() });
     }
 
     /// What clients get as `wl_keyboard.repeat_info`: `repeat_rate` and

@@ -175,13 +175,6 @@ pub const Canvas = struct {
         c.cairo_stroke(cv.cr);
     }
 
-    pub fn strokeCircle(cv: *Canvas, cx: i32, cy: i32, r: i32, width: f64, col: Color) void {
-        cv.setColor(col);
-        c.cairo_set_line_width(cv.cr, width);
-        c.cairo_arc(cv.cr, @floatFromInt(cx), @floatFromInt(cy), @floatFromInt(r), 0, 2 * std.math.pi);
-        c.cairo_stroke(cv.cr);
-    }
-
     pub fn fillCircle(cv: *Canvas, cx: i32, cy: i32, r: i32, col: Color) void {
         cv.setColor(col);
         c.cairo_arc(cv.cr, @floatFromInt(cx), @floatFromInt(cy), @floatFromInt(r), 0, 2 * std.math.pi);

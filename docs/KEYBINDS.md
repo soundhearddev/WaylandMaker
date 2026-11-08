@@ -37,7 +37,15 @@ Opening programs, `close`, `exit` and toggles never repeat.
 
 ## The keyboard layout
 
-The layout is read from `XKB_DEFAULT_*` when a keyboard appears:
+The layout comes from `keyboard_layout` & co in `config.lua`, else from `XKB_DEFAULT_*`, else from the
+system's own setting. It is read when a keyboard appears:
+
+```lua
+keyboard_layout = "de"
+keyboard_options = "caps:escape"
+```
+
+The same through the environment:
 
 ```lua
 environment = { XKB_DEFAULT_LAYOUT = "de", XKB_DEFAULT_OPTIONS = "caps:escape" }
@@ -46,7 +54,7 @@ environment = { XKB_DEFAULT_LAYOUT = "de", XKB_DEFAULT_OPTIONS = "caps:escape" }
 ```
 
 or `export XKB_DEFAULT_LAYOUT=de` in `~/.config/wmaker-wl/env` (read by `wmaker-wl-session`).
-A layout change needs a new session (a reload does not re-create the keymap).
+A change of `keyboard_layout`, `keyboard_variant`, `keyboard_model` or `keyboard_options` takes effect on reload (`SIGHUP`). `XKB_DEFAULT_*` is read once at start, so a change there needs a new session.
 
 ## Autostart
 

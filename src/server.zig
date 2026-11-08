@@ -92,6 +92,7 @@ pub const Server = struct {
     seat: *wlr.Seat,
     cursor: Cursor = undefined,
     keyboards: wl.list.Head(Keyboard, .link) = undefined,
+    pointers: libinput.Pointer.List = undefined,
     monitors: wl.list.Head(Monitor, .link) = undefined,
 
     /// The view that has the keyboard focus (the model's `seat.focused`, as
@@ -178,6 +179,7 @@ pub const Server = struct {
             .seat = try wlr.Seat.create(wl_server, "seat0"),
         };
         server.keyboards.init();
+        server.pointers.init();
         server.monitors.init();
         server.layer_surfaces.init();
 
@@ -442,14 +444,18 @@ pub const Server = struct {
         server.armSettleTimer();
     }
 
-    /// What of config.lua lives in the devices and not in the model: the key
-    /// repeat the clients are told about. Runs after every pass, but does
+    /// What of config.lua lives in the devices and not in the model: the keymap,
+    /// the key repeat the clients are told about and the libinput settings. Runs after every pass, but does
     /// something only when a (re)load happened since the last time.
     fn applyConfig(server: *Server) void {
         if (server.applied_config_gen == server.wm.config_gen) return;
         server.applied_config_gen = server.wm.config_gen;
         var it = server.keyboards.iterator(.forward);
-        while (it.next()) |kb| kb.applyRepeatInfo();
+        while (it.next()) |kb| {
+            kb.applyKeymap();
+            kb.applyRepeatInfo();
+        }
+        libinput.reconfigure(&server.pointers, &server.wm.cfg);
     }
 
     /// Monitor changes wait for a quiet time before the rules apply: sleep
@@ -671,7 +677,9 @@ pub const Server = struct {
             },
             .pointer => {
                 server.cursor.attach(device);
-                libinput.configure(&server.wm.cfg, device);
+                libinput.Pointer.track(server.gpa, &server.pointers, &server.wm.cfg, device) catch |err| {
+                    log.warn("pointer {?s} will not follow config reloads: {t}", .{ device.name, err });
+                };
             },
             .touch => {
                 server.cursor.attach(device);

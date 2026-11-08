@@ -71,10 +71,6 @@ pub const Dock = struct {
     mapped: bool = true,
     lowered: bool = true,
     attract_icons: bool = false,
-
-    pub fn maxIcons(d: *const Dock) usize {
-        return d.icons.len;
-    }
 };
 
 pub const Omnipresence = enum { failed, not_applicable, success };

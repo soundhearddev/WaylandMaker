@@ -16,7 +16,7 @@
 - [ ] **`wmaker-wl --restart` / `RESTART` menu entry.** Re-executing the process would drop the existing
       compositor, which would end the session. `SIGHUP` reload
       (`pkill -HUP wmaker-wl`) covers the main need, new config without restarting the session.
-- [ ] **Window menus and the window list** (root menu is done): see section 4 of [TODO wlroots.md](TODO%20wlroots.md).
+- [ ] **Window menus** (the root menu and the window list are done): they need the title bars, see [TODO wlroots.md](TODO%20wlroots.md).
 
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
 - [ ] Workspace names per monitor.
@@ -46,7 +46,6 @@
 - [ ] Investigate `process.spawn` overhead with large address spaces. Consider `posix_spawn` or `vfork` if they offer lower fork costs.
 
 - [ ] Add benchmarks with animations and multiple outputs to `src/bench.zig`.
-      *Multiple outputs: done (`layout 4 outputs`). Animations: not yet.*
 - [ ] Run `bench -- --check` in CI against a stored baseline (CI runs the budgets; `--json` / `--baseline` exist, but a baseline from a hosted runner means little) to catch regressions. Current performance budgets are intentionally loose.
 - [ ] Document reference numbers for fixed, real hardware rather than a container.
 - [ ] Compare build configurations: `ReleaseSafe` vs. `ReleaseFast`, stripping, and LTO. If the performance difference is small, recommend `ReleaseSafe`.
@@ -68,13 +67,6 @@
 - [ ] XWayland (decide whether at all)
 - [ ] Notifications, a wallpaper, a screenshot key and a lock key in the default config, once the
       protocols above exist
-
-- [ ] `docs/KEYBINDS.md`/`README.md`: the key table and `--help` must stay in step; a test that
-      compares them would do.
-      *Done for the options: a test compares the README command-line block, the manual page and `--help`. The key table is not compared.*
-
-- [ ] Nothing in `zig build test` runs a compositor. Add a nested smoke test
-      (`WLR_BACKENDS=headless`): start, connect a client, open a window, exit.
 - [ ] Tests of the example DockApps run only with `test-all`.
 
 - [ ] **Profile expensive operations.** Investigate outliers in `invariants`, `outputs: order+primary`, and `monitors: rules+profile` to distinguish measurement noise from actual bottlenecks.
@@ -84,7 +76,8 @@
 - [ ] **Remove `protocol/`**: fetch `wlr-protocols` as a pinned dependency instead of keeping a copy of its XML, and prune
       the unused `scanner.generate` lines. Details: section 8 of [TODO wlroots.md](TODO%20wlroots.md).
 
-- [ ] Better live config reload: a reload does not re-create the keymap (`XKB_DEFAULT_*`), and
-      `environment` changes need a new session.
+- [ ] Better live config reload: `environment` changes (including `XKB_DEFAULT_*`) need a new session.
+      *Done: a reload re-creates the keymap when a `keyboard_*` option changed.*
 - [ ] libinput: the options (`accel_speed`, `accel_profile`, `click_method`, `left_handed`, `disable_while_typing`) are global;
       per-device settings (by name/vendor) are still open.
+      *Done: a config reload applies the settings to devices that are already there.*

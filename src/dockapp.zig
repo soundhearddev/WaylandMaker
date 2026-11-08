@@ -648,24 +648,6 @@ pub fn render(w: *std.Io.Writer, list: List, state: State) std.Io.Writer.Error!u
 }
 
 // ----------------------------------------------------------------------------
-// Launching
-// ----------------------------------------------------------------------------
-
-/// Spawn every entry with `AutoLaunch = Yes`, in list order. Call once at
-/// session start. Never fails the session: the rest of the list still runs.
-pub fn runAutoLaunch(
-    list: List,
-    spawn: *const fn (argv: []const []const u8) void,
-) void {
-    for (list.apps) |app| {
-        if (!app.autolaunch) continue;
-        if (app.command.len == 0) continue;
-        log.info("dockapp autolaunch: {s}", .{app.name});
-        spawn(app.command);
-    }
-}
-
-// ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
 

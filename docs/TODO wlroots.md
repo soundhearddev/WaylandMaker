@@ -13,9 +13,8 @@ animations cost one pass per displayed frame and nothing afterwards; the cursor 
 linux-dmabuf is connected to the scene, so a fullscreen client can be scanned out directly.
 Still open: running it on real monitors. (The layer-shell XML is vendored in `protocol/`.)
 
-- [ ] Root menu as scene buffers (cairo -> `wlr_scene_buffer`): the model (`wm_menu.zig`) and the `RootMenu` loader are there, nothing draws or opens it yet. This is the biggest hole of "Window Maker feel"; do it before the title bars
-- [ ] Menu input: pointer and keyboard navigation, submenus, `OPEN_MENU` from a file or a command, closing on a click outside
-- [ ] Window list menu, window menus
+*Done: the root menu and the window list are drawn as scene buffers and take pointer and keyboard (`menu_scene.zig`, `menu_model.zig`), with submenus, `OPEN_MENU` and closing on a click outside*
+- [ ] Window menus (the menu of one window, from its title bar): needs the title bars below
 - [ ] Miniaturize animation with real window snapshots (instead of the outline)
 - [ ] Title bars (own drawing) and the `No*` attributes; xdg-decoration (SSD vs CSD)
 - [ ] Dock/Clip on every output; several seats
@@ -29,7 +28,7 @@ Still open: running it on real monitors. (The layer-shell XML is vendored in `pr
 - [ ] Portal config for screen capture (`wlr` portal) once capture exists
 
 - [ ] **VT switch, suspend and resume**: outputs and input must come back after `Ctrl+Alt+F<N>` and after sleep. `server.zig` now listens to the session's active signal (redraw, manage pass, idle reset); wlroots restores the devices itself. Still to test on a TTY and after suspend
-- [ ] **GPU**: multi-GPU, a GPU that disappears, `WLR_RENDERER`/`WLR_DRM_DEVICES` documented
+- [ ] **GPU**: multi-GPU, a GPU that disappears. *`WLR_RENDERER`/`WLR_DRM_DEVICES` are documented in [DEBUGGING.md](DEBUGGING.md#graphics-and-backend-variables).*
 - [ ] **Output power and DPMS**: blank the screen on idle, wake on input (needs idle-notify first)
 - [ ] `xdg-dialog`, `xdg-toplevel-icon`, `tearing-control` (games): not served; check which real programs need them. Served now (`protocols.zig`, not run): `xdg-foreign`, `content-type`, `alpha-modifier`, `ext-data-control`
 - [ ] `security-context` and who may use which protocol: the manager and a global filter are in `protocols.zig` (sandboxed clients do not see capture, data-control, idle-notify, layer-shell, security-context). Open: input injection, and the wlr-protocols ones once they exist; not run

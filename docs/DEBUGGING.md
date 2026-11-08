@@ -129,6 +129,23 @@ Reference, ReleaseSafe on one 2025 server core, 1000 windows: layout about 20 µ
 so stutter is more likely to come from clients, rendering or the config than from the model. These numbers are
 from a container, not from fixed reference hardware, and I have not measured with real clients yet.
 
+## Graphics and backend variables
+
+wmaker-wl lets wlroots pick the backend, the GPU and the renderer. When that goes wrong (black screen,
+no outputs, the wrong GPU), these wlroots variables say what to use instead. Set them in the shell
+before `wmaker-wl`, or as `export NAME=value` in `~/.config/wmaker-wl/env` (read by `wmaker-wl-session`):
+
+| variable | what it does |
+|---|---|
+| `WLR_BACKENDS` | comma-separated backends to try: `drm`, `libinput`, `wayland`, `x11`, `headless` |
+| `WLR_DRM_DEVICES` | colon-separated list of DRM devices (`/dev/dri/card1:/dev/dri/card0`); the first one is the primary GPU that renders |
+| `WLR_RENDERER` | `gles2`, `vulkan` or `pixman` |
+| `WLR_RENDERER_ALLOW_SOFTWARE=1` | allow a software renderer when no GPU one works |
+| `WLR_NO_HARDWARE_CURSORS=1` | draw the pointer in the scene, not on a hardware plane (a flickering or missing pointer) |
+| `WLR_LIBINPUT_NO_DEVICES=1` | start without input devices (no error when there are none) |
+
+wlroots' own messages (backend, GPU, renderer chosen) go to stderr at `info` level, the same place as the log of wmaker-wl.
+
 ## A test that hangs
 
 `zig build test --test-timeout 60s` stops a test that runs longer than that and names it, instead of
