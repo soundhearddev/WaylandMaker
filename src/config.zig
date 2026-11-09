@@ -850,7 +850,7 @@ fn bindFunction(ctx: *Ctx, combo: []const u8) i32 {
 
 // ---- monitor(), monitor_profile() ---------------------------------------------
 
-const monitor_keys = [_][]const u8{ "enabled", "primary", "workspaces", "start_workspace", "restore_windows", "on_connect", "on_disconnect", "mode", "scale", "x", "y" };
+const monitor_keys = [_][]const u8{ "enabled", "primary", "workspaces", "start_workspace", "restore_windows", "on_connect", "on_disconnect", "mode", "scale", "x", "y", "workspace_names" };
 const profile_keys = [_][]const u8{ "name", "needs", "exact", "run" };
 
 /// Warn about keys of the table at `idx` that are not in `known` (a typo in
@@ -932,6 +932,16 @@ fn cMonitor(L: *lua.State) i32 {
     rule.workspaces = optIndex(L, 2, "workspaces", max_workspaces) catch return bad(ctx, "workspaces");
     if (rule.workspaces) |w| rule.workspaces = w + 1; // a count, not an index
     rule.start_workspace = optIndex(L, 2, "start_workspace", max_workspaces) catch return bad(ctx, "start_workspace");
+    lua.rawGetString(L, 2, "workspace_names");
+    if (lua.typeOf(L, -1) != lua.T_NIL) {
+        const names = readNameList(ctx.a, L) catch |e| {
+            lua.pop(L, 1);
+            if (e == error.OutOfMemory) ctx.oom = true else _ = bad(ctx, "workspace_names (a list of names)");
+            return 0;
+        };
+        lua.pop(L, 1);
+        rule.workspace_names = names;
+    } else lua.pop(L, 1);
     rule.on_connect = optCommand(ctx, 2, "on_connect") catch |e| {
         if (e == error.OutOfMemory) ctx.oom = true else _ = bad(ctx, "on_connect");
         return 0;
@@ -1406,6 +1416,31 @@ fn applyTyped(ctx: *Ctx, comptime name: []const u8) ParseError!void {
 }
 
 /// The options with a value of their own kind.
+
+/// The table on top of the Lua stack as a list of workspace names. Empty
+/// entries (and holes) are kept: they mean "this workspace has no name", so
+/// the names stay aligned with the workspace numbers.
+fn readNameList(a: std.mem.Allocator, L: *lua.State) ![]const []const u8 {
+    if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
+    const n = lua.rawLen(L, -1);
+    if (n > 256) return error.Invalid;
+    var list: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1;
+    while (i <= n) : (i += 1) {
+        lua.rawGetI(L, -1, @intCast(i));
+        const is_nil = lua.typeOf(L, -1) == lua.T_NIL;
+        const s = lua.toSlice(L, -1);
+        if (!is_nil and s == null) {
+            lua.pop(L, 1);
+            return error.Invalid;
+        }
+        const copy = try a.dupe(u8, s orelse "");
+        lua.pop(L, 1);
+        try list.append(a, copy);
+    }
+    return list.toOwnedSlice(a);
+}
+
 fn applySpecial(ctx: *Ctx, key: []const u8) ParseError!void {
     const L = ctx.L;
     const a = ctx.a;
@@ -1431,26 +1466,7 @@ fn applySpecial(ctx: *Ctx, key: []const u8) ParseError!void {
     }
 
     if (eql(u8, key, "workspace_names")) {
-        // Empty entries (and holes) are kept: they mean "this workspace has
-        // no name", so the names stay aligned with the workspace numbers.
-        if (lua.typeOf(L, -1) != lua.T_TABLE) return error.Invalid;
-        const n = lua.rawLen(L, -1);
-        if (n > 256) return error.Invalid;
-        var list: std.ArrayList([]const u8) = .empty;
-        var i: usize = 1;
-        while (i <= n) : (i += 1) {
-            lua.rawGetI(L, -1, @intCast(i));
-            const is_nil = lua.typeOf(L, -1) == lua.T_NIL;
-            const s = lua.toSlice(L, -1);
-            if (!is_nil and s == null) {
-                lua.pop(L, 1);
-                return error.Invalid;
-            }
-            const copy = try a.dupe(u8, s orelse "");
-            lua.pop(L, 1);
-            try list.append(a, copy);
-        }
-        cfg.workspace_names = try list.toOwnedSlice(a);
+        cfg.workspace_names = try readNameList(a, L);
         return;
     }
 
@@ -3044,6 +3060,25 @@ test "builtin_text is the shipped default config.lua (what --print-config prints
 }
 
 // ---- monitor(), monitor_profile() tests -------------------------------------------
+
+test "monitor(): workspace_names is a list per monitor, a wrong value drops the rule" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .arena = .init(std.testing.allocator) };
+    defer cfg.deinit();
+    try parseText(arena.allocator(), &cfg,
+        \\monitor("DP-1", { workspace_names = { "Main", "", "Web" } })
+        \\monitor("DP-2", { workspace_names = "Main" })
+    );
+    // The second rule is refused with a warning; the first one is kept.
+    try std.testing.expectEqual(@as(u32, 1), cfg.parse_warnings);
+    try std.testing.expectEqual(@as(usize, 1), cfg.monitor_rules.items.len);
+    const names = cfg.monitor_rules.items[0].workspace_names;
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqualStrings("Main", names[0]);
+    try std.testing.expectEqualStrings("", names[1]);
+    try std.testing.expectEqualStrings("Web", names[2]);
+}
 
 test "monitor() and monitor_profile() fill the rule and profile lists" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

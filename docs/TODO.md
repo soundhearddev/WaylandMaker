@@ -19,7 +19,6 @@
 - [ ] **Window menus** (the root menu and the window list are done): they need the title bars, see [TODO wlroots.md](TODO%20wlroots.md).
 
 - [ ] Detect mirrored monitors (`monitors.mirrored` exists) and treat them as one.
-- [ ] Workspace names per monitor.
 - [ ] `wlr-output-management` (kanshi, wlr-randr). Done without it: `monitor()` rules set `mode`, `scale`, `x`/`y` and on/off directly (`output.zig`, not run). Still to do: the protocol, instead of only running
       an external command (kanshi, wlr-randr) from `monitor_profile`.
 - [ ] Test hotplug against real plugging and unplugging. The model side is tested

@@ -13,6 +13,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 
 const types = @import("types.zig");
+const monitors = @import("monitors.zig");
 const workspace = @import("workspace.zig");
 const layout = @import("layout.zig");
 const config = @import("config.zig");
@@ -1300,6 +1301,27 @@ test "cycleOutput wraps around and skips outputs that are gone" {
     second.removed = true;
     try std.testing.expect(types.cycleOutput(&f.wm, f.out, true) == f.out);
     second.removed = false;
+}
+
+test "workspaceNames: the rule of the monitor wins over the global names" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const global = [_][]const u8{ "Main", "Web" };
+    f.wm.cfg.workspace_names = &global;
+    try std.testing.expectEqualStrings("Main", types.workspaceNames(&f.wm, f.out)[0]);
+
+    // A rule without names changes nothing.
+    const plain = [_]monitors.Rule{.{ .match = "*" }};
+    f.wm.monitors.rules = &plain;
+    try std.testing.expectEqualStrings("Main", types.workspaceNames(&f.wm, f.out)[0]);
+
+    const tv = [_][]const u8{"TV"};
+    const named = [_]monitors.Rule{.{ .match = "*", .workspace_names = &tv }};
+    f.wm.monitors.rules = &named;
+    try std.testing.expectEqual(@as(usize, 1), types.workspaceNames(&f.wm, f.out).len);
+    try std.testing.expectEqualStrings("TV", types.workspaceNames(&f.wm, f.out)[0]);
+    f.wm.monitors.rules = &.{};
+    f.wm.cfg.workspace_names = &.{};
 }
 
 test "focus_output_next works on an empty output, and commands then apply there" {

@@ -219,11 +219,12 @@ pub const Menu = struct {
         try m.levels.append(m.gpa, undefined);
         var rows: std.ArrayList(Row) = .empty;
         if (wm.outputs.first()) |out| {
+            const names = types.workspaceNames(wm, out);
             var i: u32 = 0;
             while (i < out.workspace_count) : (i += 1) {
                 const mark: []const u8 = if (i == out.active) "* " else "  ";
-                const label = if (i < wm.cfg.workspace_names.len and wm.cfg.workspace_names[i].len > 0)
-                    try std.fmt.allocPrintSentinel(m.a(), "{s}{d}: {s}", .{ mark, i + 1, clipUtf8(wm.cfg.workspace_names[i], 64) }, 0)
+                const label = if (i < names.len and names[i].len > 0)
+                    try std.fmt.allocPrintSentinel(m.a(), "{s}{d}: {s}", .{ mark, i + 1, clipUtf8(names[i], 64) }, 0)
                 else
                     try std.fmt.allocPrintSentinel(m.a(), "{s}Workspace {d}", .{ mark, i + 1 }, 0);
                 try rows.append(m.a(), .{ .label = label, .kind = .{ .goto_workspace = i } });

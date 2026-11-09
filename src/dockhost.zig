@@ -402,6 +402,11 @@ pub fn update(wm: *WindowManager, now_ms: u64) Host {
     primary.reserved = .{};
     const m = model orelse return host;
 
+    // The workspace names of the monitor the Dock is on.
+    if (m.setConfigNames(types.workspaceNames(wm, primary))) |changed| {
+        if (changed) host.changed = true;
+    } else |err| log.warn("workspace names: {t}", .{err});
+
     // The rows of the screen must be known before tiles are added to the
     // Dock (a new tile has to lie on the screen); `layout` sets them.
     const w = primary.rect.w;

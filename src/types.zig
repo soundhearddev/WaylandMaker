@@ -781,6 +781,15 @@ pub fn primaryOutput(wm: *WindowManager) ?*Output {
     return if (n > 0) live[0] else null;
 }
 
+/// The workspace names that apply on `out`: the `workspace_names` of the
+/// `monitor()` rule that matches it, else the global `workspace_names`.
+pub fn workspaceNames(wm: *WindowManager, out: *const Output) []const []const u8 {
+    if (monitors.findRule(wm.monitors.rules, &out.mon)) |r| {
+        if (r.workspace_names.len > 0) return r.workspace_names;
+    }
+    return wm.cfg.workspace_names;
+}
+
 /// The live outputs, in the order `output_order` asks for (left to right by
 /// default, or the order the monitors were announced). Fills `buf`, returns how many.
 pub fn liveOutputs(wm: *WindowManager, buf: *[monitors.max_monitors]*Output) usize {

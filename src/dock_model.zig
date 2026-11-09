@@ -145,6 +145,10 @@ pub const Model = struct {
     scr: wdock.Screen,
     slots: std.ArrayList(Slot) = .empty,
     names: []const []const u8 = &.{},
+    /// The workspace names WMState carried, and the config.lua names `names`
+    /// was last built from (`setConfigNames` compares against them).
+    state_names: []const []const u8 = &.{},
+    applied_names: []const []const u8 = &.{},
     workspace_count: u32,
     /// Parallel to scr.drawers.
     drawer_names: std.ArrayList([]const u8) = .empty,
@@ -202,18 +206,11 @@ pub const Model = struct {
             try m.drawer_names.append(gpa, try a.dupe(u8, d.name));
         }
 
-        // The Clip shows a name under the workspace number only when somebody
-        // chose one: `workspace_names` in config.lua, or a name edited by hand
-        // in WMState. Window Maker's own placeholders ("Workspace 1", ...)
-        // are not names and are dropped, so workspaces do not end up with a
-        // label on some and none on others.
-        const from_config = cfg_names.len > 0;
-        const names = if (from_config) cfg_names else list.workspace_names;
-        const names_copy = try a.alloc([]const u8, names.len);
-        for (names, 0..) |n, i| {
-            names_copy[i] = if (!from_config and isDefaultWorkspaceName(n, i)) "" else try a.dupe(u8, n);
-        }
-        m.names = names_copy;
+        // The names WMState carried: they show when config.lua names none.
+        const state_copy = try a.alloc([]const u8, list.workspace_names.len);
+        for (list.workspace_names, 0..) |n, i| state_copy[i] = try a.dupe(u8, n);
+        m.state_names = state_copy;
+        try m.useNames(cfg_names);
 
         for (list.apps) |app| {
             _ = m.insert(app) catch |err| {
@@ -346,6 +343,34 @@ pub const Model = struct {
         if (!std.mem.startsWith(u8, name, prefix)) return false;
         const n = std.fmt.parseInt(usize, name[prefix.len..], 10) catch return false;
         return n == index + 1;
+    }
+
+    /// The Clip shows a name under the workspace number only when somebody
+    /// chose one: `workspace_names` in config.lua (global or of the monitor
+    /// the Dock is on), or a name edited by hand in WMState. Window Maker's
+    /// own placeholders ("Workspace 1", ...) are not names and are dropped, so
+    /// workspaces do not end up with a label on some and none on others.
+    fn useNames(m: *Model, cfg_names: []const []const u8) !void {
+        const a = m.arena.allocator();
+        const from_config = cfg_names.len > 0;
+        const names = if (from_config) cfg_names else m.state_names;
+        const names_copy = try a.alloc([]const u8, names.len);
+        for (names, 0..) |n, i| {
+            names_copy[i] = if (!from_config and isDefaultWorkspaceName(n, i)) "" else try a.dupe(u8, n);
+        }
+        m.names = names_copy;
+        m.applied_names = cfg_names;
+    }
+
+    /// The config.lua names to show: the global ones, or those of the
+    /// `monitor()` rule of the monitor the Dock is on (it moves when the
+    /// primary monitor changes). true: the labels changed, the Clip needs a
+    /// redraw.
+    pub fn setConfigNames(m: *Model, cfg_names: []const []const u8) !bool {
+        const same = cfg_names.len == m.applied_names.len and (cfg_names.len == 0 or cfg_names.ptr == m.applied_names.ptr);
+        if (same) return false;
+        try m.useNames(cfg_names);
+        return true;
     }
 
     pub fn workspaceName(m: *const Model, ws: u32) ?[]const u8 {
@@ -1415,4 +1440,30 @@ test "nextLaunchExpiry: none, then the time left, then due -- and expireLaunchin
     try std.testing.expectEqual(@as(?u32, 0), m.nextLaunchExpiry(1151, 100));
     try std.testing.expect(m.expireLaunching(1151, 100));
     try std.testing.expectEqual(@as(?u32, null), m.nextLaunchExpiry(1151, 100));
+}
+
+test "Model: setConfigNames switches between names of different monitors" {
+    var m = try Model.init(std.testing.allocator, .{ .workspace_names = &.{ "Home", "Web" } }, &.{}, 3);
+    defer m.deinit();
+    // No config names: the names WMState carried.
+    try std.testing.expectEqualStrings("Home", m.workspaceName(0).?);
+
+    const global = [_][]const u8{ "Main", "", "Mail" };
+    try std.testing.expect(try m.setConfigNames(&global));
+    try std.testing.expectEqualStrings("Main", m.workspaceName(0).?);
+    try std.testing.expect(m.workspaceName(1) == null);
+    try std.testing.expectEqualStrings("Mail", m.workspaceName(2).?);
+    // The same names again: nothing to redraw.
+    try std.testing.expect(!try m.setConfigNames(&global));
+
+    const other = [_][]const u8{"TV"};
+    try std.testing.expect(try m.setConfigNames(&other));
+    try std.testing.expectEqualStrings("TV", m.workspaceName(0).?);
+    try std.testing.expect(m.workspaceName(2) == null);
+
+    // Back to none: WMState's names show again.
+    try std.testing.expect(try m.setConfigNames(&.{}));
+    try std.testing.expectEqualStrings("Home", m.workspaceName(0).?);
+    try std.testing.expectEqualStrings("Web", m.workspaceName(1).?);
+    try std.testing.expect(!try m.setConfigNames(&.{}));
 }

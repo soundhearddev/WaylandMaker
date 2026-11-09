@@ -57,8 +57,14 @@ monitor_profile{ name = "mobile", needs = { "eDP-1" }, exact = true,
 | `primary` | default target for new windows, Dock and Clip |
 | `workspaces` | number of workspaces on this monitor (default `workspace_count`) |
 | `start_workspace` | workspace shown when the monitor is connected (1-based) |
+| `workspace_names` | list of names for the workspaces of this monitor, e.g. `{ "TV", "", "Games" }`; replaces the global `workspace_names` there (see below) |
 | `restore_windows` | `false`: windows do not return (default `true`) |
 | `on_connect` / `on_disconnect` | command (string or list), started detached |
+
+`workspace_names` in a `monitor()` rule is used where that monitor's workspaces are shown: the Clip
+(while the monitor is the primary one, it follows when the primary changes) and the workspace menu
+(for the first monitor in the list). A monitor without names, or with an empty list, uses the global
+`workspace_names`. An empty string in the list means "no name" for that workspace.
 
 For profiles, `needs` has one name per required monitor. Each monitor satisfies at most one name, even
 when `"*"` is among them. `exact = true` requires that no other monitor is connected. Of several matching
@@ -79,6 +85,6 @@ the profile chosen last, and for windows `home=<key>/wsN`. See [DEBUGGING.md](DE
 
 - Setting modes, scale and position directly through `wlr-output-management` instead of only running hook
   commands.
-- Dock and Clip per monitor, and separate workspace names per monitor.
+- Dock and Clip on every monitor (they exist on the primary one only).
 - Real hotplug testing. Everything is tested on the model, not against a running compositor with a monitor
   actually being plugged in and out.

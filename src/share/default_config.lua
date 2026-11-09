@@ -24,6 +24,7 @@ monitor_settle_ms = 400          -- a change of the monitors counts after this m
 -- A monitor is named by its connector ("DP-1"), by "make model" or by a part
 -- of its description; "*" means every monitor. The most specific rule wins.
 --   monitor("DP-1", { primary = true, workspaces = 6, start_workspace = 1 })
+--   monitor("HDMI-A-1", { workspace_names = { "TV", "", "Games" } })
 --   monitor("eDP-1", { enabled = false })              -- ignore the laptop screen
 --   monitor("*", { on_connect = "notify-send 'monitor connected'" })
 -- Windows taken off a monitor that went away return when it comes back

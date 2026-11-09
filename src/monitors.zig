@@ -235,6 +235,9 @@ pub const Rule = struct {
     mode: ?Mode = null,
     scale: ?f32 = null,
     position: ?Position = null,
+    /// Names of the workspaces of this monitor ("" or missing: no name).
+    /// Empty: the global `workspace_names` apply.
+    workspace_names: []const []const u8 = &.{},
 };
 
 /// The rule for `info`: the most specific pattern wins, among equals the one
