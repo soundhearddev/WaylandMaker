@@ -14,9 +14,13 @@
 //   invariants    the invariant check (WMAKER_CHECKS=1 runs it every sequence)
 //   outputs       monitor ordering and primary lookup with 16 monitors
 //   monitors      profile and rule matching
+//   animation     motion.visualState for every window, as one animated frame
+//                 asks for it: all windows moving (a spring restarts on every
+//                 call) and all at rest (the common case while only one window
+//                 changes)
 //
 // What it does NOT measure: real clients, frame times, missed deadlines,
-// rendering, the Dock, animations. Numbers from here say "the model is not the
+// rendering, the Dock, the requests sent to the clients. Numbers from here say "the model is not the
 // problem" or "the model became quadratic", nothing about what a user sees.
 //
 // How a number is made (so that it can be trusted, or not):
@@ -58,6 +62,7 @@ const layout = @import("layout.zig");
 const monitors = @import("monitors.zig");
 const invariants = @import("invariants.zig");
 const perf = @import("perf.zig");
+const motion = @import("motion.zig");
 const config = @import("config.zig");
 const fileutil = @import("fileutil.zig");
 
@@ -399,6 +404,37 @@ fn runLayoutAll(c: LayoutCtx) !void {
     for (c.m.outs) |o| layout.compute(o.ws(), &c.m.wm.cfg, c.follow);
 }
 
+const AnimCtx = struct { m: *Model, phase: i32 = 0, moving: bool };
+
+/// What an animated frame does for every window: ask `visualState` where it
+/// is drawn. `moving`: the destination changes before every call, so each
+/// window starts a new spring; else the windows have arrived and the call
+/// only has to see that nothing moves.
+fn runVisual(c: *AnimCtx) !void {
+    if (c.moving) {
+        c.phase = 1 - c.phase;
+        for (c.m.wins) |w| w.target.x = c.phase * 200;
+    }
+    var sink: i32 = 0;
+    for (c.m.wins) |w| {
+        const v = motion.visualState(&c.m.wm, w);
+        sink +%= v.x +% v.y;
+    }
+    std.mem.doNotOptimizeAway(sink);
+}
+
+/// Place the windows and run one pass, so that `has_shown` and the
+/// workspace they were shown on are set: from then on `visualState` animates.
+fn animSetup(m: *Model, moving: bool) !AnimCtx {
+    try m.placeAll(1);
+    m.wm.cfg.animations = true;
+    for (m.wins) |w| w.opened = true; // no open animation: only movement is measured
+    var c: AnimCtx = .{ .m = m, .moving = false };
+    try runVisual(&c);
+    c.moving = moving;
+    return c;
+}
+
 const MoveCtx = struct { m: *Model, to: u32 };
 
 fn runMove(c: *MoveCtx) !void {
@@ -452,6 +488,19 @@ fn runCases(io: std.Io, gpa: std.mem.Allocator, o: Opts) !void {
             defer m.deinit();
             try m.placeAll(4);
             try measure(io, o, "layout stacks of 4", n, cheap, budget(n, 30, 40), LayoutCtx{ .m = m, .follow = true }, runLayout);
+        }
+        // Animation: every window asks `visualState` once, as in a frame.
+        {
+            const m = try Model.init(mgpa, 1, n);
+            defer m.deinit();
+            var ac = try animSetup(m, true);
+            try measure(io, o, "animation: all windows moving", n, cheap, budget(n, 200, 40), &ac, runVisual);
+        }
+        {
+            const m = try Model.init(mgpa, 1, n);
+            defer m.deinit();
+            var ac = try animSetup(m, false);
+            try measure(io, o, "animation: all windows at rest", n, cheap, budget(n, 60, 40), &ac, runVisual);
         }
         // The same windows over four outputs: what a manage pass lays out on
         // a multi-monitor desk (the work per window is the same, the number of

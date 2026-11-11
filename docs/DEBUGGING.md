@@ -86,8 +86,8 @@ test names appear once in the output.
 **Scope.** This is a *model* benchmark: synthetic models with 1, 10, 50, 100, 500 and 1000 windows, no
 compositor, no clients, no rendering. It times `layout.compute` (columns and stacks, with and without
 `follow`, and the same windows spread over four outputs), placing all windows, moving all of them to
-another workspace, the invariant check, monitor order and primary with 16 monitors, and rule and profile
-lookup. It says "the model is not the problem" or "the model became quadratic". It says nothing about frame
+another workspace, the invariant check, `motion.visualState` for every window (all moving, all at rest),
+monitor order and primary with 16 monitors, and rule and profile lookup. It says "the model is not the problem" or "the model became quadratic". It says nothing about frame
 times, missed deadlines or what real clients cost; for those see the probes above (`perf`, `SIGUSR1`).
 
 **How a number is made.**
